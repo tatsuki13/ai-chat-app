@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 4, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/tatsu/ai-app/app/layout.js"],"sourcesContent":["export default function RootLayout({ children }) {\r\n  return (\r\n    <html>\r\n      <body>{children}</body>\r\n    </html>\r\n  );\r\n}"],"names":["RootLayout","children"],"mappings":";;;;;;AAAe,SAASA,WAAW,EAAEC,QAAQ,EAAE;IAC7C,qBACE,8OAAC;kBACC,cAAA,8OAAC;sBAAMA;;;;;;;;;;;AAGb"}},
+    {"offset": {"line": 33, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/tatsu/ai-app/node_modules/next/src/server/route-modules/app-page/vendored/rsc/react-jsx-dev-runtime.ts"],"sourcesContent":["module.exports = (\n  require('../../module.compiled') as typeof import('../../module.compiled')\n).vendored['react-rsc']!.ReactJsxDevRuntime\n"],"names":["module","exports","require","vendored","ReactJsxDevRuntime"],"mappings":"AAAAA,OAAOC,OAAO,GACZC,QAAQ,4HACRC,QAAQ,CAAC,YAAY,CAAEC,kBAAkB","ignoreList":[0]}}]
+}
