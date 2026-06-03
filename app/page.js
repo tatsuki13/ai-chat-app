@@ -5,7 +5,7 @@ import { useState } from 'react';
 export default function ChatPage() {
   // メッセージの履歴を保存する状態（最初はボットからの挨拶を入れておきます）
   const [messages, setMessages] = useState([
-    { id: 1, text: 'こんにちは！何かお手伝いできることはありますか？', sender: 'bot' }
+    { id: 1, text: 'こんにちは！それでは人生会議を始めて行きましょう！', sender: 'bot' }
   ]);
   // テキストボックスの入力内容を保存する状態
   const [inputText, setInputText] = useState('');

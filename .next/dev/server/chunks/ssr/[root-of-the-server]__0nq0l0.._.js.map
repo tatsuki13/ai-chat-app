@@ -1,6 +1,0 @@
-{
-  "version": 3,
-  "sources": [],
-  "sections": [
-    {"offset": {"line": 10, "column": 0}, "map": {"version":3,"sources":["file:///C:/Users/tatsu/ai-app/app/page.js"],"sourcesContent":["export default function Page() {\r\n  return <h1>AIチャットアプリ開発開始！</h1>;\r\n}"],"names":["Page"],"mappings":";;;;;;AAAe,SAASA;IACtB,qBAAO,8OAAC;kBAAG;;;;;;AACb"}}]
-}
