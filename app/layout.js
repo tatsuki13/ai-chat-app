@@ -1,7 +1,7 @@
 export default function RootLayout({ children }) {
   return (
-    <html>
-      <body>{children}</body>
+    <html lang="ja">
+      <body style={{ margin: 0 }}>{children}</body>
     </html>
   );
 }
