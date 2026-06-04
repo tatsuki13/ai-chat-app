@@ -16,7 +16,7 @@ export async function POST(req: Request) {
     }
 
     const response = await client.responses.create({
-      model: "gpt-5.5",
+      model: "gpt-5.4 mini",
       input: [
         {
           role: "system",

@@ -6,72 +6,72 @@ const topics = [
   {
     question: '最近の生活で、これからも続けたいことは何ですか。',
     lead: 'まずは、今の暮らしの中で大切にしていることから聞かせてください。',
-    acknowledgement:
+    fallback:
       '毎日の中で続けたいことには、その人らしさがよく表れますね。'
   },
   {
     question: '年齢を重ねても、自分らしく暮らすために大切にしたいことは何ですか。',
     lead: '次は、少し先の暮らし方について考えてみましょう。',
-    acknowledgement:
+    fallback:
       '自分らしさの軸が見えてくると、これからの選び方も少し考えやすくなります。'
   },
   {
     question: '将来、どのような場所や環境で暮らしていたいと思いますか。',
     lead: '暮らす場所や環境についても、思い浮かぶ範囲で聞かせてください。',
-    acknowledgement:
+    fallback:
       'どんな場所で落ち着けるかを考えることは、安心できる暮らしを考える手がかりになります。'
   },
   {
     question:
       '家事、買い物、通院、入浴などで手助けが必要になったら、どんな助け方なら受け入れやすいですか。',
     lead: 'もし手助けが必要になったときのことも、少し具体的に話してみましょう。',
-    acknowledgement:
+    fallback:
       '助けてもらい方を先に言葉にしておくと、必要なときに頼みやすくなります。'
   },
   {
     question:
       '家族に手伝ってもらうことについて、気になることや遠慮してしまうことはありますか。',
     lead: '家族との関わり方についても、気になることがあれば聞かせてください。',
-    acknowledgement:
+    fallback:
       '遠慮や気がかりも大事な気持ちです。そこを無理に消さずに考えられるとよさそうです。'
   },
   {
     question:
       '自分で医療や介護の方針を決めることが難しくなったら、誰に相談して決めてほしいですか。',
     lead: '次は、医療や介護の方針を一緒に考えてほしい相手についてです。',
-    acknowledgement:
+    fallback:
       '相談してほしい人を考えておくことは、自分の考えを守るための大事な準備になります。'
   },
   {
     question:
       '重い病気になったとき、治療を考えるうえで一番大切にしたいことは何ですか。',
     lead: '少し重い話題ですが、治療で大切にしたいことも確認しておきましょう。',
-    acknowledgement:
+    fallback:
       '治療で何を大切にしたいかは、人によって違います。今の言葉は大事な手がかりです。'
   },
   {
     question:
       '人生の最終段階を考えたとき、どこで、誰と、どのように過ごせると安心だと思いますか。',
     lead: '最後に、人生の最終段階を安心して過ごすための希望を聞かせてください。',
-    acknowledgement:
+    fallback:
       '安心できる過ごし方を言葉にしておくことは、周りの人にとっても大切な道しるべになります。'
   }
 ];
 
 const openingMessage = `${topics[0].lead}\n\n${topics[0].question}`;
 
-function createAssistantReply(topicIndex) {
+function getFallbackReply(topicIndex) {
   const currentTopic = topics[topicIndex];
   const nextTopic = topics[topicIndex + 1];
 
   if (!nextTopic) {
-    return `${currentTopic.acknowledgement}\n\nここまで話してくれてありがとうございます。今日の会話で出てきた希望や気がかりは、家族や支援者と話すときの材料になります。`;
+    return `${currentTopic.fallback}\n\nここまで話してくれてありがとうございます。今日の会話で出てきた希望や気がかりは、家族や支援者と話すときの材料になります。`;
   }
 
-  return `${currentTopic.acknowledgement}\n\n${nextTopic.lead}\n${nextTopic.question}`;
+  return `${currentTopic.fallback}\n\n${nextTopic.lead}\n${nextTopic.question}`;
 }
 
-function createSkipReply(topicIndex) {
+function getSkipReply(topicIndex) {
   const nextTopic = topics[topicIndex + 1];
 
   if (!nextTopic) {
@@ -81,12 +81,56 @@ function createSkipReply(topicIndex) {
   return `このお題は飛ばしましょう。話せるところからで大丈夫です。\n\n${nextTopic.lead}\n${nextTopic.question}`;
 }
 
+function buildApiPrompt({ messages, topicIndex, userAnswer }) {
+  const currentTopic = topics[topicIndex];
+  const nextTopic = topics[topicIndex + 1];
+  const recentConversation = messages
+    .slice(-8)
+    .map((message) => {
+      const role = message.sender === 'user' ? '利用者' : 'AI';
+      return `${role}: ${message.text}`;
+    })
+    .join('\n');
+
+  return `
+あなたは、これからの暮らし・医療・介護について話しやすくする対話支援AIです。
+利用者の返答を受け止めたうえで、次のお題を自然に振ってください。
+
+会話の目的:
+- 利用者が自分の希望、気がかり、大切にしたいことを言葉にしやすくする。
+- 医療や介護の方針を断定せず、利用者本人の考えを尊重する。
+- 重い話題でも、落ち着いた、やわらかい言葉で進める。
+
+返答ルール:
+- 日本語で返答する。
+- 3から5文くらいにする。
+- 最初に、利用者の答えを1から2文で具体的に受け止める。
+- 勝手な診断、治療判断、介護方針の決定はしない。
+- 次のお題がある場合は、最後に次のお題を自然に質問する。
+- 次のお題がない場合は、感謝を伝え、家族や支援者と話す材料になることを短く伝える。
+- 箇条書きではなく、会話文として返す。
+
+直近の会話:
+${recentConversation || 'まだ会話はありません。'}
+
+今のお題:
+${currentTopic.question}
+
+利用者の返答:
+${userAnswer}
+
+次のお題:
+${nextTopic ? nextTopic.question : 'なし。これが最後のお題です。'}
+`.trim();
+}
+
 export default function ChatPage() {
   const [messages, setMessages] = useState([
     { id: 1, text: openingMessage, sender: 'bot' }
   ]);
   const [inputText, setInputText] = useState('');
   const [currentTopicIndex, setCurrentTopicIndex] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef(null);
 
   const isComplete = currentTopicIndex >= topics.length;
@@ -94,12 +138,13 @@ export default function ChatPage() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, isLoading]);
 
   const resetConversation = () => {
     setMessages([{ id: 1, text: openingMessage, sender: 'bot' }]);
     setInputText('');
     setCurrentTopicIndex(0);
+    setIsLoading(false);
   };
 
   const appendMessages = (newMessages) => {
@@ -116,27 +161,69 @@ export default function ChatPage() {
     });
   };
 
-  const handleSendMessage = (event) => {
+  const requestAssistantReply = async (userAnswer) => {
+    const prompt = buildApiPrompt({
+      messages,
+      topicIndex: currentTopicIndex,
+      userAnswer
+    });
+
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        message: prompt
+      })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || 'GPT API から返答を取得できませんでした。');
+    }
+
+    return data.reply || getFallbackReply(currentTopicIndex);
+  };
+
+  const handleSendMessage = async (event) => {
     event.preventDefault();
 
     const trimmedText = inputText.trim();
-    if (!trimmedText || isComplete) return;
-
-    const assistantReply = createAssistantReply(currentTopicIndex);
-
-    appendMessages([
-      { text: trimmedText, sender: 'user' },
-      { text: assistantReply, sender: 'bot' }
-    ]);
+    if (!trimmedText || isComplete || isLoading) return;
 
     setInputText('');
-    setCurrentTopicIndex((previousIndex) => previousIndex + 1);
+    setIsLoading(true);
+
+    try {
+      const assistantReply = await requestAssistantReply(trimmedText);
+
+      appendMessages([
+        { text: trimmedText, sender: 'user' },
+        { text: assistantReply, sender: 'bot' }
+      ]);
+
+      setCurrentTopicIndex((previousIndex) => previousIndex + 1);
+    } catch (error) {
+      console.error(error);
+      appendMessages([
+        { text: trimmedText, sender: 'user' },
+        {
+          text:
+            'AIの返答を取得できませんでした。APIキーや通信状態を確認して、同じ内容でもう一度送信してください。',
+          sender: 'bot'
+        }
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleSkipTopic = () => {
-    if (isComplete) return;
+    if (isComplete || isLoading) return;
 
-    const assistantReply = createSkipReply(currentTopicIndex);
+    const assistantReply = getSkipReply(currentTopicIndex);
 
     appendMessages([{ text: assistantReply, sender: 'bot' }]);
     setCurrentTopicIndex((previousIndex) => previousIndex + 1);
@@ -194,7 +281,7 @@ export default function ChatPage() {
               これからの暮らし相談
             </h1>
             <p style={{ margin: '4px 0 0', fontSize: '13px', opacity: 0.9 }}>
-              答えやすい範囲で、ひとつずつ話せます
+              GPT API が返答を受け止め、次のお題へつなげます
             </p>
           </div>
 
@@ -286,6 +373,25 @@ export default function ChatPage() {
               {message.text}
             </div>
           ))}
+
+          {isLoading && (
+            <div
+              style={{
+                alignSelf: 'flex-start',
+                background: '#ffffff',
+                color: '#5f6c72',
+                padding: '12px 14px',
+                border: '1px solid #e0d8c8',
+                borderRadius: '16px 16px 16px 4px',
+                maxWidth: '82%',
+                lineHeight: 1.7,
+                fontSize: '15px'
+              }}
+            >
+              AIが返答を考えています...
+            </div>
+          )}
+
           <div ref={messagesEndRef} />
         </div>
 
@@ -309,28 +415,28 @@ export default function ChatPage() {
                 ? '最初から始めると、もう一度話せます'
                 : 'ここに返答を入力'
             }
-            disabled={isComplete}
+            disabled={isComplete || isLoading}
             style={{
               minWidth: 0,
               padding: '12px',
               borderRadius: '6px',
               border: '1px solid #cfc5b2',
-              background: isComplete ? '#eee8dc' : 'white',
+              background: isComplete || isLoading ? '#eee8dc' : 'white',
               fontSize: '15px'
             }}
           />
           <button
             type="button"
             onClick={handleSkipTopic}
-            disabled={isComplete}
+            disabled={isComplete || isLoading}
             style={{
               padding: '10px 14px',
               background: '#ffffff',
               color: '#245c52',
               border: '1px solid #9eb2a7',
               borderRadius: '6px',
-              cursor: isComplete ? 'default' : 'pointer',
-              opacity: isComplete ? 0.5 : 1,
+              cursor: isComplete || isLoading ? 'default' : 'pointer',
+              opacity: isComplete || isLoading ? 0.5 : 1,
               whiteSpace: 'nowrap'
             }}
           >
@@ -338,20 +444,20 @@ export default function ChatPage() {
           </button>
           <button
             type="submit"
-            disabled={isComplete}
+            disabled={isComplete || isLoading}
             style={{
               padding: '10px 18px',
               background: '#d26f3f',
               color: 'white',
               border: '1px solid #d26f3f',
               borderRadius: '6px',
-              cursor: isComplete ? 'default' : 'pointer',
-              opacity: isComplete ? 0.55 : 1,
+              cursor: isComplete || isLoading ? 'default' : 'pointer',
+              opacity: isComplete || isLoading ? 0.55 : 1,
               whiteSpace: 'nowrap',
               fontWeight: 700
             }}
           >
-            送信
+            {isLoading ? '送信中' : '送信'}
           </button>
         </form>
       </section>
