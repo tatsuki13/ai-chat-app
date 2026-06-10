@@ -2,231 +2,497 @@
 
 import { useEffect, useRef, useState } from 'react';
 
+const SILENCE_THRESHOLD_MS = 10000;
+
 const topics = [
   {
-    question: '最近の生活で、これからも続けたいことは何ですか。',
-    lead: 'まずは、今の暮らしの中で大切にしていることから聞かせてください。',
-    fallback:
-      '毎日の中で続けたいことには、その人らしさがよく表れますね。'
+    question: '最近の生活で、これからも続けたいことは何ですか。'
   },
   {
-    question: '年齢を重ねても、自分らしく暮らすために大切にしたいことは何ですか。',
-    lead: '次は、少し先の暮らし方について考えてみましょう。',
-    fallback:
-      '自分らしさの軸が見えてくると、これからの選び方も少し考えやすくなります。'
+    question: '年齢を重ねても、自分らしく暮らすために大切にしたいことは何ですか。'
   },
   {
-    question: '将来、どのような場所や環境で暮らしていたいと思いますか。',
-    lead: '暮らす場所や環境についても、思い浮かぶ範囲で聞かせてください。',
-    fallback:
-      'どんな場所で落ち着けるかを考えることは、安心できる暮らしを考える手がかりになります。'
+    question: '将来、どのような場所や環境で暮らしていたいと思いますか。'
   },
   {
     question:
-      '家事、買い物、通院、入浴などで手助けが必要になったら、どんな助け方なら受け入れやすいですか。',
-    lead: 'もし手助けが必要になったときのことも、少し具体的に話してみましょう。',
-    fallback:
-      '助けてもらい方を先に言葉にしておくと、必要なときに頼みやすくなります。'
+      '家事、買い物、通院、入浴などで手助けが必要になったら、どんな助け方なら受け入れやすいですか。'
   },
   {
     question:
-      '家族に手伝ってもらうことについて、気になることや遠慮してしまうことはありますか。',
-    lead: '家族との関わり方についても、気になることがあれば聞かせてください。',
-    fallback:
-      '遠慮や気がかりも大事な気持ちです。そこを無理に消さずに考えられるとよさそうです。'
+      '家族に手伝ってもらうことについて、気になることや遠慮してしまうことはありますか。'
   },
   {
     question:
-      '自分で医療や介護の方針を決めることが難しくなったら、誰に相談して決めてほしいですか。',
-    lead: '次は、医療や介護の方針を一緒に考えてほしい相手についてです。',
-    fallback:
-      '相談してほしい人を考えておくことは、自分の考えを守るための大事な準備になります。'
+      '自分で医療や介護の方針を決めることが難しくなったら、誰に相談して決めてほしいですか。'
   },
   {
     question:
-      '重い病気になったとき、治療を考えるうえで一番大切にしたいことは何ですか。',
-    lead: '少し重い話題ですが、治療で大切にしたいことも確認しておきましょう。',
-    fallback:
-      '治療で何を大切にしたいかは、人によって違います。今の言葉は大事な手がかりです。'
+      '重い病気になったとき、治療を考えるうえで一番大切にしたいことは何ですか。'
   },
   {
     question:
-      '人生の最終段階を考えたとき、どこで、誰と、どのように過ごせると安心だと思いますか。',
-    lead: '最後に、人生の最終段階を安心して過ごすための希望を聞かせてください。',
-    fallback:
-      '安心できる過ごし方を言葉にしておくことは、周りの人にとっても大切な道しるべになります。'
+      '人生の最終段階を考えたとき、どこで、誰と、どのように過ごせると安心だと思いますか。'
   }
 ];
 
-const openingMessage = `${topics[0].lead}\n\n${topics[0].question}`;
-
-function getFallbackReply(topicIndex) {
-  const currentTopic = topics[topicIndex];
-  const nextTopic = topics[topicIndex + 1];
-
-  if (!nextTopic) {
-    return `${currentTopic.fallback}\n\nここまで話してくれてありがとうございます。今日の会話で出てきた希望や気がかりは、家族や支援者と話すときの材料になります。`;
-  }
-
-  return `${currentTopic.fallback}\n\n${nextTopic.lead}\n${nextTopic.question}`;
+function getTopicStartMessage(topicIndex) {
+  return `話題 ${topicIndex + 1} です。\n\n${topics[topicIndex].question}`;
 }
 
-function getSkipReply(topicIndex) {
-  const nextTopic = topics[topicIndex + 1];
-
-  if (!nextTopic) {
-    return 'このお題はここまでにしましょう。話しにくいことは、無理に言葉にしなくても大丈夫です。';
-  }
-
-  return `このお題は飛ばしましょう。話せるところからで大丈夫です。\n\n${nextTopic.lead}\n${nextTopic.question}`;
+function getIsoString(timeMs = Date.now()) {
+  return new Date(timeMs).toISOString();
 }
 
-function buildApiPrompt({ messages, topicIndex, userAnswer }) {
-  const currentTopic = topics[topicIndex];
-  const nextTopic = topics[topicIndex + 1];
-  const recentConversation = messages
-    .slice(-8)
-    .map((message) => {
-      const role = message.sender === 'user' ? '利用者' : 'AI';
-      return `${role}: ${message.text}`;
-    })
-    .join('\n');
+function getAverage(values) {
+  if (values.length === 0) return null;
 
-  return `
-あなたは、これからの暮らし・医療・介護について話しやすくする対話支援AIです。
-利用者の返答を受け止めたうえで、次のお題を自然に振ってください。
+  return Math.round(values.reduce((total, value) => total + value, 0) / values.length);
+}
 
-会話の目的:
-- 利用者が自分の希望、気がかり、大切にしたいことを言葉にしやすくする。
-- 医療や介護の方針を断定せず、利用者本人の考えを尊重する。
-- 重い話題でも、落ち着いた、やわらかい言葉で進める。
+function calculateSummary(topicLogs) {
+  const analyzableTopics = topicLogs.filter((topicLog) =>
+    ['answered', 'manual_skip', 'silence_skip'].includes(topicLog.completionType)
+  );
+  const skippedTopics = analyzableTopics.filter((topicLog) =>
+    ['manual_skip', 'silence_skip'].includes(topicLog.completionType)
+  );
+  const speechStartLatencies = analyzableTopics
+    .map((topicLog) => topicLog.speechStartLatencyMs)
+    .filter((value) => Number.isFinite(value));
+  const silenceDurations = analyzableTopics
+    .map((topicLog) => topicLog.silenceDurationMs)
+    .filter((value) => Number.isFinite(value));
 
-返答ルール:
-- 日本語で返答する。
-- 3から5文くらいにする。
-- 最初に、利用者の答えを1から2文で具体的に受け止める。
-- 勝手な診断、治療判断、介護方針の決定はしない。
-- 次のお題がある場合は、最後に次のお題を自然に質問する。
-- 次のお題がない場合は、感謝を伝え、家族や支援者と話す材料になることを短く伝える。
-- 箇条書きではなく、会話文として返す。
+  return {
+    topicCount: topics.length,
+    startedTopicCount: topicLogs.length,
+    completedTopicCount: analyzableTopics.length,
+    answeredCount: analyzableTopics.filter(
+      (topicLog) => topicLog.completionType === 'answered'
+    ).length,
+    skippedCount: skippedTopics.length,
+    manualSkipCount: analyzableTopics.filter(
+      (topicLog) => topicLog.completionType === 'manual_skip'
+    ).length,
+    silenceSkipCount: analyzableTopics.filter(
+      (topicLog) => topicLog.completionType === 'silence_skip'
+    ).length,
+    resetTopicCount: topicLogs.filter((topicLog) => topicLog.completionType === 'reset')
+      .length,
+    skipRate:
+      analyzableTopics.length === 0
+        ? 0
+        : Number((skippedTopics.length / analyzableTopics.length).toFixed(4)),
+    averageSpeechStartLatencyMs: getAverage(speechStartLatencies),
+    averageSilenceDurationMs: getAverage(silenceDurations),
+    totalSilenceDurationMs: silenceDurations.reduce((total, value) => total + value, 0)
+  };
+}
 
-直近の会話:
-${recentConversation || 'まだ会話はありません。'}
+function createSessionId() {
+  const randomPart =
+    typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
 
-今のお題:
-${currentTopic.question}
+  return `session-${getIsoString().replace(/[:.]/g, '-')}-${randomPart}`;
+}
 
-利用者の返答:
-${userAnswer}
+function createMessage({ id, text, sender, topicIndex, eventType, timeMs }) {
+  return {
+    id,
+    text,
+    sender,
+    topicIndex,
+    eventType,
+    createdAt: getIsoString(timeMs)
+  };
+}
 
-次のお題:
-${nextTopic ? nextTopic.question : 'なし。これが最後のお題です。'}
-`.trim();
+function createTopicLog({ topicIndex, source, timeMs }) {
+  return {
+    topicIndex,
+    question: topics[topicIndex].question,
+    startedAt: getIsoString(timeMs),
+    startSource: source,
+    firstInputAt: null,
+    speechStartLatencyMs: null,
+    completedAt: null,
+    completionType: null,
+    silenceDurationMs: null,
+    topicElapsedMs: null
+  };
+}
+
+function createInitialSession() {
+  const timeMs = Date.now();
+  const firstMessage = createMessage({
+    id: 1,
+    text: getTopicStartMessage(0),
+    sender: 'bot',
+    topicIndex: 0,
+    eventType: 'topic_start',
+    timeMs
+  });
+  const topicLogs = [createTopicLog({ topicIndex: 0, source: 'initial', timeMs })];
+
+  return {
+    sessionId: createSessionId(),
+    startedAt: getIsoString(timeMs),
+    updatedAt: getIsoString(timeMs),
+    completedAt: null,
+    resetAt: null,
+    silenceThresholdMs: SILENCE_THRESHOLD_MS,
+    topics: topics.map((topic, index) => ({
+      topicIndex: index,
+      question: topic.question
+    })),
+    messages: [firstMessage],
+    events: [
+      {
+        type: 'topic_started',
+        topicIndex: 0,
+        source: 'initial',
+        messageId: firstMessage.id,
+        at: getIsoString(timeMs)
+      }
+    ],
+    topicLogs,
+    summary: calculateSummary(topicLogs)
+  };
 }
 
 export default function ChatPage() {
-  const [messages, setMessages] = useState([
-    { id: 1, text: openingMessage, sender: 'bot' }
-  ]);
+  const initialSessionRef = useRef(null);
+
+  if (initialSessionRef.current === null) {
+    initialSessionRef.current = createInitialSession();
+  }
+
+  const sessionRef = useRef(initialSessionRef.current);
+  const nextMessageIdRef = useRef(sessionRef.current.messages.length + 1);
+  const currentTopicIndexRef = useRef(0);
+  const topicStartedAtMsRef = useRef(
+    Date.parse(sessionRef.current.topicLogs[0].startedAt)
+  );
+  const lastActivityAtMsRef = useRef(topicStartedAtMsRef.current);
+  const speechStartedRef = useRef(false);
+  const inputTextRef = useRef('');
+  const isCompleteRef = useRef(false);
+  const messagesEndRef = useRef(null);
+
+  const [messages, setMessages] = useState(sessionRef.current.messages);
   const [inputText, setInputText] = useState('');
   const [currentTopicIndex, setCurrentTopicIndex] = useState(0);
-  const [isLoading, setIsLoading] = useState(false);
-  const messagesEndRef = useRef(null);
 
   const isComplete = currentTopicIndex >= topics.length;
   const progressValue = Math.min(currentTopicIndex + 1, topics.length);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading]);
+  const persistSessionLog = (reason, session = sessionRef.current) => {
+    session.updatedAt = getIsoString();
+    session.summary = calculateSummary(session.topicLogs);
 
-  const resetConversation = () => {
-    setMessages([{ id: 1, text: openingMessage, sender: 'bot' }]);
-    setInputText('');
-    setCurrentTopicIndex(0);
-    setIsLoading(false);
-  };
-
-  const appendMessages = (newMessages) => {
-    setMessages((previousMessages) => {
-      const startId = previousMessages.length + 1;
-
-      return [
-        ...previousMessages,
-        ...newMessages.map((message, index) => ({
-          id: startId + index,
-          ...message
-        }))
-      ];
-    });
-  };
-
-  const requestAssistantReply = async (userAnswer) => {
-    const prompt = buildApiPrompt({
-      messages,
-      topicIndex: currentTopicIndex,
-      userAnswer
+    const payload = JSON.stringify({
+      sessionId: session.sessionId,
+      reason,
+      log: session
     });
 
-    const response = await fetch('/api/chat', {
+    fetch('/api/logs', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        message: prompt
-      })
+      body: payload
+    }).catch((error) => {
+      console.error('Failed to save session log', error);
     });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || 'GPT API から返答を取得できませんでした。');
-    }
-
-    return data.reply || getFallbackReply(currentTopicIndex);
   };
 
-  const handleSendMessage = async (event) => {
+  const syncSessionState = (reason) => {
+    sessionRef.current.summary = calculateSummary(sessionRef.current.topicLogs);
+    setMessages([...sessionRef.current.messages]);
+    persistSessionLog(reason);
+  };
+
+  const setActiveTopicIndex = (topicIndex) => {
+    currentTopicIndexRef.current = topicIndex;
+    isCompleteRef.current = topicIndex >= topics.length;
+    setCurrentTopicIndex(topicIndex);
+  };
+
+  const pushMessage = ({ text, sender, topicIndex, eventType, timeMs }) => {
+    const message = createMessage({
+      id: nextMessageIdRef.current,
+      text,
+      sender,
+      topicIndex,
+      eventType,
+      timeMs
+    });
+
+    nextMessageIdRef.current += 1;
+    sessionRef.current.messages.push(message);
+
+    return message;
+  };
+
+  const findCurrentTopicLog = () =>
+    sessionRef.current.topicLogs.find(
+      (topicLog) => topicLog.topicIndex === currentTopicIndexRef.current
+    );
+
+  const recordSpeechStarted = (timeMs, shouldPersist = true) => {
+    if (speechStartedRef.current || isCompleteRef.current) return;
+
+    const topicLog = findCurrentTopicLog();
+    if (!topicLog) return;
+
+    const latencyMs = Math.max(0, timeMs - topicStartedAtMsRef.current);
+
+    speechStartedRef.current = true;
+    topicLog.firstInputAt = getIsoString(timeMs);
+    topicLog.speechStartLatencyMs = latencyMs;
+    sessionRef.current.events.push({
+      type: 'speech_started',
+      topicIndex: currentTopicIndexRef.current,
+      latencyMs,
+      at: getIsoString(timeMs)
+    });
+
+    if (shouldPersist) {
+      persistSessionLog('speech_started');
+    }
+  };
+
+  const completeCurrentTopic = (completionType, timeMs) => {
+    const topicLog = findCurrentTopicLog();
+    if (!topicLog || topicLog.completedAt) return currentTopicIndexRef.current;
+
+    const silenceDurationMs = Math.max(0, timeMs - lastActivityAtMsRef.current);
+    const topicElapsedMs = Math.max(0, timeMs - topicStartedAtMsRef.current);
+
+    topicLog.completedAt = getIsoString(timeMs);
+    topicLog.completionType = completionType;
+    topicLog.silenceDurationMs = silenceDurationMs;
+    topicLog.topicElapsedMs = topicElapsedMs;
+    sessionRef.current.events.push({
+      type: completionType === 'answered' ? 'topic_answered' : 'topic_skipped',
+      topicIndex: currentTopicIndexRef.current,
+      completionType,
+      speechStartLatencyMs: topicLog.speechStartLatencyMs,
+      silenceDurationMs,
+      topicElapsedMs,
+      at: getIsoString(timeMs)
+    });
+
+    return currentTopicIndexRef.current;
+  };
+
+  const startTopic = (topicIndex, source, timeMs) => {
+    const message = pushMessage({
+      text: getTopicStartMessage(topicIndex),
+      sender: 'bot',
+      topicIndex,
+      eventType: 'topic_start',
+      timeMs
+    });
+
+    sessionRef.current.topicLogs.push(
+      createTopicLog({ topicIndex, source, timeMs })
+    );
+    sessionRef.current.events.push({
+      type: 'topic_started',
+      topicIndex,
+      source,
+      messageId: message.id,
+      at: getIsoString(timeMs)
+    });
+
+    topicStartedAtMsRef.current = timeMs;
+    lastActivityAtMsRef.current = timeMs;
+    speechStartedRef.current = false;
+    setActiveTopicIndex(topicIndex);
+  };
+
+  const completeSession = (timeMs) => {
+    if (sessionRef.current.completedAt) return;
+
+    sessionRef.current.completedAt = getIsoString(timeMs);
+    sessionRef.current.events.push({
+      type: 'session_completed',
+      at: getIsoString(timeMs),
+      summary: calculateSummary(sessionRef.current.topicLogs)
+    });
+    setActiveTopicIndex(topics.length);
+  };
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  useEffect(() => {
+    persistSessionLog('session_started');
+
+    const handlePageHide = () => {
+      const session = sessionRef.current;
+      session.updatedAt = getIsoString();
+      session.summary = calculateSummary(session.topicLogs);
+
+      if (!navigator.sendBeacon) return;
+
+      const payload = JSON.stringify({
+        sessionId: session.sessionId,
+        reason: 'pagehide',
+        log: session
+      });
+      const blob = new Blob([payload], { type: 'application/json' });
+      navigator.sendBeacon('/api/logs', blob);
+    };
+
+    window.addEventListener('pagehide', handlePageHide);
+
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isComplete || inputText.trim()) return undefined;
+
+    const timerId = window.setTimeout(() => {
+      if (isCompleteRef.current || inputTextRef.current.trim()) return;
+
+      const timeMs = Date.now();
+      const silenceDurationMs = timeMs - lastActivityAtMsRef.current;
+      if (silenceDurationMs < SILENCE_THRESHOLD_MS) return;
+
+      const completedTopicIndex = completeCurrentTopic('silence_skip', timeMs);
+      const nextTopicIndex = completedTopicIndex + 1;
+
+      if (nextTopicIndex < topics.length) {
+        startTopic(nextTopicIndex, 'silence_timeout', timeMs);
+      } else {
+        completeSession(timeMs);
+      }
+
+      syncSessionState('silence_timeout');
+    }, SILENCE_THRESHOLD_MS);
+
+    return () => window.clearTimeout(timerId);
+  }, [currentTopicIndex, inputText, isComplete]);
+
+  const resetConversation = () => {
+    const timeMs = Date.now();
+    const activeTopicLog = findCurrentTopicLog();
+
+    if (activeTopicLog && !activeTopicLog.completedAt) {
+      activeTopicLog.completedAt = getIsoString(timeMs);
+      activeTopicLog.completionType = 'reset';
+      activeTopicLog.silenceDurationMs = Math.max(
+        0,
+        timeMs - lastActivityAtMsRef.current
+      );
+      activeTopicLog.topicElapsedMs = Math.max(0, timeMs - topicStartedAtMsRef.current);
+    }
+
+    sessionRef.current.resetAt = getIsoString(timeMs);
+    sessionRef.current.events.push({
+      type: 'session_reset',
+      topicIndex: currentTopicIndexRef.current,
+      at: getIsoString(timeMs)
+    });
+    persistSessionLog('session_reset');
+
+    const nextSession = createInitialSession();
+    sessionRef.current = nextSession;
+    nextMessageIdRef.current = nextSession.messages.length + 1;
+    currentTopicIndexRef.current = 0;
+    topicStartedAtMsRef.current = Date.parse(nextSession.topicLogs[0].startedAt);
+    lastActivityAtMsRef.current = topicStartedAtMsRef.current;
+    speechStartedRef.current = false;
+    inputTextRef.current = '';
+    isCompleteRef.current = false;
+
+    setMessages(nextSession.messages);
+    setInputText('');
+    setCurrentTopicIndex(0);
+    persistSessionLog('session_started');
+  };
+
+  const handleInputChange = (event) => {
+    const nextText = event.target.value;
+    const timeMs = Date.now();
+
+    inputTextRef.current = nextText;
+    setInputText(nextText);
+
+    if (isCompleteRef.current) return;
+
+    lastActivityAtMsRef.current = timeMs;
+
+    if (nextText.trim()) {
+      recordSpeechStarted(timeMs);
+    }
+  };
+
+  const handleSendMessage = (event) => {
     event.preventDefault();
 
-    const trimmedText = inputText.trim();
-    if (!trimmedText || isComplete || isLoading) return;
+    const trimmedText = inputTextRef.current.trim();
+    if (!trimmedText || isCompleteRef.current) return;
 
+    const timeMs = Date.now();
+    recordSpeechStarted(timeMs, false);
+    inputTextRef.current = '';
     setInputText('');
-    setIsLoading(true);
 
-    try {
-      const assistantReply = await requestAssistantReply(trimmedText);
+    const userMessage = pushMessage({
+      text: trimmedText,
+      sender: 'user',
+      topicIndex: currentTopicIndexRef.current,
+      eventType: 'user_answer',
+      timeMs
+    });
 
-      appendMessages([
-        { text: trimmedText, sender: 'user' },
-        { text: assistantReply, sender: 'bot' }
-      ]);
+    sessionRef.current.events.push({
+      type: 'user_message',
+      topicIndex: currentTopicIndexRef.current,
+      messageId: userMessage.id,
+      text: trimmedText,
+      at: getIsoString(timeMs)
+    });
 
-      setCurrentTopicIndex((previousIndex) => previousIndex + 1);
-    } catch (error) {
-      console.error(error);
-      appendMessages([
-        { text: trimmedText, sender: 'user' },
-        {
-          text:
-            'AIの返答を取得できませんでした。APIキーや通信状態を確認して、同じ内容でもう一度送信してください。',
-          sender: 'bot'
-        }
-      ]);
-    } finally {
-      setIsLoading(false);
+    const completedTopicIndex = completeCurrentTopic('answered', timeMs);
+    const nextTopicIndex = completedTopicIndex + 1;
+
+    if (nextTopicIndex < topics.length) {
+      startTopic(nextTopicIndex, 'after_answer', timeMs);
+    } else {
+      completeSession(timeMs);
     }
+
+    syncSessionState('user_answer');
   };
 
   const handleSkipTopic = () => {
-    if (isComplete || isLoading) return;
+    if (isCompleteRef.current) return;
 
-    const assistantReply = getSkipReply(currentTopicIndex);
+    const timeMs = Date.now();
+    inputTextRef.current = '';
+    setInputText('');
 
-    appendMessages([{ text: assistantReply, sender: 'bot' }]);
-    setCurrentTopicIndex((previousIndex) => previousIndex + 1);
+    const completedTopicIndex = completeCurrentTopic('manual_skip', timeMs);
+    const nextTopicIndex = completedTopicIndex + 1;
+
+    if (nextTopicIndex < topics.length) {
+      startTopic(nextTopicIndex, 'manual_skip', timeMs);
+    } else {
+      completeSession(timeMs);
+    }
+
+    syncSessionState('manual_skip');
   };
 
   return (
@@ -281,7 +547,7 @@ export default function ChatPage() {
               これからの暮らし相談
             </h1>
             <p style={{ margin: '4px 0 0', fontSize: '13px', opacity: 0.9 }}>
-              GPT API が返答を受け止め、次のお題へつなげます
+              中立的司会者が話題開始のみを行います
             </p>
           </div>
 
@@ -351,8 +617,7 @@ export default function ChatPage() {
               key={message.id}
               style={{
                 alignSelf: message.sender === 'user' ? 'flex-end' : 'flex-start',
-                background:
-                  message.sender === 'user' ? '#245c52' : '#ffffff',
+                background: message.sender === 'user' ? '#245c52' : '#ffffff',
                 color: message.sender === 'user' ? 'white' : '#1f2933',
                 padding: '12px 14px',
                 border:
@@ -374,24 +639,6 @@ export default function ChatPage() {
             </div>
           ))}
 
-          {isLoading && (
-            <div
-              style={{
-                alignSelf: 'flex-start',
-                background: '#ffffff',
-                color: '#5f6c72',
-                padding: '12px 14px',
-                border: '1px solid #e0d8c8',
-                borderRadius: '16px 16px 16px 4px',
-                maxWidth: '82%',
-                lineHeight: 1.7,
-                fontSize: '15px'
-              }}
-            >
-              AIが返答を考えています...
-            </div>
-          )}
-
           <div ref={messagesEndRef} />
         </div>
 
@@ -409,34 +656,34 @@ export default function ChatPage() {
           <input
             type="text"
             value={inputText}
-            onChange={(event) => setInputText(event.target.value)}
+            onChange={handleInputChange}
             placeholder={
               isComplete
                 ? '最初から始めると、もう一度話せます'
                 : 'ここに返答を入力'
             }
-            disabled={isComplete || isLoading}
+            disabled={isComplete}
             style={{
               minWidth: 0,
               padding: '12px',
               borderRadius: '6px',
               border: '1px solid #cfc5b2',
-              background: isComplete || isLoading ? '#eee8dc' : 'white',
+              background: isComplete ? '#eee8dc' : 'white',
               fontSize: '15px'
             }}
           />
           <button
             type="button"
             onClick={handleSkipTopic}
-            disabled={isComplete || isLoading}
+            disabled={isComplete}
             style={{
               padding: '10px 14px',
               background: '#ffffff',
               color: '#245c52',
               border: '1px solid #9eb2a7',
               borderRadius: '6px',
-              cursor: isComplete || isLoading ? 'default' : 'pointer',
-              opacity: isComplete || isLoading ? 0.5 : 1,
+              cursor: isComplete ? 'default' : 'pointer',
+              opacity: isComplete ? 0.5 : 1,
               whiteSpace: 'nowrap'
             }}
           >
@@ -444,20 +691,20 @@ export default function ChatPage() {
           </button>
           <button
             type="submit"
-            disabled={isComplete || isLoading}
+            disabled={isComplete}
             style={{
               padding: '10px 18px',
               background: '#d26f3f',
               color: 'white',
               border: '1px solid #d26f3f',
               borderRadius: '6px',
-              cursor: isComplete || isLoading ? 'default' : 'pointer',
-              opacity: isComplete || isLoading ? 0.55 : 1,
+              cursor: isComplete ? 'default' : 'pointer',
+              opacity: isComplete ? 0.55 : 1,
               whiteSpace: 'nowrap',
               fontWeight: 700
             }}
           >
-            {isLoading ? '送信中' : '送信'}
+            送信
           </button>
         </form>
       </section>

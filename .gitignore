@@ -8,3 +8,4 @@ node_modules
 repomix-output.xml
 *.stt
 *.meta
+logs/*.json
