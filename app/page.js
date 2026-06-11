@@ -7,6 +7,10 @@ const PRESET_TOPIC_DURATION_MS = 180000;
 const SILENCE_SOFT_THRESHOLD_MS = 6000;
 const SILENCE_INTERVENTION_THRESHOLD_MS = 10000;
 const MAX_SILENCE_INTERVENTIONS_PER_TOPIC = 2;
+const MAX_AI_INTERVENTIONS_PER_TOPIC = 3;
+const SHORT_ANSWER_CHAR_THRESHOLD = 8;
+const MIN_INTERVENTION_INTERVAL_MS = 12000;
+const AI_REFLECTION_EVENT_TYPE = 'ai_reflection';
 
 const TOPIC_STATE = {
   TOPIC_PRESENTED: 'topic_presented',
@@ -31,41 +35,113 @@ const SPEAKERS = [
 
 const topics = [
   {
-    id: 'topic_1',
-    question: '最近の生活で、これからも続けたいことは何ですか。'
+    id: 'daily_continuity',
+    level: 1,
+    lead: 'いまの暮らしで続けたいことについて、少し話してみましょう。',
+    question: '最近の生活で、これからも続けたいことは何ですか。',
+    acpSlots: [
+      '続けたいこと',
+      'その理由',
+      '支えになっている人や環境',
+      '不安なこと',
+      '家族に伝えておきたいこと'
+    ]
   },
   {
-    id: 'topic_2',
-    question: '年齢を重ねても、自分らしく暮らすために大切にしたいことは何ですか。'
+    id: 'personal_values',
+    level: 2,
+    lead: '自分らしい暮らしを支える価値観について、言葉にしてみましょう。',
+    question: '年齢を重ねても、自分らしく暮らすために大切にしたいことは何ですか。',
+    acpSlots: [
+      '自分らしさ',
+      '大切にしたい価値観',
+      '変わってほしくないこと',
+      '不安なこと',
+      '周囲に望む関わり'
+    ]
   },
   {
-    id: 'topic_3',
-    question: '将来、どのような場所や環境で暮らしていたいと思いますか。'
+    id: 'future_living_place',
+    level: 3,
+    lead: '将来の暮らす場所について、少し話してみましょう。',
+    question: '将来、どのような場所や環境で暮らしていたいと思いますか。',
+    acpSlots: [
+      '希望する場所',
+      'その理由',
+      '不安なこと',
+      '受け入れられる支援',
+      '家族に伝えておきたいこと'
+    ]
   },
   {
-    id: 'topic_4',
+    id: 'acceptable_support',
+    level: 4,
+    lead: '支援が必要になったときの受け入れやすさについて、整理してみましょう。',
     question:
-      '家事、買い物、通院、入浴などで手助けが必要になったら、どんな助け方なら受け入れやすいですか。'
+      '家事、買い物、通院、入浴などで手助けが必要になったら、どんな助け方なら受け入れやすいですか。',
+    acpSlots: [
+      '必要になりそうな手助け',
+      '受け入れられる支援',
+      '受け入れにくいこと',
+      '不安なこと',
+      '誰に頼みやすいか'
+    ]
   },
   {
-    id: 'topic_5',
+    id: 'family_burden',
+    level: 5,
+    lead: '家族に頼ることへの気持ちについて、無理のない範囲で話してみましょう。',
     question:
-      '家族に手伝ってもらうことについて、気になることや遠慮してしまうことはありますか。'
+      '家族に手伝ってもらうことについて、気になることや遠慮してしまうことはありますか。',
+    acpSlots: [
+      '頼みたいこと',
+      '遠慮してしまうこと',
+      '負担への不安',
+      '家族に伝えておきたいこと',
+      '家族以外に頼れる支援'
+    ]
   },
   {
-    id: 'topic_6',
+    id: 'decision_support',
+    level: 6,
+    lead: '自分で決めにくくなったときの相談先について、考えてみましょう。',
     question:
-      '自分で医療や介護の方針を決めることが難しくなったら、誰に相談して決めてほしいですか。'
+      '自分で医療や介護の方針を決めることが難しくなったら、誰に相談して決めてほしいですか。',
+    acpSlots: [
+      '相談したい相手',
+      'その理由',
+      '伝えておきたい価値観',
+      '避けたい決め方',
+      '家族に伝えておきたいこと'
+    ]
   },
   {
-    id: 'topic_7',
+    id: 'serious_illness_values',
+    level: 7,
+    lead: '重い病気になったときに大切にしたいことを、少し整理してみましょう。',
     question:
-      '重い病気になったとき、治療を考えるうえで一番大切にしたいことは何ですか。'
+      '重い病気になったとき、治療を考えるうえで一番大切にしたいことは何ですか。',
+    acpSlots: [
+      '一番大切にしたいこと',
+      'その理由',
+      '不安なこと',
+      '避けたいこと',
+      '相談したい相手'
+    ]
   },
   {
-    id: 'topic_8',
+    id: 'end_of_life_comfort',
+    level: 8,
+    lead: '人生の最終段階を考えたときの安心について、話しやすいところから触れてみましょう。',
     question:
-      '人生の最終段階を考えたとき、どこで、誰と、どのように過ごせると安心だと思いますか。'
+      '人生の最終段階を考えたとき、どこで、誰と、どのように過ごせると安心だと思いますか。',
+    acpSlots: [
+      '過ごしたい場所',
+      '一緒にいたい人',
+      '安心できる過ごし方',
+      '不安なこと',
+      '家族に伝えておきたいこと'
+    ]
   }
 ];
 
@@ -95,7 +171,9 @@ function getAverage(values) {
 }
 
 function getTopicPresentationMessage(topicIndex) {
-  return `話題 ${topicIndex + 1} です。\n\n${topics[topicIndex].question}`;
+  const topic = topics[topicIndex];
+
+  return `話題 ${topicIndex + 1} です。\n\n${topic.lead}\n${topic.question}`;
 }
 
 function getTopicEndMessage() {
@@ -104,11 +182,144 @@ function getTopicEndMessage() {
 
 function getFallbackIntervention(interventionCount) {
   const templates = [
-    '少し考える時間が必要な話題かもしれません。話しやすいところからで大丈夫です。',
-    '無理に結論を出さなくても大丈夫です。思いつく範囲で話してみてください。'
+    'ここまでで、この話題について考え始めたことや、少し気になっていることが言葉になりつつあります。もし続けるなら、話しやすい観点を一つ選んで触れてみてもよさそうです。',
+    'ここまでで、大切にしたいことを少しずつ探している様子が出ています。もし続けるなら、まだ言葉にしきれていない不安について触れてみてもよさそうです。'
   ];
 
   return templates[interventionCount % templates.length];
+}
+
+const SLOT_KEYWORD_GROUPS = [
+  {
+    pattern: /場所|環境|どこ|暮らす|過ごす/,
+    keywords: ['自宅', '家', '施設', '病院', '地域', '場所', '環境', '暮ら', '住み慣れ', '近く']
+  },
+  {
+    pattern: /理由|背景/,
+    keywords: ['から', 'ので', 'ため', '理由', '安心', '落ち着', '好き', '大切', '慣れ']
+  },
+  {
+    pattern: /不安|気になる|遠慮|心配|負担/,
+    keywords: ['不安', '心配', '怖', '困', '迷惑', '負担', '遠慮', '嫌', 'つら', '不便']
+  },
+  {
+    pattern: /支援|助け|手助け|関わり|周囲|頼/,
+    keywords: ['支援', '助け', '手伝', 'お願い', '頼', 'ヘルパー', '訪問', '介護', '通院', '入浴', '買い物']
+  },
+  {
+    pattern: /家族|伝え|誰|相談|相手|決め/,
+    keywords: ['家族', '子ども', '娘', '息子', '夫', '妻', '兄弟', '姉妹', '伝え', '相談', '任せ', '決め']
+  },
+  {
+    pattern: /価値観|大切|自分らしさ|一番|続けたい|変わってほしくない/,
+    keywords: ['大切', '自分らし', '価値', '自由', '安心', '尊重', '納得', '好き', '普通', '続け']
+  },
+  {
+    pattern: /治療|医療|介護|方針|病気|避けたい/,
+    keywords: ['治療', '医療', '介護', '方針', '延命', '痛み', '苦し', '病気', '先生', '医師', '避け']
+  },
+  {
+    pattern: /最終段階|人生|一緒|安心できる/,
+    keywords: ['最期', '最後', '終末', '人生', '看取り', 'そば', '一緒', '穏やか', '安心']
+  }
+];
+
+const INTERVENTION_REASON_LABELS = {
+  silence: '沈黙',
+  short_answer: '短い回答',
+  manual_reflection: '手動整理'
+};
+
+function normalizeText(text) {
+  return String(text || '').toLowerCase();
+}
+
+function getSlotKeywords(slot) {
+  const normalizedSlot = normalizeText(slot);
+  const keywords = new Set([normalizedSlot]);
+
+  SLOT_KEYWORD_GROUPS.forEach((group) => {
+    if (group.pattern.test(slot)) {
+      group.keywords.forEach((keyword) => keywords.add(normalizeText(keyword)));
+    }
+  });
+
+  return [...keywords].filter(Boolean);
+}
+
+function isSlotExpressed(slot, text) {
+  const normalizedText = normalizeText(text);
+
+  return getSlotKeywords(slot).some((keyword) => normalizedText.includes(keyword));
+}
+
+function truncateEvidenceText(text) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+
+  if (normalized.length <= 44) return normalized;
+
+  return `${normalized.slice(0, 43)}…`;
+}
+
+function getExpressedPointLabels(topicLog) {
+  return (topicLog?.expressed_points || []).map((point) => point.slot);
+}
+
+function getMissingOrUnclearSlots(topicLog) {
+  if (!topicLog) return [];
+
+  if (Array.isArray(topicLog.missing_or_unclear_slots)) {
+    return topicLog.missing_or_unclear_slots;
+  }
+
+  return topicLog.acp_slots || [];
+}
+
+function getPromptedSlot(topicLog) {
+  const missingSlots = getMissingOrUnclearSlots(topicLog);
+
+  return missingSlots[0] || topicLog?.acp_slots?.[0] || null;
+}
+
+function updateAcpSlotState(topicLog, speaker, text, timeMs) {
+  if (!topicLog) return;
+
+  const nextEvidence = { ...(topicLog.slot_evidence || {}) };
+  const slots = topicLog.acp_slots || [];
+
+  slots.forEach((slot) => {
+    if (nextEvidence[slot] || !isSlotExpressed(slot, text)) return;
+
+    nextEvidence[slot] = {
+      slot,
+      speaker,
+      text: truncateEvidenceText(text),
+      timestamp: getIsoString(timeMs)
+    };
+  });
+
+  topicLog.slot_evidence = nextEvidence;
+  topicLog.expressed_points = slots
+    .filter((slot) => nextEvidence[slot])
+    .map((slot) => nextEvidence[slot]);
+  topicLog.missing_or_unclear_slots = slots.filter((slot) => !nextEvidence[slot]);
+}
+
+function isExtremelyShortAnswer(text) {
+  const compactText = String(text || '').replace(/\s+/g, '');
+
+  return compactText.length > 0 && compactText.length <= SHORT_ANSWER_CHAR_THRESHOLD;
+}
+
+function createFallbackReflection(topicLog, promptedSlot) {
+  const expressedLabels = getExpressedPointLabels(topicLog).slice(0, 2);
+  const expressedText =
+    expressedLabels.length > 0
+      ? `${expressedLabels.join('や')}についての思い`
+      : 'この話題について考え始めたことや、少し気になっていること';
+  const nextSlot = promptedSlot || 'まだ言葉にしきれていないこと';
+
+  return `ここまでで、${expressedText}が少しずつ言葉になっています。もし続けるなら、${nextSlot}について、話しやすい範囲で触れてみてもよさそうです。`;
 }
 
 function clampModeratorReply(text) {
@@ -117,9 +328,9 @@ function clampModeratorReply(text) {
     .trim();
 
   if (!normalized) return getFallbackIntervention(0);
-  if (normalized.length <= 80) return normalized;
+  if (normalized.length <= 120) return normalized;
 
-  return `${normalized.slice(0, 79)}…`;
+  return `${normalized.slice(0, 119)}…`;
 }
 
 function createMessage({ id, text, sender, topicIndex, eventType, timeMs }) {
@@ -148,7 +359,13 @@ function createTopicLog({ topicIndex, timeMs }) {
   return {
     topic_id: topic.id,
     topic_index: topicIndex,
+    level: topic.level,
+    lead: topic.lead,
     question: topic.question,
+    acp_slots: topic.acpSlots,
+    expressed_points: [],
+    missing_or_unclear_slots: [...topic.acpSlots],
+    slot_evidence: {},
     condition: CONDITION,
     timestamp_topic_presented: getIsoString(timeMs),
     timestamp_first_utterance: null,
@@ -157,6 +374,10 @@ function createTopicLog({ topicIndex, timeMs }) {
     topic_end_time: null,
     end_reason: null,
     intervention_count: 0,
+    silence_intervention_count: 0,
+    last_intervention_reason: null,
+    last_intervention_time: null,
+    interventions: [],
     silence_events: [],
     full_transcript: [],
     utterance_count_user: 0,
@@ -231,6 +452,9 @@ function createInitialSession() {
     topics: topics.map((topic, index) => ({
       topic_id: topic.id,
       topic_index: index,
+      level: topic.level,
+      lead: topic.lead,
+      acpSlots: topic.acpSlots,
       question: topic.question
     })),
     messages: [],
@@ -255,7 +479,12 @@ function getSpeakerLabel(sender) {
 
 function getRecentTranscript(topicLog) {
   return topicLog.full_transcript
-    .filter((entry) => entry.speaker !== 'moderator' || entry.event_type === 'silence_intervention')
+    .filter(
+      (entry) =>
+        entry.speaker !== 'moderator' ||
+        entry.event_type === 'silence_intervention' ||
+        entry.event_type === AI_REFLECTION_EVENT_TYPE
+    )
     .slice(-8)
     .map((entry) => `${getSpeakerLabel(entry.speaker)}: ${entry.text}`)
     .join('\n');
@@ -313,8 +542,8 @@ export default function ChatPage() {
   const silenceDisplay =
     silenceDurationMs === null ? '無効' : formatDuration(silenceDurationMs);
   const interventionCountDisplay = activeTopicLog
-    ? `${activeTopicLog.intervention_count} / ${MAX_SILENCE_INTERVENTIONS_PER_TOPIC}`
-    : `0 / ${MAX_SILENCE_INTERVENTIONS_PER_TOPIC}`;
+    ? `${activeTopicLog.intervention_count} / ${MAX_AI_INTERVENTIONS_PER_TOPIC}`
+    : `0 / ${MAX_AI_INTERVENTIONS_PER_TOPIC}`;
   const canStartTopic =
     !isSessionComplete &&
     currentTopicIndex === null &&
@@ -322,6 +551,17 @@ export default function ChatPage() {
   const hasActiveTopic = currentTopicIndex !== null && !isSessionComplete;
   const canUseTranscriptInput =
     hasActiveTopic && topicState !== TOPIC_STATE.TOPIC_FINISHED;
+  const expressedSlotLabels = getExpressedPointLabels(activeTopicLog);
+  const missingSlotLabels = getMissingOrUnclearSlots(activeTopicLog);
+  const lastInterventionReasonDisplay = activeTopicLog?.last_intervention_reason
+    ? INTERVENTION_REASON_LABELS[activeTopicLog.last_intervention_reason]
+    : '未実施';
+  const canRequestManualReflection = Boolean(
+    hasActiveTopic &&
+    activeTopicLog &&
+    !interventionInFlightRef.current &&
+    activeTopicLog.intervention_count < MAX_AI_INTERVENTIONS_PER_TOPIC
+  );
 
   const persistSessionLog = (reason, session = sessionRef.current) => {
     session.updatedAt = getIsoString();
@@ -574,6 +814,7 @@ export default function ChatPage() {
       eventType: 'human_utterance',
       timeMs
     });
+    updateAcpSlotState(topicLog, speaker, text, timeMs);
 
     sessionRef.current.events.push({
       type: 'human_utterance',
@@ -582,6 +823,8 @@ export default function ChatPage() {
       speaker,
       message_id: message.id,
       char_count: text.length,
+      expressed_points: topicLog.expressed_points,
+      missing_or_unclear_slots: topicLog.missing_or_unclear_slots,
       at: getIsoString(timeMs)
     });
 
@@ -592,6 +835,11 @@ export default function ChatPage() {
         'human_utterance_after_silence'
       );
     }
+
+    return {
+      topicLog,
+      isShortAnswer: isExtremelyShortAnswer(text)
+    };
   };
 
   const recordSoftSilence = (topicLog, timeMs, silenceDurationMs) => {
@@ -621,30 +869,83 @@ export default function ChatPage() {
     syncSessionState('silence_soft_threshold');
   };
 
-  const requestSilenceIntervention = async (topicLog, silenceDurationMs) => {
+  const canRequestModeratorIntervention = (topicLog, interventionReason, timeMs) => {
+    if (!topicLog || topicLog.topic_end_time || interventionInFlightRef.current) {
+      return false;
+    }
+
+    if (topicLog.intervention_count >= MAX_AI_INTERVENTIONS_PER_TOPIC) {
+      return false;
+    }
+
+    if (
+      interventionReason === 'silence' &&
+      topicLog.silence_intervention_count >= MAX_SILENCE_INTERVENTIONS_PER_TOPIC
+    ) {
+      return false;
+    }
+
+    if (interventionReason !== 'manual_reflection' && topicLog.last_intervention_time) {
+      const lastInterventionTimeMs = Date.parse(topicLog.last_intervention_time);
+
+      if (
+        Number.isFinite(lastInterventionTimeMs) &&
+        timeMs - lastInterventionTimeMs < MIN_INTERVENTION_INTERVAL_MS
+      ) {
+        return false;
+      }
+    }
+
+    return true;
+  };
+
+  const requestModeratorIntervention = async (
+    topicLog,
+    { interventionReason, silenceDurationMs = null }
+  ) => {
     const requestStartedAtMs = Date.now();
+    if (!canRequestModeratorIntervention(topicLog, interventionReason, requestStartedAtMs)) {
+      return;
+    }
+
     const topicIndex = topicLog.topic_index;
     const lastHumanUtteranceEndTime = topicLog.last_human_utterance_end_time;
     const interventionNumber = topicLog.intervention_count + 1;
+    const expressedPoints = [...(topicLog.expressed_points || [])];
+    const alreadyExpressedPoints = expressedPoints.map(
+      (point) => `${point.slot}: ${point.text}`
+    );
+    const missingOrUnclearSlots = getMissingOrUnclearSlots(topicLog);
+    const promptedSlot = getPromptedSlot(topicLog);
 
     interventionInFlightRef.current = true;
 
-    topicLog.silence_events.push({
-      type: 'intervention_requested',
-      timestamp: getIsoString(requestStartedAtMs),
-      silence_duration_ms: silenceDurationMs,
-      intervention_number: interventionNumber,
-      threshold_ms: SILENCE_INTERVENTION_THRESHOLD_MS
-    });
+    if (interventionReason === 'silence') {
+      topicLog.silence_events.push({
+        type: 'intervention_requested',
+        timestamp: getIsoString(requestStartedAtMs),
+        silence_duration_ms: silenceDurationMs,
+        intervention_number: interventionNumber,
+        threshold_ms: SILENCE_INTERVENTION_THRESHOLD_MS,
+        intervention_reason: interventionReason,
+        expressed_points: expressedPoints,
+        prompted_slot: promptedSlot
+      });
+    }
+
     sessionRef.current.events.push({
-      type: 'silence_intervention_requested',
+      type: 'moderator_intervention_requested',
       topic_id: topicLog.topic_id,
       topic_index: topicIndex,
+      intervention_reason: interventionReason,
       silence_duration_ms: silenceDurationMs,
+      intervention_number: interventionNumber,
       intervention_count: topicLog.intervention_count,
+      expressed_points: expressedPoints,
+      prompted_slot: promptedSlot,
       at: getIsoString(requestStartedAtMs)
     });
-    syncSessionState('silence_intervention_requested');
+    syncSessionState(`${interventionReason}_intervention_requested`);
 
     try {
       const response = await fetch('/api/chat', {
@@ -656,11 +957,18 @@ export default function ChatPage() {
           current_topic: {
             topic_id: topicLog.topic_id,
             topic_index: topicLog.topic_index,
+            level: topicLog.level,
+            lead: topicLog.lead,
             question: topicLog.question
           },
+          acpSlots: topicLog.acp_slots,
           recent_transcript: getRecentTranscript(topicLog),
+          already_expressed_points: alreadyExpressedPoints,
+          missing_or_unclear_slots: missingOrUnclearSlots,
           silence_duration_ms: silenceDurationMs,
-          intervention_count: topicLog.intervention_count
+          intervention_count: topicLog.intervention_count,
+          intervention_reason: interventionReason,
+          prompted_slot: promptedSlot
         })
       });
       const data = await response.json();
@@ -669,54 +977,99 @@ export default function ChatPage() {
         findActiveTopicLog()?.last_human_utterance_end_time === lastHumanUtteranceEndTime;
 
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to request silence intervention');
+        throw new Error(data.error || 'Failed to request moderator intervention');
       }
 
       if (!activeTopicStillCurrent) {
-        topicLog.silence_events.push({
-          type: 'intervention_cancelled',
+        if (interventionReason === 'silence') {
+          topicLog.silence_events.push({
+            type: 'intervention_cancelled',
+            timestamp: getIsoString(),
+            reason: 'conversation_resumed',
+            intervention_reason: interventionReason
+          });
+        }
+        sessionRef.current.events.push({
+          type: 'moderator_intervention_cancelled',
+          topic_id: topicLog.topic_id,
+          topic_index: topicIndex,
+          intervention_reason: interventionReason,
           timestamp: getIsoString(),
           reason: 'conversation_resumed'
         });
-        syncSessionState('silence_intervention_cancelled');
+        syncSessionState(`${interventionReason}_intervention_cancelled`);
         return;
       }
 
       const timeMs = Date.now();
-      const reply = clampModeratorReply(data.reply || getFallbackIntervention(0));
+      const reply = clampModeratorReply(
+        data.reply || createFallbackReflection(topicLog, promptedSlot)
+      );
       const message = pushMessage({
         text: reply,
         sender: 'moderator',
         topicIndex,
-        eventType: 'silence_intervention',
+        eventType: AI_REFLECTION_EVENT_TYPE,
         timeMs
       });
 
       topicLog.intervention_count += 1;
+      if (interventionReason === 'silence') {
+        topicLog.silence_intervention_count += 1;
+      }
+      topicLog.last_intervention_reason = interventionReason;
+      topicLog.last_intervention_time = getIsoString(timeMs);
       appendTranscriptEntry(topicLog, {
         speaker: 'moderator',
         text: reply,
-        eventType: 'silence_intervention',
+        eventType: AI_REFLECTION_EVENT_TYPE,
         timeMs
       });
-      topicLog.silence_events.push({
-        type: 'intervention_delivered',
+
+      const deliveredIntervention = {
         timestamp: getIsoString(timeMs),
-        silence_duration_ms: timeMs - Date.parse(lastHumanUtteranceEndTime),
         intervention_number: topicLog.intervention_count,
+        intervention_reason: interventionReason,
+        expressed_points: expressedPoints,
+        prompted_slot: promptedSlot,
+        ai_reflection_text: reply,
         message_id: message.id,
-        text: reply
-      });
+        source: data.source || 'openai'
+      };
+
+      topicLog.interventions.push(deliveredIntervention);
+      if (interventionReason === 'silence') {
+        topicLog.silence_events.push({
+          type: 'intervention_delivered',
+          timestamp: getIsoString(timeMs),
+          silence_duration_ms: lastHumanUtteranceEndTime
+            ? timeMs - Date.parse(lastHumanUtteranceEndTime)
+            : null,
+          intervention_number: topicLog.intervention_count,
+          message_id: message.id,
+          text: reply,
+          intervention_reason: interventionReason,
+          expressed_points: expressedPoints,
+          prompted_slot: promptedSlot,
+          ai_reflection_text: reply
+        });
+      }
       sessionRef.current.events.push({
-        type: 'silence_intervention_delivered',
+        type: 'moderator_intervention_delivered',
         topic_id: topicLog.topic_id,
         topic_index: topicIndex,
-        silence_duration_ms: timeMs - Date.parse(lastHumanUtteranceEndTime),
+        intervention_reason: interventionReason,
+        silence_duration_ms: lastHumanUtteranceEndTime
+          ? timeMs - Date.parse(lastHumanUtteranceEndTime)
+          : null,
         intervention_count: topicLog.intervention_count,
+        expressed_points: expressedPoints,
+        prompted_slot: promptedSlot,
+        ai_reflection_text: reply,
         message_id: message.id,
         at: getIsoString(timeMs)
       });
-      syncSessionState('silence_intervention_delivered');
+      syncSessionState(`${interventionReason}_intervention_delivered`);
     } catch (error) {
       console.error(error);
 
@@ -726,32 +1079,77 @@ export default function ChatPage() {
 
       if (activeTopicStillCurrent) {
         const timeMs = Date.now();
-        const reply = getFallbackIntervention(topicLog.intervention_count);
+        const reply = clampModeratorReply(
+          createFallbackReflection(topicLog, promptedSlot)
+        );
         const message = pushMessage({
           text: reply,
           sender: 'moderator',
           topicIndex,
-          eventType: 'silence_intervention',
+          eventType: AI_REFLECTION_EVENT_TYPE,
           timeMs
         });
 
         topicLog.intervention_count += 1;
+        if (interventionReason === 'silence') {
+          topicLog.silence_intervention_count += 1;
+        }
+        topicLog.last_intervention_reason = interventionReason;
+        topicLog.last_intervention_time = getIsoString(timeMs);
         appendTranscriptEntry(topicLog, {
           speaker: 'moderator',
           text: reply,
-          eventType: 'silence_intervention',
+          eventType: AI_REFLECTION_EVENT_TYPE,
           timeMs
         });
-        topicLog.silence_events.push({
-          type: 'intervention_delivered',
+
+        const fallbackIntervention = {
           timestamp: getIsoString(timeMs),
-          silence_duration_ms: timeMs - Date.parse(lastHumanUtteranceEndTime),
           intervention_number: topicLog.intervention_count,
+          intervention_reason: interventionReason,
+          expressed_points: expressedPoints,
+          prompted_slot: promptedSlot,
+          ai_reflection_text: reply,
           message_id: message.id,
-          text: reply,
           source: 'fallback'
+        };
+
+        topicLog.interventions.push(fallbackIntervention);
+        if (interventionReason === 'silence') {
+          topicLog.silence_events.push({
+            type: 'intervention_delivered',
+            timestamp: getIsoString(timeMs),
+            silence_duration_ms: lastHumanUtteranceEndTime
+              ? timeMs - Date.parse(lastHumanUtteranceEndTime)
+              : null,
+            intervention_number: topicLog.intervention_count,
+            message_id: message.id,
+            text: reply,
+            source: 'fallback',
+            intervention_reason: interventionReason,
+            expressed_points: expressedPoints,
+            prompted_slot: promptedSlot,
+            ai_reflection_text: reply
+          });
+        }
+        sessionRef.current.events.push({
+          type: 'moderator_intervention_delivered',
+          topic_id: topicLog.topic_id,
+          topic_index: topicIndex,
+          intervention_reason: interventionReason,
+          timestamp: getIsoString(timeMs),
+          silence_duration_ms: lastHumanUtteranceEndTime
+            ? timeMs - Date.parse(lastHumanUtteranceEndTime)
+            : null,
+          intervention_count: topicLog.intervention_count,
+          expressed_points: expressedPoints,
+          prompted_slot: promptedSlot,
+          ai_reflection_text: reply,
+          message_id: message.id,
+          source: 'fallback',
+          at: getIsoString(timeMs)
         });
-        syncSessionState('silence_intervention_fallback');
+        syncSessionState(`${interventionReason}_intervention_fallback`);
       }
     } finally {
       interventionInFlightRef.current = false;
@@ -769,7 +1167,7 @@ export default function ChatPage() {
       topicStartedAtMsRef.current &&
       timeMs - topicStartedAtMsRef.current >= PRESET_TOPIC_DURATION_MS
     ) {
-      finishActiveTopic('preset_topic_duration_elapsed', true);
+      finishActiveTopic('preset_topic_duration_elapsed', false);
       return;
     }
 
@@ -806,10 +1204,14 @@ export default function ChatPage() {
     if (
       silenceDurationMs >= SILENCE_INTERVENTION_THRESHOLD_MS &&
       timeMs >= nextInterventionDueMs &&
-      topicLog.intervention_count < MAX_SILENCE_INTERVENTIONS_PER_TOPIC &&
+      topicLog.silence_intervention_count < MAX_SILENCE_INTERVENTIONS_PER_TOPIC &&
+      topicLog.intervention_count < MAX_AI_INTERVENTIONS_PER_TOPIC &&
       !interventionInFlightRef.current
     ) {
-      requestSilenceIntervention(topicLog, silenceDurationMs);
+      requestModeratorIntervention(topicLog, {
+        interventionReason: 'silence',
+        silenceDurationMs
+      });
     }
   };
 
@@ -888,11 +1290,18 @@ export default function ChatPage() {
     if (!trimmedText || !canUseTranscriptInput) return;
 
     const timeMs = Date.now();
-    recordHumanUtterance(selectedSpeaker, trimmedText, timeMs);
+    const utteranceResult = recordHumanUtterance(selectedSpeaker, trimmedText, timeMs);
 
     inputTextRef.current = '';
     setInputText('');
     syncSessionState('human_utterance');
+
+    if (utteranceResult?.isShortAnswer) {
+      requestModeratorIntervention(utteranceResult.topicLog, {
+        interventionReason: 'short_answer',
+        silenceDurationMs: 0
+      });
+    }
   };
 
   const handleStartTopic = () => {
@@ -911,6 +1320,21 @@ export default function ChatPage() {
     if (!hasActiveTopic) return;
 
     finishActiveTopic('experimenter_finish_topic', false);
+  };
+
+  const handleManualReflection = () => {
+    const topicLog = findActiveTopicLog();
+    if (!topicLog) return;
+
+    const timeMs = Date.now();
+    const manualSilenceDurationMs = lastHumanUtteranceEndTimeRef.current
+      ? timeMs - lastHumanUtteranceEndTimeRef.current
+      : null;
+
+    requestModeratorIntervention(topicLog, {
+      interventionReason: 'manual_reflection',
+      silenceDurationMs: manualSilenceDurationMs
+    });
   };
 
   const renderMessageLabel = (message) => (
@@ -1097,6 +1521,24 @@ export default function ChatPage() {
           >
             この話題を終了
           </button>
+          <button
+            type="button"
+            onClick={handleManualReflection}
+            disabled={!canRequestManualReflection}
+            style={{
+              padding: '9px 12px',
+              background: canRequestManualReflection ? '#ffffff' : '#eee8dc',
+              color: canRequestManualReflection ? '#245c52' : '#6b7280',
+              border: '1px solid #9eb2a7',
+              borderRadius: '6px',
+              cursor: canRequestManualReflection ? 'pointer' : 'default',
+              opacity: canRequestManualReflection ? 1 : 0.55,
+              whiteSpace: 'nowrap',
+              fontWeight: 700
+            }}
+          >
+            整理して促す
+          </button>
 
           <div
             style={{
@@ -1135,6 +1577,67 @@ export default function ChatPage() {
                   }}
                 >
                   {value}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div
+            aria-label="管理者向け内部状態"
+            style={{
+              flex: '1 1 100%',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+              gap: '8px',
+              background: '#f7f2e7',
+              border: '1px solid #e4ddcf',
+              borderRadius: '8px',
+              padding: '10px'
+            }}
+          >
+            {[
+              ['埋まったacpSlots', expressedSlotLabels.length ? expressedSlotLabels : ['未整理']],
+              ['未整理のacpSlots', missingSlotLabels.length ? missingSlotLabels : ['なし']],
+              ['直近のAI介入理由', [lastInterventionReasonDisplay]],
+              ['介入回数', [interventionCountDisplay]]
+            ].map(([label, values]) => (
+              <div key={label} style={{ minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    color: '#6b7280',
+                    marginBottom: '6px',
+                    fontWeight: 700
+                  }}
+                >
+                  {label}
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: '5px'
+                  }}
+                >
+                  {values.map((value) => (
+                    <span
+                      key={value}
+                      style={{
+                        maxWidth: '100%',
+                        border: '1px solid #d8d1c2',
+                        background: '#fffaf0',
+                        color: '#1f2933',
+                        borderRadius: '999px',
+                        padding: '3px 7px',
+                        fontSize: '12px',
+                        lineHeight: 1.35,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis'
+                      }}
+                    >
+                      {value}
+                    </span>
+                  ))}
                 </div>
               </div>
             ))}
