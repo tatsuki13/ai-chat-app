@@ -1354,431 +1354,586 @@ export default function ChatPage() {
     </div>
   );
 
+  const metricItems = [
+    ['状態', STATE_LABELS[topicState]],
+    ['発話開始潜時', latencyDisplay],
+    ['沈黙時間', silenceDisplay],
+    ['介入回数', interventionCountDisplay]
+  ];
+
+  const perspectiveItems = [
+    ['話された観点', expressedSlotLabels.length ? expressedSlotLabels : ['未整理']],
+    ['まだ触れていない観点', missingSlotLabels.length ? missingSlotLabels : ['なし']],
+    ['直近のAI介入理由', [lastInterventionReasonDisplay]]
+  ];
+
   return (
-    <main
-      style={{
-        minHeight: '100vh',
-        background: '#f3f0e8',
-        color: '#1f2933',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '24px',
-        fontFamily:
-          '"Hiragino Sans", "Yu Gothic", "Meiryo", system-ui, sans-serif'
-      }}
-    >
+    <main className="appShell">
       <section
+        className="workspace"
         aria-label="これからの暮らしについて話すチャット"
-        style={{
-          width: 'min(860px, 100%)',
-          height: 'min(820px, calc(100vh - 48px))',
-          minHeight: '620px',
-          background: '#fffaf0',
-          border: '1px solid #d8d1c2',
-          borderRadius: '8px',
-          boxShadow: '0 18px 40px rgba(31, 41, 51, 0.14)',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden'
-        }}
       >
-        <header
-          style={{
-            background: '#245c52',
-            color: 'white',
-            padding: '18px 20px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '16px'
-          }}
-        >
-          <div>
-            <h1
-              style={{
-                margin: 0,
-                fontSize: '20px',
-                lineHeight: 1.35,
-                fontWeight: 700
-              }}
+        <aside className="controlPane" aria-label="進行管理">
+          <header className="controlHeader">
+            <div>
+              <h1>これからの暮らし相談</h1>
+              <p>中立的司会者エージェント</p>
+            </div>
+
+            <button
+              className="resetButton"
+              type="button"
+              onClick={resetConversation}
             >
-              これからの暮らし相談
-            </h1>
-            <p style={{ margin: '4px 0 0', fontSize: '13px', opacity: 0.9 }}>
-              中立的司会者エージェント
-            </p>
-          </div>
+              最初から
+            </button>
+          </header>
 
-          <button
-            type="button"
-            onClick={resetConversation}
-            style={{
-              border: '1px solid rgba(255, 255, 255, 0.7)',
-              background: 'rgba(255, 255, 255, 0.12)',
-              color: 'white',
-              borderRadius: '6px',
-              padding: '8px 12px',
-              cursor: 'pointer',
-              whiteSpace: 'nowrap'
-            }}
-          >
-            最初から
-          </button>
-        </header>
-
-        <div
-          style={{
-            padding: '12px 20px',
-            borderBottom: '1px solid #e4ddcf',
-            background: '#fff5df',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '12px'
-          }}
-        >
-          <div
-            aria-hidden="true"
-            style={{
-              flex: 1,
-              height: '8px',
-              background: '#e5ddca',
-              borderRadius: '999px',
-              overflow: 'hidden'
-            }}
-          >
-            <div
-              style={{
-                width: `${(progressValue / topics.length) * 100}%`,
-                height: '100%',
-                background: '#d26f3f'
-              }}
-            />
-          </div>
-          <span style={{ fontSize: '13px', color: '#5f6c72' }}>
-            {isSessionComplete
-              ? '完了'
-              : currentTopicIndex === null
-                ? `${Math.min(nextTopicNumber, topics.length)} / ${topics.length}`
-                : `${currentTopicIndex + 1} / ${topics.length}`}
-          </span>
-        </div>
-
-        <div
-          style={{
-            borderBottom: '1px solid #e4ddcf',
-            background: '#fffaf0',
-            padding: '14px 20px',
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '10px',
-            alignItems: 'center'
-          }}
-        >
-          <button
-            type="button"
-            onClick={handleStartTopic}
-            disabled={!canStartTopic}
-            style={{
-              padding: '9px 12px',
-              background: canStartTopic ? '#245c52' : '#d7d1c5',
-              color: canStartTopic ? 'white' : '#6b7280',
-              border: '1px solid transparent',
-              borderRadius: '6px',
-              cursor: canStartTopic ? 'pointer' : 'default',
-              whiteSpace: 'nowrap',
-              fontWeight: 700
-            }}
-          >
-            話題開始
-          </button>
-          <button
-            type="button"
-            onClick={handleNextTopic}
-            disabled={!hasActiveTopic}
-            style={{
-              padding: '9px 12px',
-              background: '#ffffff',
-              color: '#245c52',
-              border: '1px solid #9eb2a7',
-              borderRadius: '6px',
-              cursor: hasActiveTopic ? 'pointer' : 'default',
-              opacity: hasActiveTopic ? 1 : 0.5,
-              whiteSpace: 'nowrap'
-            }}
-          >
-            次の話題へ
-          </button>
-          <button
-            type="button"
-            onClick={handleFinishTopic}
-            disabled={!hasActiveTopic}
-            style={{
-              padding: '9px 12px',
-              background: '#ffffff',
-              color: '#8a3f2a',
-              border: '1px solid #d9aa96',
-              borderRadius: '6px',
-              cursor: hasActiveTopic ? 'pointer' : 'default',
-              opacity: hasActiveTopic ? 1 : 0.5,
-              whiteSpace: 'nowrap'
-            }}
-          >
-            この話題を終了
-          </button>
-          <button
-            type="button"
-            onClick={handleManualReflection}
-            disabled={!canRequestManualReflection}
-            style={{
-              padding: '9px 12px',
-              background: canRequestManualReflection ? '#ffffff' : '#eee8dc',
-              color: canRequestManualReflection ? '#245c52' : '#6b7280',
-              border: '1px solid #9eb2a7',
-              borderRadius: '6px',
-              cursor: canRequestManualReflection ? 'pointer' : 'default',
-              opacity: canRequestManualReflection ? 1 : 0.55,
-              whiteSpace: 'nowrap',
-              fontWeight: 700
-            }}
-          >
-            整理して促す
-          </button>
-
-          <div
-            style={{
-              flex: '1 1 420px',
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(116px, 1fr))',
-              gap: '8px',
-              minWidth: 0
-            }}
-          >
-            {[
-              ['状態', STATE_LABELS[topicState]],
-              ['発話開始潜時', latencyDisplay],
-              ['沈黙時間', silenceDisplay],
-              ['介入回数', interventionCountDisplay]
-            ].map(([label, value]) => (
+          <section className="progressPanel" aria-label="進捗">
+            <div className="progressMeta">
+              <span>進捗</span>
+              <strong>
+                {isSessionComplete
+                  ? '完了'
+                  : currentTopicIndex === null
+                    ? `${Math.min(nextTopicNumber, topics.length)} / ${topics.length}`
+                    : `${currentTopicIndex + 1} / ${topics.length}`}
+              </strong>
+            </div>
+            <div className="progressTrack" aria-hidden="true">
               <div
-                key={label}
-                style={{
-                  minWidth: 0,
-                  background: '#fbf7ee',
-                  border: '1px solid #e4ddcf',
-                  borderRadius: '6px',
-                  padding: '7px 9px'
-                }}
-              >
-                <div style={{ fontSize: '11px', color: '#6b7280' }}>{label}</div>
-                <div
-                  style={{
-                    fontSize: '13px',
-                    color: '#1f2933',
-                    fontWeight: 700,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap'
-                  }}
-                >
-                  {value}
-                </div>
+                className="progressFill"
+                style={{ width: `${(progressValue / topics.length) * 100}%` }}
+              />
+            </div>
+          </section>
+
+          <section className="controlSection" aria-label="話題操作">
+            <button
+              className="controlButton primary"
+              type="button"
+              onClick={handleStartTopic}
+              disabled={!canStartTopic}
+            >
+              話題開始
+            </button>
+            <button
+              className="controlButton"
+              type="button"
+              onClick={handleNextTopic}
+              disabled={!hasActiveTopic}
+            >
+              次の話題へ
+            </button>
+            <button
+              className="controlButton danger"
+              type="button"
+              onClick={handleFinishTopic}
+              disabled={!hasActiveTopic}
+            >
+              この話題を終了
+            </button>
+            <button
+              className="controlButton emphasis"
+              type="button"
+              onClick={handleManualReflection}
+              disabled={!canRequestManualReflection}
+            >
+              整理して促す
+            </button>
+          </section>
+
+          <section className="metricGrid" aria-label="状態">
+            {metricItems.map(([label, value]) => (
+              <div className="metricCell" key={label}>
+                <div className="metricLabel">{label}</div>
+                <div className="metricValue">{value}</div>
               </div>
             ))}
-          </div>
+          </section>
 
-          <div
-            aria-label="管理者向け内部状態"
-            style={{
-              flex: '1 1 100%',
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-              gap: '8px',
-              background: '#f7f2e7',
-              border: '1px solid #e4ddcf',
-              borderRadius: '8px',
-              padding: '10px'
-            }}
-          >
-            {[
-              ['埋まったacpSlots', expressedSlotLabels.length ? expressedSlotLabels : ['未整理']],
-              ['未整理のacpSlots', missingSlotLabels.length ? missingSlotLabels : ['なし']],
-              ['直近のAI介入理由', [lastInterventionReasonDisplay]],
-              ['介入回数', [interventionCountDisplay]]
-            ].map(([label, values]) => (
-              <div key={label} style={{ minWidth: 0 }}>
-                <div
-                  style={{
-                    fontSize: '11px',
-                    color: '#6b7280',
-                    marginBottom: '6px',
-                    fontWeight: 700
-                  }}
-                >
-                  {label}
-                </div>
-                <div
-                  style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '5px'
-                  }}
-                >
+          <section className="perspectivePanel" aria-label="ACP観点">
+            {perspectiveItems.map(([label, values]) => (
+              <div className="perspectiveGroup" key={label}>
+                <div className="perspectiveLabel">{label}</div>
+                <div className="tagList">
                   {values.map((value) => (
-                    <span
-                      key={value}
-                      style={{
-                        maxWidth: '100%',
-                        border: '1px solid #d8d1c2',
-                        background: '#fffaf0',
-                        color: '#1f2933',
-                        borderRadius: '999px',
-                        padding: '3px 7px',
-                        fontSize: '12px',
-                        lineHeight: 1.35,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis'
-                      }}
-                    >
+                    <span className="tag" key={value}>
                       {value}
                     </span>
                   ))}
                 </div>
               </div>
             ))}
+          </section>
+        </aside>
+
+        <section className="chatPane" aria-label="会話エリア">
+          <div className="chatHeader">
+            <h2>会話ログ</h2>
           </div>
-        </div>
 
-        <div
-          style={{
-            flex: 1,
-            padding: '20px',
-            overflowY: 'auto',
-            background: '#fbf7ee',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '12px'
-          }}
-        >
-          {messages.map((message) => {
-            const isModerator = message.sender === 'moderator';
-            const isPartner = message.sender === 'partner';
-
-            return (
-              <div
-                key={message.id}
-                style={{
-                  alignSelf: isModerator ? 'flex-start' : 'flex-end',
-                  background: isModerator
-                    ? '#ffffff'
-                    : isPartner
-                      ? '#5f557b'
-                      : '#245c52',
-                  color: isModerator ? '#1f2933' : 'white',
-                  padding: '10px 14px 12px',
-                  border: isModerator ? '1px solid #e0d8c8' : '1px solid transparent',
-                  borderRadius: isModerator
-                    ? '16px 16px 16px 4px'
-                    : '16px 16px 4px 16px',
-                  maxWidth: '82%',
-                  lineHeight: 1.7,
-                  fontSize: '15px',
-                  wordBreak: 'break-word',
-                  whiteSpace: 'pre-line'
-                }}
-              >
-                {renderMessageLabel(message)}
-                {message.text}
-              </div>
-            );
-          })}
-
-          <div ref={messagesEndRef} />
-        </div>
-
-        <form
-          onSubmit={handleSendMessage}
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '10px',
-            padding: '14px',
-            borderTop: '1px solid #e4ddcf',
-            background: '#fffaf0',
-            alignItems: 'center'
-          }}
-        >
-          <div
-            style={{
-              display: 'flex',
-              gap: '6px',
-              alignItems: 'center'
-            }}
-          >
-            {SPEAKERS.map((speaker) => {
-              const selected = selectedSpeaker === speaker.id;
+          <div className="chatLog" aria-label="会話ログ">
+            {messages.map((message) => {
+              const isModerator = message.sender === 'moderator';
+              const isPartner = message.sender === 'partner';
 
               return (
-                <button
-                  key={speaker.id}
-                  type="button"
-                  onClick={() => setSelectedSpeaker(speaker.id)}
+                <div
+                  className="messageBubble"
+                  key={message.id}
                   style={{
-                    padding: '10px 12px',
-                    background: selected ? '#245c52' : '#ffffff',
-                    color: selected ? 'white' : '#245c52',
-                    border: '1px solid #9eb2a7',
-                    borderRadius: '6px',
-                    cursor: 'pointer',
-                    whiteSpace: 'nowrap',
-                    fontWeight: selected ? 700 : 400
+                    alignSelf: isModerator ? 'flex-start' : 'flex-end',
+                    background: isModerator
+                      ? '#ffffff'
+                      : isPartner
+                        ? '#5f557b'
+                        : '#245c52',
+                    color: isModerator ? '#1f2933' : 'white',
+                    border: isModerator
+                      ? '1px solid #dbe1e4'
+                      : '1px solid transparent',
+                    borderRadius: isModerator
+                      ? '16px 16px 16px 4px'
+                      : '16px 16px 4px 16px'
                   }}
                 >
-                  {speaker.label}
-                </button>
+                  {renderMessageLabel(message)}
+                  {message.text}
+                </div>
               );
             })}
+
+            <div ref={messagesEndRef} />
           </div>
 
-          <input
-            type="text"
-            value={inputText}
-            onChange={handleInputChange}
-            placeholder={
-              canUseTranscriptInput
-                ? '発話を入力'
-                : '話題開始後に入力できます'
-            }
-            disabled={!canUseTranscriptInput}
-            style={{
-              flex: '1 1 240px',
-              minWidth: 0,
-              padding: '12px',
-              borderRadius: '6px',
-              border: '1px solid #cfc5b2',
-              background: canUseTranscriptInput ? 'white' : '#eee8dc',
-              fontSize: '15px'
-            }}
-          />
-          <button
-            type="submit"
-            disabled={!canUseTranscriptInput}
-            style={{
-              padding: '10px 18px',
-              background: '#d26f3f',
-              color: 'white',
-              border: '1px solid #d26f3f',
-              borderRadius: '6px',
-              cursor: canUseTranscriptInput ? 'pointer' : 'default',
-              opacity: canUseTranscriptInput ? 1 : 0.55,
-              whiteSpace: 'nowrap',
-              fontWeight: 700
-            }}
-          >
-            追加
-          </button>
-        </form>
+          <form className="composer" onSubmit={handleSendMessage}>
+            <div className="speakerSwitcher" aria-label="発話者切り替え">
+              {SPEAKERS.map((speaker) => {
+                const selected = selectedSpeaker === speaker.id;
+
+                return (
+                  <button
+                    className={`speakerButton${selected ? ' selected' : ''}`}
+                    key={speaker.id}
+                    type="button"
+                    onClick={() => setSelectedSpeaker(speaker.id)}
+                  >
+                    {speaker.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <input
+              className="messageInput"
+              type="text"
+              value={inputText}
+              onChange={handleInputChange}
+              placeholder={
+                canUseTranscriptInput
+                  ? '発話を入力'
+                  : '話題開始後に入力できます'
+              }
+              disabled={!canUseTranscriptInput}
+            />
+            <button
+              className="submitButton"
+              type="submit"
+              disabled={!canUseTranscriptInput}
+            >
+              追加
+            </button>
+          </form>
+        </section>
       </section>
+
+      <style jsx>{`
+        .appShell {
+          min-height: 100vh;
+          box-sizing: border-box;
+          background: #f4f6f5;
+          color: #1f2933;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          font-family:
+            "Hiragino Sans", "Yu Gothic", "Meiryo", system-ui, sans-serif;
+        }
+
+        .workspace {
+          width: min(1400px, calc(100vw - 48px));
+          height: min(860px, calc(100vh - 48px));
+          min-height: 620px;
+          background: #ffffff;
+          border: 1px solid #d7dee2;
+          border-radius: 8px;
+          box-shadow: 0 18px 40px rgba(31, 41, 51, 0.14);
+          display: grid;
+          grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+          overflow: hidden;
+        }
+
+        .controlPane {
+          min-width: 0;
+          min-height: 0;
+          overflow-y: auto;
+          background: #fbfcfb;
+          border-right: 1px solid #d7dee2;
+          display: flex;
+          flex-direction: column;
+        }
+
+        .controlHeader {
+          background: #245c52;
+          color: white;
+          padding: 20px;
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 14px;
+        }
+
+        .controlHeader h1 {
+          margin: 0;
+          font-size: 20px;
+          line-height: 1.35;
+          font-weight: 700;
+        }
+
+        .controlHeader p {
+          margin: 5px 0 0;
+          font-size: 13px;
+          opacity: 0.88;
+        }
+
+        .resetButton,
+        .controlButton,
+        .speakerButton,
+        .submitButton {
+          border-radius: 6px;
+          cursor: pointer;
+          font: inherit;
+          white-space: nowrap;
+        }
+
+        .resetButton {
+          flex: 0 0 auto;
+          border: 1px solid rgba(255, 255, 255, 0.72);
+          background: rgba(255, 255, 255, 0.12);
+          color: white;
+          padding: 8px 12px;
+        }
+
+        .progressPanel,
+        .controlSection,
+        .metricGrid,
+        .perspectivePanel {
+          padding: 16px 18px;
+          border-bottom: 1px solid #e3e8eb;
+        }
+
+        .progressMeta {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          color: #516066;
+          font-size: 13px;
+          margin-bottom: 9px;
+        }
+
+        .progressMeta strong {
+          color: #1f2933;
+          font-size: 14px;
+        }
+
+        .progressTrack {
+          height: 8px;
+          background: #dfe6e5;
+          border-radius: 999px;
+          overflow: hidden;
+        }
+
+        .progressFill {
+          height: 100%;
+          background: #d26f3f;
+        }
+
+        .controlSection {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 8px;
+        }
+
+        .controlButton {
+          width: 100%;
+          padding: 10px 12px;
+          background: #ffffff;
+          color: #245c52;
+          border: 1px solid #9eb2a7;
+          font-weight: 700;
+          text-align: center;
+        }
+
+        .controlButton.primary {
+          background: #245c52;
+          color: #ffffff;
+          border-color: #245c52;
+        }
+
+        .controlButton.danger {
+          color: #8a3f2a;
+          border-color: #d9aa96;
+        }
+
+        .controlButton.emphasis {
+          border-color: #6c9a88;
+        }
+
+        .controlButton:disabled,
+        .submitButton:disabled {
+          background: #e5e9eb;
+          border-color: #d3d9dd;
+          color: #6b7280;
+          cursor: default;
+          opacity: 0.65;
+        }
+
+        .metricGrid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+
+        .metricCell {
+          min-width: 0;
+          background: #ffffff;
+          border: 1px solid #dfe6e9;
+          border-radius: 6px;
+          padding: 9px 10px;
+        }
+
+        .metricLabel,
+        .perspectiveLabel {
+          color: #64727a;
+          font-size: 11px;
+          font-weight: 700;
+        }
+
+        .metricValue {
+          margin-top: 3px;
+          color: #1f2933;
+          font-size: 13px;
+          font-weight: 700;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .perspectivePanel {
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+          border-bottom: 0;
+        }
+
+        .tagList {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-top: 7px;
+        }
+
+        .tag {
+          max-width: 100%;
+          border: 1px solid #d6dee2;
+          background: #ffffff;
+          color: #1f2933;
+          border-radius: 999px;
+          padding: 4px 8px;
+          font-size: 12px;
+          line-height: 1.35;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .chatPane {
+          min-width: 0;
+          min-height: 0;
+          background: #f7f9f8;
+          display: flex;
+          flex-direction: column;
+        }
+
+        .chatHeader {
+          flex: 0 0 auto;
+          padding: 16px 24px;
+          background: #ffffff;
+          border-bottom: 1px solid #e3e8eb;
+        }
+
+        .chatHeader h2 {
+          margin: 0;
+          color: #1f2933;
+          font-size: 16px;
+          line-height: 1.35;
+        }
+
+        .chatLog {
+          flex: 1;
+          min-height: 0;
+          padding: 24px;
+          overflow-y: auto;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .messageBubble {
+          max-width: min(760px, 82%);
+          padding: 10px 14px 12px;
+          line-height: 1.7;
+          font-size: 15px;
+          word-break: break-word;
+          white-space: pre-line;
+          box-shadow: 0 1px 2px rgba(31, 41, 51, 0.06);
+        }
+
+        .composer {
+          flex: 0 0 auto;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          padding: 14px 16px;
+          border-top: 1px solid #e3e8eb;
+          background: #ffffff;
+          align-items: center;
+        }
+
+        .speakerSwitcher {
+          display: flex;
+          gap: 6px;
+          align-items: center;
+        }
+
+        .speakerButton {
+          padding: 10px 12px;
+          background: #ffffff;
+          color: #245c52;
+          border: 1px solid #9eb2a7;
+        }
+
+        .speakerButton.selected {
+          background: #245c52;
+          color: #ffffff;
+          font-weight: 700;
+        }
+
+        .messageInput {
+          flex: 1 1 280px;
+          min-width: 0;
+          padding: 12px;
+          border-radius: 6px;
+          border: 1px solid #cbd5da;
+          background: #ffffff;
+          color: #1f2933;
+          font: inherit;
+          font-size: 15px;
+        }
+
+        .messageInput:disabled {
+          background: #eef2f3;
+          color: #6b7280;
+        }
+
+        .submitButton {
+          padding: 11px 18px;
+          background: #d26f3f;
+          color: white;
+          border: 1px solid #d26f3f;
+          font-weight: 700;
+        }
+
+        @media (max-width: 900px) {
+          .appShell {
+            align-items: stretch;
+            padding: 16px;
+          }
+
+          .workspace {
+            width: 100%;
+            height: auto;
+            min-height: calc(100vh - 32px);
+            grid-template-columns: 1fr;
+            grid-template-rows: auto minmax(520px, 1fr);
+            overflow: visible;
+          }
+
+          .controlPane {
+            overflow: visible;
+            border-right: 0;
+            border-bottom: 1px solid #d7dee2;
+          }
+
+          .controlSection {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+
+          .chatPane {
+            min-height: 560px;
+          }
+
+          .chatLog {
+            min-height: 420px;
+          }
+        }
+
+        @media (max-width: 560px) {
+          .appShell {
+            padding: 12px;
+          }
+
+          .workspace {
+            min-height: calc(100vh - 24px);
+          }
+
+          .controlHeader {
+            flex-direction: column;
+            align-items: stretch;
+          }
+
+          .controlSection,
+          .metricGrid {
+            grid-template-columns: 1fr;
+          }
+
+          .chatHeader,
+          .chatLog {
+            padding-left: 16px;
+            padding-right: 16px;
+          }
+
+          .messageBubble {
+            max-width: 94%;
+          }
+
+          .composer {
+            align-items: stretch;
+          }
+
+          .speakerSwitcher,
+          .messageInput,
+          .submitButton {
+            width: 100%;
+          }
+
+          .speakerButton {
+            flex: 1;
+          }
+        }
+      `}</style>
     </main>
   );
 }
