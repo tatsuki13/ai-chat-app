@@ -565,7 +565,7 @@ export default function ChatPage() {
     activeTopicLog.intervention_count < MAX_AI_INTERVENTIONS_PER_TOPIC
   );
 
-  const persistSessionLog = (_reason, session = sessionRef.current) => {
+  const refreshSessionSnapshot = (session = sessionRef.current) => {
     session.updatedAt = getIsoString();
     session.summary = calculateSummary(session.topicLogs);
   };
@@ -610,7 +610,7 @@ export default function ChatPage() {
     sessionRef.current.summary = calculateSummary(sessionRef.current.topicLogs);
     setMessages([...sessionRef.current.messages]);
     setMetricsVersion((version) => version + 1);
-    persistSessionLog(reason);
+    refreshSessionSnapshot();
   };
 
   const findActiveTopicLog = () => {
@@ -1245,7 +1245,7 @@ export default function ChatPage() {
   }, [messages]);
 
   useEffect(() => {
-    persistSessionLog('session_started');
+    refreshSessionSnapshot();
   }, []);
 
   useEffect(() => {
@@ -1278,7 +1278,7 @@ export default function ChatPage() {
     setTopicState(TOPIC_STATE.TOPIC_FINISHED);
     setDisplayNow(Date.now());
     setMetricsVersion((version) => version + 1);
-    persistSessionLog('session_started', nextSession);
+    refreshSessionSnapshot(nextSession);
   };
 
   const handleInputChange = (event) => {
