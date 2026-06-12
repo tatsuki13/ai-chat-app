@@ -565,23 +565,9 @@ export default function ChatPage() {
     activeTopicLog.intervention_count < MAX_AI_INTERVENTIONS_PER_TOPIC
   );
 
-  const persistSessionLog = (reason, session = sessionRef.current) => {
+  const persistSessionLog = (_reason, session = sessionRef.current) => {
     session.updatedAt = getIsoString();
     session.summary = calculateSummary(session.topicLogs);
-
-    fetch('/api/logs', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        sessionId: session.sessionId,
-        reason,
-        log: session
-      })
-    }).catch((error) => {
-      console.error('Failed to save session log', error);
-    });
   };
 
   const saveSessionToNeon = async (reason, session = sessionRef.current) => {
@@ -1260,28 +1246,6 @@ export default function ChatPage() {
 
   useEffect(() => {
     persistSessionLog('session_started');
-
-    const handlePageHide = () => {
-      const session = sessionRef.current;
-      session.updatedAt = getIsoString();
-      session.summary = calculateSummary(session.topicLogs);
-
-      if (!navigator.sendBeacon) return;
-
-      const payload = JSON.stringify({
-        sessionId: session.sessionId,
-        reason: 'pagehide',
-        log: session
-      });
-      const blob = new Blob([payload], { type: 'application/json' });
-      navigator.sendBeacon('/api/logs', blob);
-    };
-
-    window.addEventListener('pagehide', handlePageHide);
-
-    return () => {
-      window.removeEventListener('pagehide', handlePageHide);
-    };
   }, []);
 
   useEffect(() => {
