@@ -507,6 +507,8 @@ export default function ChatPage() {
   const firstUtteranceDetectedRef = useRef(false);
   const silenceSoftLoggedRef = useRef(false);
   const interventionInFlightRef = useRef(false);
+  const neonSaveInFlightRef = useRef(false);
+  const neonSaveCompletedRef = useRef(false);
   const inputTextRef = useRef('');
   const isSessionCompleteRef = useRef(false);
   const messagesEndRef = useRef(null);
@@ -580,6 +582,42 @@ export default function ChatPage() {
     }).catch((error) => {
       console.error('Failed to save session log', error);
     });
+  };
+
+  const saveSessionToNeon = async (reason, session = sessionRef.current) => {
+    if (!session.completedAt || neonSaveInFlightRef.current || neonSaveCompletedRef.current) {
+      return;
+    }
+
+    neonSaveInFlightRef.current = true;
+    session.updatedAt = getIsoString();
+    session.summary = calculateSummary(session.topicLogs);
+
+    try {
+      const response = await fetch('/api/experiment-sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          sessionId: session.sessionId,
+          reason,
+          log: session
+        })
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to save experiment session');
+      }
+
+      neonSaveCompletedRef.current = true;
+      console.log('saved to neon');
+    } catch (error) {
+      console.error('Failed to save experiment session to Neon', error);
+    } finally {
+      neonSaveInFlightRef.current = false;
+    }
   };
 
   const syncSessionState = (reason) => {
@@ -701,6 +739,7 @@ export default function ChatPage() {
       type: 'session_completed',
       at: getIsoString(timeMs)
     });
+    saveSessionToNeon('session_completed');
   };
 
   const finishActiveTopic = (reason, shouldStartNext) => {
@@ -1264,6 +1303,8 @@ export default function ChatPage() {
     firstUtteranceDetectedRef.current = false;
     silenceSoftLoggedRef.current = false;
     interventionInFlightRef.current = false;
+    neonSaveInFlightRef.current = false;
+    neonSaveCompletedRef.current = false;
     inputTextRef.current = '';
     isSessionCompleteRef.current = false;
 
