@@ -173,18 +173,32 @@ function getAverage(values) {
 function getTopicPresentationMessage(topicIndex) {
   const topic = topics[topicIndex];
 
-  return `話題 ${topicIndex + 1} です。\n\n${topic.lead}\n${topic.question}`;
+  return `話題 ${topicIndex + 1} です。\n\nそれでは、次の話題をシステムから提案します。\n\n${topic.lead}\n${topic.question}\nお二人で、話しやすいところから話してみてください。`;
 }
 
 function getTopicEndMessage() {
   return 'この話題はここまでにします。';
 }
 
-function getFallbackIntervention(interventionCount) {
-  const templates = [
-    'ここまでで、この話題について考え始めたことや、少し気になっていることが言葉になりつつあります。もし続けるなら、話しやすい観点を一つ選んで触れてみてもよさそうです。',
-    'ここまでで、大切にしたいことを少しずつ探している様子が出ています。もし続けるなら、まだ言葉にしきれていない不安について触れてみてもよさそうです。'
-  ];
+function getFallbackIntervention(interventionCount, interventionReason = 'default') {
+  const templatesByReason = {
+    silence: [
+      '少し間が空いても大丈夫です。答えを急がず、話しやすいところから続けられそうです。',
+      'まだ考えがまとまっていなくても大丈夫です。思いつくことをそのまま置いてみるところからでもよさそうです。'
+    ],
+    short_answer: [
+      '短い言葉の中にも、大切にしたい感覚が少し含まれていそうです。無理にまとめず、そのまま続けても大丈夫です。',
+      'ひとことでも、今大事にしたい感覚の手がかりになりそうです。急がず、そのまま続けても大丈夫です。'
+    ],
+    manual_reflection: [
+      'ここまでのお話には、大切にしたいことを探している様子がありました。今の言葉を手がかりに、無理なく続けられそうです。',
+      'ここまでに出た言葉を大事にしながら、急いで結論を出さなくても大丈夫です。話しやすいところから続けられそうです。'
+    ],
+    default: [
+      'ここまでで、少しずつ言葉になってきていることがあります。無理にまとめず、今浮かんでいることをそのまま続けても大丈夫です。'
+    ]
+  };
+  const templates = templatesByReason[interventionReason] || templatesByReason.default;
 
   return templates[interventionCount % templates.length];
 }
@@ -311,15 +325,18 @@ function isExtremelyShortAnswer(text) {
   return compactText.length > 0 && compactText.length <= SHORT_ANSWER_CHAR_THRESHOLD;
 }
 
-function createFallbackReflection(topicLog, promptedSlot) {
-  const expressedLabels = getExpressedPointLabels(topicLog).slice(0, 2);
-  const expressedText =
-    expressedLabels.length > 0
-      ? `${expressedLabels.join('や')}についての思い`
-      : 'この話題について考え始めたことや、少し気になっていること';
-  const nextSlot = promptedSlot || 'まだ言葉にしきれていないこと';
+function createFallbackReflection(topicLog, interventionReason = 'manual_reflection') {
+  if (interventionReason !== 'manual_reflection') {
+    return getFallbackIntervention(topicLog?.intervention_count || 0, interventionReason);
+  }
 
-  return `ここまでで、${expressedText}が少しずつ言葉になっています。もし続けるなら、${nextSlot}について、話しやすい範囲で触れてみてもよさそうです。`;
+  const expressedLabels = getExpressedPointLabels(topicLog).slice(0, 2);
+
+  if (expressedLabels.length === 0) {
+    return getFallbackIntervention(topicLog?.intervention_count || 0, interventionReason);
+  }
+
+  return `ここまでのお話では、${expressedLabels.join('や')}が言葉になっていました。その感覚を大事にしながら、話しやすいところから続けられそうです。`;
 }
 
 function clampModeratorReply(text) {
@@ -1028,7 +1045,7 @@ export default function ChatPage() {
 
       const timeMs = Date.now();
       const reply = clampModeratorReply(
-        data.reply || createFallbackReflection(topicLog, promptedSlot)
+        data.reply || createFallbackReflection(topicLog, interventionReason)
       );
       const message = pushMessage({
         text: reply,
@@ -1105,7 +1122,7 @@ export default function ChatPage() {
       if (activeTopicStillCurrent) {
         const timeMs = Date.now();
         const reply = clampModeratorReply(
-          createFallbackReflection(topicLog, promptedSlot)
+          createFallbackReflection(topicLog, interventionReason)
         );
         const message = pushMessage({
           text: reply,
