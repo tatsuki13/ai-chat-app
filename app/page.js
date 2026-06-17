@@ -1219,7 +1219,7 @@ export default function ChatPage() {
 
     const silenceDurationMs = timeMs - lastHumanUtteranceEndTimeRef.current;
 
-/*    if (silenceDurationMs >= SILENCE_SOFT_THRESHOLD_MS && !silenceSoftLoggedRef.current) {
+    if (silenceDurationMs >= SILENCE_SOFT_THRESHOLD_MS && !silenceSoftLoggedRef.current) {
       recordSoftSilence(topicLog, timeMs, silenceDurationMs);
 
       if (silenceDurationMs < SILENCE_INTERVENTION_THRESHOLD_MS) {
@@ -1254,7 +1254,7 @@ export default function ChatPage() {
         interventionReason: 'silence',
         silenceDurationMs
       });
-    }*/
+    }
   };
 
   useEffect(() => {
