@@ -62,7 +62,13 @@ function getFallbackReply(
   return `ここまでのお話では、${expressedLabels.join("や")}が言葉になっていました。その感覚を大事にしながら、話しやすいところから続けられそうです。`;
 }
 
+function shouldUseFixedReply(interventionReason: unknown) {
+  return interventionReason !== "manual_reflection";
+}
+
 export async function POST(req: Request) {
+  let fallbackReply = getFallbackReply(0, "manual_reflection");
+
   try {
     const body = await req.json();
     const {
@@ -94,11 +100,18 @@ export async function POST(req: Request) {
     const missingSlots = Array.isArray(missing_or_unclear_slots)
       ? missing_or_unclear_slots
       : [];
-    const fallbackReply = getFallbackReply(
+    fallbackReply = getFallbackReply(
       parsedInterventionCount,
       intervention_reason,
       expressedPoints
     );
+
+    if (shouldUseFixedReply(intervention_reason)) {
+      return Response.json({
+        reply: fallbackReply,
+        source: "fixed",
+      });
+    }
 
     if (!process.env.OPENAI_API_KEY) {
       return Response.json({
@@ -119,7 +132,8 @@ export async function POST(req: Request) {
           content: [
             "あなたはACP対話を支える中立的司会者です。",
             "研究上の主役は、本人と相手の人間同士の会話です。",
-            "AIの役割は、深掘り質問を続けることではありません。話題開始責任の一部を担い、沈黙や気まずさが生じたときの安全網になり、会話を人間同士へ戻す短い橋渡しをしてください。",
+            "このAPI生成は manual_reflection の場合だけに使います。",
+            "AIの役割は、深掘り質問を続けることではありません。直近の会話で出た言葉や価値観を短く映し返し、会話を人間同士へ戻す短い橋渡しをしてください。",
             "介入の目的は、不足観点を埋めることではなく、会話再開の心理的負担を下げ、人間同士の対話に戻すことである。",
             "",
             "制約:",
@@ -137,14 +151,15 @@ export async function POST(req: Request) {
             "- acpSlots、missing_or_unclear_slots、prompted_slot は内部参考情報にとどめ、スロットを埋める質問に見せない",
             "- 「〜について話してみましょう」「〜についても触れてみてください」「次は〜です」「まだ〜が話せていません」という表現を避ける",
             "",
-            "intervention_reason 別の方針:",
-            "silence: 沈黙の気まずさを和らげる。答えがまとまっていなくてもよいと伝える。新しい重い質問を投げず、必要なら「話しやすいところから」で終える。",
-            "short_answer: 短い回答を肯定的に受け止める。回答者を評価せず、理由を無理に聞き出さず、続ける余白を作る。",
-            "manual_reflection: already_expressed_points や recent_transcript を使い、ここまで出た言葉や価値観を短く映し返す。不足スロットを埋める質問にしない。新しい話題を強く促さない。",
+            "manual_reflection の方針:",
+            "- already_expressed_points や recent_transcript を使い、ここまで出た言葉や価値観を短く映し返す",
+            "- 新しい話題を強く促さない",
+            "- 不足スロットを埋める質問にしない",
+            "- 人間同士が続けやすい余白を残す",
             "",
             "返答の構成:",
-            "1文目: ここまで出た言葉、または間が空いたことを短く受け止める。",
-            "2文目: 答えを急がなくてよいこと、話しやすいところから人間同士で続けてよいことを伝える。",
+            "1文目: ここまで出た言葉や価値観を短く受け止める。",
+            "2文目: 無理に結論を出さず、人間同士で続けてよいことを伝える。",
             "話題を勝手に次へ進めず、医療や介護の判断を提案しない。"
           ].join("\n"),
         },
@@ -178,7 +193,7 @@ export async function POST(req: Request) {
     console.error(error);
 
     return Response.json({
-      reply: getFallbackReply(0),
+      reply: fallbackReply,
       source: "fallback",
       error: "Failed to generate moderator prompt",
     });
