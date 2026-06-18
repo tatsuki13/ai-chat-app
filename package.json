@@ -19,11 +19,14 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.1",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "dotenv": "^17.4.2",
+    "postcss": "^8.5.15",
     "prisma": "^7.8.0",
+    "tailwindcss": "^4.3.1",
     "typescript": "^5"
   }
 }
