@@ -28,12 +28,19 @@ type ConversationContext = {
   nextTopicTitle?: string;
 };
 
+type ExplicitNoneResponse = {
+  slotName: AcpSlotName;
+  utterance: ConversationUtterance;
+};
+
 const SYSTEM_NEXT_QUESTION = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
   "質問選択の主軸は current_topic です。ACP全体の未充足スロットは補助情報として扱ってください。",
   "current_topic と無関係な未充足スロットへ急に移らないでください。",
   "未充足スロットを機械的に埋めるのではなく、直前の会話から自然につながる質問を選んでください。",
+  "本人が「特にない」「今はない」「思いつかない」などと答えた場合、それを有効な回答として受け止め、同じ直接質問を繰り返さないでください。",
+  "その話題を続ける必要がある場合は、「大切にしていることはありますか」の言い換えではなく、最近の出来事、嫌だったこと、避けたいこと、時間の使い方など具体的な別角度にしてください。",
   "質問は高齢者を責めず、答えやすく、介護者がそのまま読み上げられる日本語にしてください。",
   "重すぎる話題へ急に飛ばず、既に十分話されている内容を繰り返さないでください。",
   "出力はJSONのみとしてください。",
@@ -47,6 +54,8 @@ const SYSTEM_UPDATE_SLOTS = [
   "会話ログを読み、指定されたACPスロットごとに状態を更新してください。",
   "statusは empty / partial / filled のいずれかです。",
   "emptyは情報なし、partialは話題は出たが具体性が足りない、filledは本人の希望・理由・文脈がある程度記録されている状態です。",
+  "本人が質問に対して「特にない」「今はない」「思いつかない」などと明示した場合、それは無回答ではなく有効回答です。該当スロットは filled とし、summaryには今は特に思い当たることがない旨を記録してください。",
+  "明示的な「ない」を、AIの推測で別の希望や価値観に置き換えないでください。",
   "本人の発話を根拠として優先し、推測で埋めないでください。",
   "出力はJSONのみとしてください。",
   "",
@@ -58,7 +67,9 @@ const SYSTEM_TOPIC_SWITCH = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、今の話題を終えて次へ進んでよいかを判定し、介護者が自然に話題を運べる一文を1つだけ生成することです。",
   "まず current_topic が十分に話されたかを、current_topic に関係する発話とスロット状態から判断してください。",
+  "本人が current_topic について「特にない」「今はない」「思いつかない」などと答えている場合、それを有効な回答として扱い、同じ直接質問を繰り返さないでください。",
   "current_topic がまだ empty または partial なら、should_switch=false とし、同じ話題をもう少し深める自然な追加質問を返してください。",
+  "should_switch=false の場合でも、直前に明示的な「ない」があるなら、同じ「ありますか」形式ではなく、具体的経験・嫌だったこと・避けたいことなど別角度の確認にしてください。",
   "current_topic が filled に近い場合だけ、should_switch=true とし、next_topic へ移る短い前置きと最初の質問を返してください。",
   "ACP全体の未充足スロットは補助情報です。今の話題と無関係な領域へ急に飛ばないでください。",
   "高齢者を責めず、介護者がそのまま読み上げられる日本語にしてください。",
@@ -121,7 +132,11 @@ let client: OpenAI | null = null;
 export async function updateSlotsFromConversation(
   context: ConversationContext,
 ): Promise<AcpSlotState[]> {
-  const fallback = fallbackUpdateSlots(context.utterances, context.slotStates);
+  const fallback = fallbackUpdateSlots(
+    context.utterances,
+    context.slotStates,
+    context.currentTopic,
+  );
   const payload = buildConversationPayload(context);
   const result = await requestJson<{ slots?: AcpSlotState[] }>(
     SYSTEM_UPDATE_SLOTS,
@@ -129,7 +144,10 @@ export async function updateSlotsFromConversation(
     { slots: fallback },
   );
 
-  const updatedSlots = Array.isArray(result.slots) ? result.slots : fallback;
+  const updatedSlots = applyExplicitNoneResponses(
+    context,
+    Array.isArray(result.slots) ? result.slots : fallback,
+  );
 
   return mergeSlotStates(context.slotStates, updatedSlots);
 }
@@ -292,6 +310,10 @@ function buildConversationPayload(context: ConversationContext) {
       status: slot.status,
       summary: slot.summary,
     })),
+    explicit_none_answers: detectExplicitNoneResponses(context).map((response) => ({
+      slot_name: response.slotName,
+      evidence_utterance: formatSpeakerEvidence(response.utterance),
+    })),
     last_utterance: context.utterances.at(-1) ?? null,
     acp_slots: ACP_SLOT_NAMES,
   };
@@ -352,10 +374,20 @@ function insertAfterMarkdownTitle(markdown: string, insertion: string) {
 function fallbackUpdateSlots(
   utterances: ConversationUtterance[],
   currentSlots: AcpSlotState[],
+  currentTopic?: string,
 ): AcpSlotState[] {
   const currentByName = new Map(currentSlots.map((slot) => [slot.slot_name, slot]));
 
   return ACP_SLOT_NAMES.map((slotName) => {
+    const explicitNone = findExplicitNoneResponseForSlot(
+      utterances,
+      slotName,
+      currentTopic,
+    );
+    if (explicitNone) {
+      return createExplicitNoneSlotState(slotName, explicitNone);
+    }
+
     const evidence = [...utterances]
       .reverse()
       .find((utterance) => hasKeyword(utterance.text, SLOT_KEYWORDS[slotName]));
@@ -387,6 +419,35 @@ function fallbackUpdateSlots(
           : "話題は出ているが、本人の希望・理由・条件の確認がまだ十分ではありません。",
       evidence_utterance: `${speaker}: ${truncate(evidence.text, 160)}`,
     };
+  });
+}
+
+function applyExplicitNoneResponses(
+  context: ConversationContext,
+  slots: AcpSlotState[],
+): AcpSlotState[] {
+  const responses = detectExplicitNoneResponses(context);
+  if (responses.length === 0) return slots;
+
+  const byName = new Map(slots.map((slot) => [slot.slot_name, slot]));
+
+  responses.forEach((response) => {
+    byName.set(
+      response.slotName,
+      createExplicitNoneSlotState(response.slotName, response.utterance),
+    );
+  });
+
+  return ACP_SLOT_NAMES.map((slotName) => {
+    return (
+      byName.get(slotName) ??
+      findSlotState(context.slotStates, slotName) ?? {
+        slot_name: slotName,
+        status: "empty",
+        summary: "未確認",
+        evidence_utterance: "",
+      }
+    );
   });
 }
 
@@ -490,6 +551,127 @@ function resolveTopic(slotName: string | undefined) {
 
 function findSlotState(slotStates: AcpSlotState[], slotName: string) {
   return slotStates.find((slot) => slot.slot_name === slotName);
+}
+
+function detectExplicitNoneResponses(
+  context: Pick<ConversationContext, "utterances" | "slotStates" | "currentTopic">,
+): ExplicitNoneResponse[] {
+  const currentTopic =
+    context.currentTopic && ACP_SLOT_NAMES.includes(context.currentTopic as AcpSlotName)
+      ? (context.currentTopic as AcpSlotName)
+      : null;
+  const latestIndex = context.utterances.length - 1;
+  const responsesBySlot = new Map<AcpSlotName, ExplicitNoneResponse>();
+
+  context.utterances.forEach((utterance, index) => {
+    if (utterance.speaker !== "elder" || !isExplicitNoneAnswer(utterance.text)) {
+      return;
+    }
+
+    const promptedSlot =
+      findPromptedSlotBeforeAnswer(context.utterances, index) ??
+      (index === latestIndex ? currentTopic : null);
+
+    if (!promptedSlot) return;
+
+    responsesBySlot.set(promptedSlot, {
+      slotName: promptedSlot,
+      utterance,
+    });
+  });
+
+  return [...responsesBySlot.values()];
+}
+
+function findExplicitNoneResponseForSlot(
+  utterances: ConversationUtterance[],
+  slotName: AcpSlotName,
+  currentTopic?: string,
+) {
+  return detectExplicitNoneResponses({
+    utterances,
+    slotStates: [],
+    currentTopic,
+  }).find((response) => response.slotName === slotName)?.utterance;
+}
+
+function findPromptedSlotBeforeAnswer(
+  utterances: ConversationUtterance[],
+  answerIndex: number,
+) {
+  for (let index = answerIndex - 1; index >= Math.max(0, answerIndex - 4); index -= 1) {
+    const utterance = utterances[index];
+    if (!utterance || utterance.speaker === "elder") continue;
+
+    const slotName = findPromptedSlotFromText(utterance.text);
+    if (slotName) return slotName;
+  }
+
+  return null;
+}
+
+function findPromptedSlotFromText(text: string) {
+  const [best] = ACP_SLOT_NAMES.map((slotName) => ({
+    slotName,
+    score: getSlotPromptScore(text, slotName),
+  })).sort((left, right) => right.score - left.score);
+
+  return best && best.score > 0 ? best.slotName : null;
+}
+
+function getSlotPromptScore(text: string, slotName: AcpSlotName) {
+  const keywords = SLOT_KEYWORDS[slotName] ?? [];
+  const keywordScore = keywords.filter((keyword) => text.includes(keyword)).length;
+  const questionScore = FALLBACK_QUESTIONS[slotName] === text ? 4 : 0;
+  const slotNameScore = text.includes(slotName) ? 3 : 0;
+
+  return keywordScore + questionScore + slotNameScore;
+}
+
+function isExplicitNoneAnswer(text: string) {
+  const normalized = normalizeAnswerText(text);
+  if (!normalized || normalized.length > 24) return false;
+
+  return (
+    /^(?:今は|今のところ|現時点では)?(?:特に|とくに|別に|あまり)?(?:ない|ありません|ないです|なし|思いつかない|浮かばない)(?:な|かな|ですね|です|と思う)?$/.test(
+      normalized,
+    ) ||
+    /^(?:今は|今のところ|現時点では)?(?:特に|とくに).*(?:ない|ありません|なし|思いつかない|浮かばない)$/.test(
+      normalized,
+    )
+  );
+}
+
+function normalizeAnswerText(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[\s　。、．.！!？?「」『』"'`]/g, "");
+}
+
+function createExplicitNoneSlotState(
+  slotName: AcpSlotName,
+  utterance: ConversationUtterance,
+): AcpSlotState {
+  return {
+    slot_name: slotName,
+    status: "filled",
+    summary:
+      slotName === "価値観"
+        ? "本人は、今は特に大切にしていることとして思い当たるものはないと話している。"
+        : `本人は「${slotName}」について、今は特に思い当たることはないと話している。`,
+    evidence_utterance: formatSpeakerEvidence(utterance),
+  };
+}
+
+function formatSpeakerEvidence(utterance: ConversationUtterance) {
+  const speaker =
+    utterance.speaker === "elder"
+      ? "本人"
+      : utterance.speaker === "caregiver"
+        ? "介護者"
+        : "家族";
+
+  return `${speaker}: ${truncate(utterance.text, 160)}`;
 }
 
 function getTopicRelatedUtterances(context: ConversationContext) {

@@ -26,13 +26,23 @@ export async function POST(request: Request) {
       "update_slots",
       optionalString(body.trigger_event_id ?? body.triggerEventId),
     );
+    const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
+    const currentTopicTitle = optionalString(
+      body.current_topic_title ?? body.currentTopicTitle,
+    );
     const context = await getSessionContext(sessionId);
-    const slotStates = await updateSlotsFromConversation(context);
+    const slotStates = await updateSlotsFromConversation({
+      ...context,
+      currentTopic,
+      currentTopicTitle,
+    });
     await saveSlotStates(sessionId, slotStates);
 
     const minutes = await generateFinalMinutes({
       utterances: context.utterances,
       slotStates,
+      currentTopic,
+      currentTopicTitle,
     });
     const savedMinutes = await saveFinalMinutes(sessionId, minutes);
 

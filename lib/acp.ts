@@ -588,6 +588,23 @@ function analyzeSlot(
   transcript: Utterance[],
   now: string,
 ): AcpSlotRecord {
+  const explicitNoneAnswer = findExplicitNoneAnswerForSlot(slot, transcript);
+
+  if (explicitNoneAnswer) {
+    return {
+      id: slot.id,
+      label: slot.label,
+      status: "filled",
+      summary:
+        slot.id === "values"
+          ? "本人は、今は特に大切にしていることとして思い当たるものはないと話している。"
+          : `本人は「${slot.label}」について、今は特に思い当たることはないと話している。`,
+      evidence_utterance: formatEvidence(explicitNoneAnswer),
+      confidence: 0.8,
+      updatedAt: now,
+    };
+  }
+
   const candidates = transcript
     .map((utterance, index) => ({
       utterance,
@@ -644,6 +661,31 @@ function analyzeSlot(
     confidence: 0,
     updatedAt: now,
   };
+}
+
+function findExplicitNoneAnswerForSlot(
+  slot: AcpSlotDefinition,
+  transcript: Utterance[],
+) {
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const utterance = transcript[index];
+
+    if (utterance.speaker !== "elder" || !isExplicitNoneAnswer(utterance.text)) {
+      continue;
+    }
+
+    const prompted = transcript
+      .slice(Math.max(0, index - 4), index)
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.speaker !== "elder" && getKeywordScore(candidate.text, slot) > 0,
+      );
+
+    if (prompted) return utterance;
+  }
+
+  return null;
 }
 
 function getUtteranceSlotScore(
@@ -761,6 +803,22 @@ function getKeywordScore(text: string, slot: AcpSlotDefinition) {
 
 function isQuestionLike(text: string) {
   return /[?？]|ですか|ますか|でしょうか|ありますか|よろしいですか/.test(text);
+}
+
+function isExplicitNoneAnswer(text: string) {
+  const normalized = text
+    .toLowerCase()
+    .replace(/[\s　。、．.！!？?「」『』"'`]/g, "");
+  if (!normalized || normalized.length > 24) return false;
+
+  return (
+    /^(?:今は|今のところ|現時点では)?(?:特に|とくに|別に|あまり)?(?:ない|ありません|ないです|なし|思いつかない|浮かばない)(?:な|かな|ですね|です|と思う)?$/.test(
+      normalized,
+    ) ||
+    /^(?:今は|今のところ|現時点では)?(?:特に|とくに).*(?:ない|ありません|なし|思いつかない|浮かばない)$/.test(
+      normalized,
+    )
+  );
 }
 
 function summarizeEvidence(text: string, status: SlotStatus) {

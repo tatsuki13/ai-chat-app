@@ -26,10 +26,18 @@ export async function POST(request: Request) {
       "check_end",
       optionalString(body.trigger_event_id ?? body.triggerEventId),
     );
+    const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
+    const currentTopicTitle = optionalString(
+      body.current_topic_title ?? body.currentTopicTitle,
+    );
     const context = await getSessionContext(sessionId);
     const slotStates =
       context.utterances.length > 0
-        ? await updateSlotsFromConversation(context)
+        ? await updateSlotsFromConversation({
+            ...context,
+            currentTopic,
+            currentTopicTitle,
+          })
         : context.slotStates;
     if (context.utterances.length > 0) {
       await saveSlotStates(sessionId, slotStates);
@@ -37,6 +45,8 @@ export async function POST(request: Request) {
     const result = await checkConversationEnd({
       ...context,
       slotStates,
+      currentTopic,
+      currentTopicTitle,
     });
     const savedSuggestion = await saveAiSuggestion({
       sessionId,

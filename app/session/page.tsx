@@ -214,6 +214,8 @@ export default function SessionPage() {
         const data = await postJson<EndCheckResponse>("/api/ai/check-end", {
           session_id: session.id,
           trigger_event_id: triggerEventId,
+          current_topic: currentTopic.slot_name,
+          current_topic_title: currentTopic.title,
         });
 
         setPromptPanel({
@@ -228,6 +230,8 @@ export default function SessionPage() {
         await postJson("/api/ai/update-slots", {
           session_id: session.id,
           trigger_event_id: triggerEventId,
+          current_topic: currentTopic.slot_name,
+          current_topic_title: currentTopic.title,
         });
 
         setPromptPanel({

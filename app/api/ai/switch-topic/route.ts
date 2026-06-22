@@ -26,10 +26,22 @@ export async function POST(request: Request) {
       "switch_topic",
       optionalString(body.trigger_event_id ?? body.triggerEventId),
     );
+    const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
+    const currentTopicTitle = optionalString(
+      body.current_topic_title ?? body.currentTopicTitle,
+    );
+    const nextTopic = optionalString(body.next_topic ?? body.nextTopic);
+    const nextTopicTitle = optionalString(body.next_topic_title ?? body.nextTopicTitle);
     const context = await getSessionContext(sessionId);
     const slotStates =
       context.utterances.length > 0
-        ? await updateSlotsFromConversation(context)
+        ? await updateSlotsFromConversation({
+            ...context,
+            currentTopic,
+            currentTopicTitle,
+            nextTopic,
+            nextTopicTitle,
+          })
         : context.slotStates;
     if (context.utterances.length > 0) {
       await saveSlotStates(sessionId, slotStates);
@@ -37,12 +49,10 @@ export async function POST(request: Request) {
     const result = await generateTopicSwitch({
       ...context,
       slotStates,
-      currentTopic: optionalString(body.current_topic ?? body.currentTopic),
-      currentTopicTitle: optionalString(
-        body.current_topic_title ?? body.currentTopicTitle,
-      ),
-      nextTopic: optionalString(body.next_topic ?? body.nextTopic),
-      nextTopicTitle: optionalString(body.next_topic_title ?? body.nextTopicTitle),
+      currentTopic,
+      currentTopicTitle,
+      nextTopic,
+      nextTopicTitle,
     });
     const savedSuggestion = await saveAiSuggestion({
       sessionId,
