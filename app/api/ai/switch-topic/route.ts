@@ -3,8 +3,12 @@ import {
   ensureButtonEvent,
   getSessionContext,
   saveAiSuggestion,
+  saveSlotStates,
 } from "../../../../lib/acp-store";
-import { generateTopicSwitch } from "../../../../lib/llm";
+import {
+  generateTopicSwitch,
+  updateSlotsFromConversation,
+} from "../../../../lib/llm";
 
 export const runtime = "nodejs";
 
@@ -23,7 +27,17 @@ export async function POST(request: Request) {
       optionalString(body.trigger_event_id ?? body.triggerEventId),
     );
     const context = await getSessionContext(sessionId);
-    const result = await generateTopicSwitch(context);
+    const slotStates =
+      context.utterances.length > 0
+        ? await updateSlotsFromConversation(context)
+        : context.slotStates;
+    if (context.utterances.length > 0) {
+      await saveSlotStates(sessionId, slotStates);
+    }
+    const result = await generateTopicSwitch({
+      ...context,
+      slotStates,
+    });
     const savedSuggestion = await saveAiSuggestion({
       sessionId,
       triggerEventId: trigger.id,
@@ -43,6 +57,7 @@ export async function POST(request: Request) {
         target_slot: result.target_slot,
         reason: result.reason,
         sensitivity: result.sensitivity,
+        slot_states_updated: context.utterances.length > 0,
         created_at: savedSuggestion.createdAt.toISOString(),
       },
     });

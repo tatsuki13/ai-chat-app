@@ -3,8 +3,12 @@ import {
   ensureButtonEvent,
   getSessionContext,
   saveAiSuggestion,
+  saveSlotStates,
 } from "../../../../lib/acp-store";
-import { checkConversationEnd } from "../../../../lib/llm";
+import {
+  checkConversationEnd,
+  updateSlotsFromConversation,
+} from "../../../../lib/llm";
 
 export const runtime = "nodejs";
 
@@ -23,7 +27,17 @@ export async function POST(request: Request) {
       optionalString(body.trigger_event_id ?? body.triggerEventId),
     );
     const context = await getSessionContext(sessionId);
-    const result = await checkConversationEnd(context);
+    const slotStates =
+      context.utterances.length > 0
+        ? await updateSlotsFromConversation(context)
+        : context.slotStates;
+    if (context.utterances.length > 0) {
+      await saveSlotStates(sessionId, slotStates);
+    }
+    const result = await checkConversationEnd({
+      ...context,
+      slotStates,
+    });
     const savedSuggestion = await saveAiSuggestion({
       sessionId,
       triggerEventId: trigger.id,
@@ -43,6 +57,7 @@ export async function POST(request: Request) {
         message: result.message,
         reason: result.reason,
         remaining_slots: result.remaining_slots,
+        slot_states_updated: context.utterances.length > 0,
         created_at: savedSuggestion.createdAt.toISOString(),
       },
     });
