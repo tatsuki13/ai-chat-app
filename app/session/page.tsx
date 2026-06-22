@@ -30,6 +30,7 @@ type PromptPanelState = {
 };
 
 const STORAGE_KEY = "acp-hitl-current-session-id";
+const MAX_RENDERED_UTTERANCES = 120;
 const INITIAL_PROMPT_PANEL: PromptPanelState = {
   title: "最初の話題提供",
   body: "最近の生活で、これからも続けたいことは何ですか。\nお二人で、話しやすいところから話してみてください。",
@@ -39,6 +40,7 @@ const INITIAL_PROMPT_PANEL: PromptPanelState = {
 export default function SessionPage() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [utterances, setUtterances] = useState<Utterance[]>([]);
+  const [utteranceTotal, setUtteranceTotal] = useState(0);
   const [speaker, setSpeaker] = useState<Speaker>("elder");
   const [draft, setDraft] = useState("");
   const [busyAction, setBusyAction] = useState<ButtonType | "start" | "id" | null>("start");
@@ -52,6 +54,11 @@ export default function SessionPage() {
   const idInputRef = useRef<HTMLInputElement | null>(null);
 
   const displayId = session?.participant_code || session?.id || "準備中";
+  const visibleUtterances = utterances.slice(-MAX_RENDERED_UTTERANCES);
+  const hiddenUtteranceCount = Math.max(
+    0,
+    utteranceTotal - visibleUtterances.length,
+  );
 
   useEffect(() => {
     let ignore = false;
@@ -66,6 +73,7 @@ export default function SessionPage() {
           if (!ignore) {
             setSession(restored.session);
             setUtterances(restored.utterances);
+            setUtteranceTotal(restored.utterance_count);
             setStatusText("保存中");
             setBusyAction(null);
           }
@@ -78,6 +86,7 @@ export default function SessionPage() {
         if (!ignore) {
           window.localStorage.setItem(STORAGE_KEY, created.id);
           setSession(created);
+          setUtteranceTotal(0);
           setStatusText("保存中");
           setBusyAction(null);
         }
@@ -125,7 +134,10 @@ export default function SessionPage() {
 
     try {
       const utterance = await addUtterance(session.id, speaker, text);
-      setUtterances((current) => [...current, utterance]);
+      setUtterances((current) =>
+        [...current, utterance].slice(-MAX_RENDERED_UTTERANCES),
+      );
+      setUtteranceTotal((current) => current + 1);
       setStatusText("保存済み");
     } catch {
       setDraft(text);
@@ -143,6 +155,7 @@ export default function SessionPage() {
 
     setBusyAction(buttonType);
     setStatusText("保存中");
+    setPromptPanel(getPendingPrompt(buttonType));
 
     try {
       const triggerEventId = await saveButtonEvent(session.id, buttonType);
@@ -234,6 +247,7 @@ export default function SessionPage() {
       window.localStorage.setItem(STORAGE_KEY, created.id);
       setSession(created);
       setUtterances([]);
+      setUtteranceTotal(0);
       setDraft("");
       setStatusText("保存中");
     } catch {
@@ -349,15 +363,24 @@ export default function SessionPage() {
         </div>
 
         <section className="rounded-lg border border-stone-200 bg-white shadow-sm">
-          <div className="border-b border-stone-200 px-4 py-3">
-            <div className="text-[13px] font-black text-stone-500">話し合うお題</div>
-            <h2 className="mt-1 text-[22px] font-black leading-tight text-stone-950">
-              {DISCUSSION_TOPIC.title}
-            </h2>
-            <p className="mt-2 text-[15px] font-semibold leading-relaxed text-stone-600">
+          <details className="group border-b border-stone-200">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
+              <div className="min-w-0">
+                <div className="text-[13px] font-black text-stone-500">
+                  今日の機会
+                </div>
+                <h2 className="mt-1 truncate text-[20px] font-black leading-tight text-stone-950">
+                  {DISCUSSION_TOPIC.title}
+                </h2>
+              </div>
+              <span className="shrink-0 rounded-full border border-stone-300 bg-stone-50 px-3 py-1 text-[13px] font-black text-stone-600">
+                説明
+              </span>
+            </summary>
+            <div className="border-t border-stone-100 px-4 pb-4 text-[15px] font-semibold leading-relaxed text-stone-600">
               {DISCUSSION_TOPIC.description}
-            </p>
-          </div>
+            </div>
+          </details>
           <div className="px-4 py-4">
             <PromptPanel prompt={promptPanel} />
           </div>
@@ -367,7 +390,7 @@ export default function SessionPage() {
           <div className="flex items-center justify-between border-b border-stone-200 px-4 py-3">
             <h2 className="text-[18px] font-black leading-tight">会話ログ</h2>
             <span className="text-[13px] font-bold text-stone-500">
-              {utterances.length}件
+              {utteranceTotal}件
             </span>
           </div>
 
@@ -378,7 +401,12 @@ export default function SessionPage() {
               <EmptyState text="発話を入力するとここに表示されます" />
             ) : (
               <div className="space-y-3">
-                {utterances.map((utterance) => (
+                {hiddenUtteranceCount > 0 ? (
+                  <div className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-center text-[13px] font-bold text-stone-500">
+                    以前の発話 {hiddenUtteranceCount} 件
+                  </div>
+                ) : null}
+                {visibleUtterances.map((utterance) => (
                   <SpeechBubble key={utterance.id} utterance={utterance} />
                 ))}
                 <div ref={logEndRef} />
@@ -492,6 +520,38 @@ function PromptPanel(props: { prompt: PromptPanelState | null }) {
   );
 }
 
+function getPendingPrompt(buttonType: ButtonType): PromptPanelState {
+  if (buttonType === "next_question") {
+    return {
+      title: "AIからの質問",
+      body: "現在の会話に合う質問を生成しています。",
+      tone: "status",
+    };
+  }
+
+  if (buttonType === "switch_topic") {
+    return {
+      title: "話題を変える一言",
+      body: "自然につながる話題転換を生成しています。",
+      tone: "status",
+    };
+  }
+
+  if (buttonType === "check_end") {
+    return {
+      title: "終了確認",
+      body: "今日の対話を終えてよいか確認しています。",
+      tone: "status",
+    };
+  }
+
+  return {
+    title: "議事録更新",
+    body: "会話ログから議事録を更新しています。",
+    tone: "status",
+  };
+}
+
 function EmptyState(props: { text: string }) {
   return (
     <div className="flex min-h-[210px] items-center justify-center rounded-lg border border-dashed border-stone-300 bg-white px-4 text-center text-[17px] font-bold text-stone-500">
@@ -589,9 +649,10 @@ async function startSession(): Promise<SessionInfo> {
 
 async function fetchSessionDetail(sessionId: string): Promise<{
   session: SessionInfo;
+  utterance_count: number;
   utterances: Utterance[];
 }> {
-  const response = await fetch(`/api/admin/session/${encodeURIComponent(sessionId)}`, {
+  const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}`, {
     cache: "no-store",
   });
 
