@@ -7,60 +7,58 @@ datasource db {
 }
 
 model ExperimentSession {
-  id                               String     @id
-  condition                        String?
-  startedAt                        DateTime?
-  completedAt                      DateTime?
-  presetTopicDurationMs            Int?
-  silenceSoftThresholdMs           Int?
-  silenceInterventionThresholdMs   Int?
-  maxSilenceInterventionsPerTopic  Int?
-  rawLog                           Json?
-  createdAt                        DateTime   @default(now())
-  updatedAt                        DateTime   @updatedAt
-
-  topicLogs                        TopicLog[]
+  id                              String     @id
+  condition                       String?
+  startedAt                       DateTime?
+  completedAt                     DateTime?
+  presetTopicDurationMs           Int?
+  silenceSoftThresholdMs          Int?
+  silenceInterventionThresholdMs  Int?
+  maxSilenceInterventionsPerTopic Int?
+  rawLog                          Json?
+  createdAt                       DateTime   @default(now())
+  updatedAt                       DateTime   @updatedAt
+  topicLogs                       TopicLog[]
 
   @@index([condition])
   @@index([startedAt])
 }
 
 model TopicLog {
-  id                            String              @id @default(cuid())
-  sessionId                     String
-  topicId                       String
-  topicIndex                    Int
-  level                         Int?
-  lead                          String?
-  question                      String              @db.Text
-  acpSlots                      String[]            @default([])
-  expressedPoints               Json?
-  missingOrUnclearSlots         String[]            @default([])
-  slotEvidence                  Json?
-  presentedAt                   DateTime?
-  startedAt                     DateTime?
-  endedAt                       DateTime?
-  firstUtteranceAt              DateTime?
-  latencyToFirstUtteranceMs     Int?
-  endReason                     String?
-  interventionCount             Int                 @default(0)
-  silenceInterventionCount      Int                 @default(0)
-  utteranceCountUser            Int                 @default(0)
-  utteranceCountPartner         Int                 @default(0)
-  totalUserCharCount            Int                 @default(0)
-  totalPartnerCharCount         Int                 @default(0)
-  firstUtteranceDetected        Boolean             @default(false)
-  lastHumanUtteranceEndAt       DateTime?
-  currentState                  String?
-  stateHistory                  Json?
-  silenceEvents                 Json?
-  rawLog                        Json?
-  createdAt                     DateTime            @default(now())
-  updatedAt                     DateTime            @updatedAt
-
-  session                       ExperimentSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  utterances                    Utterance[]
-  interventions                 Intervention[]
+  id                        String            @id @default(cuid())
+  sessionId                 String
+  topicId                   String
+  topicIndex                Int
+  level                     Int?
+  lead                      String?
+  question                  String
+  acpSlots                  String[]          @default([])
+  expressedPoints           Json?
+  missingOrUnclearSlots     String[]          @default([])
+  slotEvidence              Json?
+  presentedAt               DateTime?
+  startedAt                 DateTime?
+  endedAt                   DateTime?
+  firstUtteranceAt          DateTime?
+  latencyToFirstUtteranceMs Int?
+  endReason                 String?
+  interventionCount         Int               @default(0)
+  silenceInterventionCount  Int               @default(0)
+  utteranceCountUser        Int               @default(0)
+  utteranceCountPartner     Int               @default(0)
+  totalUserCharCount        Int               @default(0)
+  totalPartnerCharCount     Int               @default(0)
+  firstUtteranceDetected    Boolean           @default(false)
+  lastHumanUtteranceEndAt   DateTime?
+  currentState              String?
+  stateHistory              Json?
+  silenceEvents             Json?
+  rawLog                    Json?
+  createdAt                 DateTime          @default(now())
+  updatedAt                 DateTime          @updatedAt
+  interventions             Intervention[]
+  session                   ExperimentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  utterances                Utterance[]
 
   @@unique([sessionId, topicIndex])
   @@index([sessionId])
@@ -68,18 +66,17 @@ model TopicLog {
 }
 
 model Utterance {
-  id          String    @id @default(cuid())
-  topicLogId  String
-  speaker     String
-  text        String    @db.Text
-  eventType   String
-  timestamp   DateTime
-  messageId   Int?
-  charCount   Int?
-  rawEntry    Json?
-  createdAt   DateTime  @default(now())
-
-  topicLog    TopicLog  @relation(fields: [topicLogId], references: [id], onDelete: Cascade)
+  id         String   @id @default(cuid())
+  topicLogId String
+  speaker    String
+  text       String
+  eventType  String
+  timestamp  DateTime
+  messageId  Int?
+  charCount  Int?
+  rawEntry   Json?
+  createdAt  DateTime @default(now())
+  topicLog   TopicLog @relation(fields: [topicLogId], references: [id], onDelete: Cascade)
 
   @@index([topicLogId])
   @@index([speaker])
@@ -87,21 +84,20 @@ model Utterance {
 }
 
 model Intervention {
-  id                 String    @id @default(cuid())
+  id                 String   @id @default(cuid())
   topicLogId         String
   reason             String
   interventionNumber Int?
   promptedSlot       String?
-  aiReflectionText   String    @db.Text
+  aiReflectionText   String
   silenceDurationMs  Int?
   expressedPoints    Json?
   source             String?
   messageId          Int?
   timestamp          DateTime
   rawEntry           Json?
-  createdAt          DateTime  @default(now())
-
-  topicLog           TopicLog  @relation(fields: [topicLogId], references: [id], onDelete: Cascade)
+  createdAt          DateTime @default(now())
+  topicLog           TopicLog @relation(fields: [topicLogId], references: [id], onDelete: Cascade)
 
   @@index([topicLogId])
   @@index([reason])
@@ -109,17 +105,16 @@ model Intervention {
 }
 
 model Session {
-  id              String              @id @default(cuid())
-  participantCode String?             @map("participant_code")
+  id              String             @id @default(cuid())
+  participantCode String?            @map("participant_code")
   condition       String?
-  startedAt       DateTime            @default(now()) @map("started_at")
-  endedAt         DateTime?           @map("ended_at")
-
-  utterances      SessionUtterance[]
-  buttonEvents    ButtonEvent[]
+  startedAt       DateTime           @default(now()) @map("started_at")
+  endedAt         DateTime?          @map("ended_at")
   aiSuggestions   AiSuggestionLog[]
-  slotStates      SlotState[]
+  buttonEvents    ButtonEvent[]
   finalMinutes    FinalMinute[]
+  slotStates      SlotState[]
+  utterances      SessionUtterance[]
 
   @@index([participantCode])
   @@index([startedAt])
@@ -130,9 +125,8 @@ model SessionUtterance {
   id        String   @id @default(cuid())
   sessionId String   @map("session_id")
   speaker   String
-  text      String   @db.Text
+  text      String
   createdAt DateTime @default(now()) @map("created_at")
-
   session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
@@ -146,9 +140,8 @@ model ButtonEvent {
   sessionId     String            @map("session_id")
   buttonType    String            @map("button_type")
   createdAt     DateTime          @default(now()) @map("created_at")
-
-  session       Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   aiSuggestions AiSuggestionLog[] @relation("TriggerButtonEvent")
+  session       Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
   @@index([buttonType])
@@ -161,14 +154,13 @@ model AiSuggestionLog {
   sessionId      String       @map("session_id")
   triggerEventId String?      @map("trigger_event_id")
   suggestionType String       @map("suggestion_type")
-  content        String       @db.Text
-  reasoning      String?      @db.Text
+  content        String
+  reasoning      String?
   targetSlot     String?      @map("target_slot")
   adopted        Boolean?
   createdAt      DateTime     @default(now()) @map("created_at")
-
   session        Session      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  triggerEvent   ButtonEvent? @relation("TriggerButtonEvent", fields: [triggerEventId], references: [id], onDelete: SetNull)
+  triggerEvent   ButtonEvent? @relation("TriggerButtonEvent", fields: [triggerEventId], references: [id])
 
   @@index([sessionId])
   @@index([triggerEventId])
@@ -182,10 +174,9 @@ model SlotState {
   sessionId         String   @map("session_id")
   slotName          String   @map("slot_name")
   status            String
-  summary           String   @db.Text
-  evidenceUtterance String?  @db.Text @map("evidence_utterance")
+  summary           String
+  evidenceUtterance String?  @map("evidence_utterance")
   updatedAt         DateTime @updatedAt @map("updated_at")
-
   session           Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, slotName])
@@ -197,13 +188,18 @@ model SlotState {
 model FinalMinute {
   id        String   @id @default(cuid())
   sessionId String   @map("session_id")
-  markdown  String   @db.Text
+  markdown  String
   json      Json
   createdAt DateTime @default(now()) @map("created_at")
-
   session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
   @@index([createdAt])
   @@map("final_minutes")
+}
+
+model playing_with_neon {
+  id    Int    @id @default(autoincrement())
+  name  String
+  value Float? @db.Real
 }
