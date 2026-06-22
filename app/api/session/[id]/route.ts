@@ -29,7 +29,7 @@ export async function GET(_request: Request, context: RouteContext) {
       prisma.sessionUtterance.findMany({
         where: { sessionId: id },
         orderBy: { createdAt: "desc" },
-        take: 120,
+        take: 300,
         select: {
           id: true,
           speaker: true,

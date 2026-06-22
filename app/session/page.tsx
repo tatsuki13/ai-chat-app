@@ -30,7 +30,7 @@ type PromptPanelState = {
 };
 
 const STORAGE_KEY = "acp-hitl-current-session-id";
-const MAX_RENDERED_UTTERANCES = 120;
+const MAX_RENDERED_UTTERANCES = 300;
 function createOpeningPrompt(topic = DISCUSSION_TOPICS[0]): PromptPanelState {
   return {
     title: "最初の話題提供",
@@ -217,7 +217,7 @@ export default function SessionPage() {
         });
 
         setPromptPanel({
-          title: data.suggestion.can_end ? "終了確認" : "もう少し確認",
+          title: data.suggestion.can_end ? "全体終了確認" : "全体としてもう少し確認",
           body: data.suggestion.message,
           suggestionId: data.suggestion.id,
           tone: "end",
@@ -393,7 +393,7 @@ export default function SessionPage() {
                 </h2>
               </div>
               <span className="shrink-0 rounded-full border border-stone-300 bg-stone-50 px-3 py-1 text-[13px] font-black text-stone-600">
-                説明
+                Ｖ
               </span>
             </summary>
             <div className="border-t border-stone-100 px-4 pb-4 text-[15px] font-semibold leading-relaxed text-stone-600">
@@ -410,7 +410,7 @@ export default function SessionPage() {
           </div>
         </section>
 
-        <section className="flex min-h-[260px] flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
+        <section className="flex h-[52dvh] min-h-[360px] max-h-[660px] flex-col overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-stone-200 px-4 py-3">
             <h2 className="text-[18px] font-black leading-tight">会話ログ</h2>
             <span className="text-[13px] font-bold text-stone-500">
@@ -492,7 +492,7 @@ export default function SessionPage() {
             onClick={() => handleAction("switch_topic")}
           />
           <ActionButton
-            label="終了確認"
+            label="全体終了確認"
             tone="amber"
             busy={busyAction === "check_end"}
             disabled={!session || Boolean(busyAction)}
@@ -522,7 +522,7 @@ function PromptPanel(props: {
       <div className="rounded-lg border border-dashed border-stone-300 bg-stone-50 px-4 py-5">
         <div className="text-[13px] font-black text-stone-500">AIからの質問</div>
         <p className="mt-2 text-[20px] font-black leading-relaxed text-stone-500">
-          下の「質問する」または「話題を変える」を押すと、ここに介護者が読み上げられる文が表示されます。
+          下の「質問する」または「次の話題へ」を押すと、ここに介護者が読み上げられる文が表示されます。
         </p>
       </div>
     );
@@ -541,13 +541,13 @@ function PromptPanel(props: {
 
   return (
     <div className={`rounded-lg border px-4 py-4 ${toneClass}`}>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded-full border border-white/60 bg-white/70 px-2.5 py-1 text-[12px] font-black text-stone-600">
+      <div className="space-y-1.5">
+        <div className="w-fit rounded-full border border-white/60 bg-white/70 px-2.5 py-1 text-[12px] font-black text-stone-600">
           話題 {props.topicIndex}/{props.topicCount}: {props.topicTitle}
-        </span>
-        <span className="text-[13px] font-black text-stone-600">
+        </div>
+        <div className="text-[13px] font-black text-stone-600">
           {props.prompt.title}
-        </span>
+        </div>
       </div>
       <p className="mt-2 whitespace-pre-wrap text-[24px] font-black leading-relaxed text-stone-950">
         {props.prompt.body}
@@ -575,7 +575,7 @@ function getPendingPrompt(buttonType: ButtonType): PromptPanelState {
 
   if (buttonType === "check_end") {
     return {
-      title: "終了確認",
+      title: "全体終了確認",
       body: "今日の対話を終えてよいか確認しています。",
       tone: "status",
     };
