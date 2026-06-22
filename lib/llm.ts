@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import {
   ACP_SLOT_NAMES,
   DISCUSSION_TOPIC,
+  DISCUSSION_TOPICS,
   buildFallbackMinutes,
   getUnfilledSlots,
   mergeSlotStates,
@@ -21,11 +22,17 @@ import {
 type ConversationContext = {
   utterances: ConversationUtterance[];
   slotStates: AcpSlotState[];
+  currentTopic?: string;
+  currentTopicTitle?: string;
+  nextTopic?: string;
+  nextTopicTitle?: string;
 };
 
 const SYSTEM_NEXT_QUESTION = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
+  "質問選択の主軸は current_topic です。ACP全体の未充足スロットは補助情報として扱ってください。",
+  "current_topic と無関係な未充足スロットへ急に移らないでください。",
   "未充足スロットを機械的に埋めるのではなく、直前の会話から自然につながる質問を選んでください。",
   "質問は高齢者を責めず、答えやすく、介護者がそのまま読み上げられる日本語にしてください。",
   "重すぎる話題へ急に飛ばず、既に十分話されている内容を繰り返さないでください。",
@@ -49,13 +56,16 @@ const SYSTEM_UPDATE_SLOTS = [
 
 const SYSTEM_TOPIC_SWITCH = [
   "あなたはACP対話を支援するAIです。",
-  "介護者が自然に話題を切り替えられる短い発話を1つだけ生成してください。",
-  "直前の会話を受け止め、急に重い話題へ飛ばないでください。",
+  "あなたの役割は、今の話題を終えて次へ進んでよいかを判定し、介護者が自然に話題を運べる一文を1つだけ生成することです。",
+  "まず current_topic が十分に話されたかを、current_topic に関係する発話とスロット状態から判断してください。",
+  "current_topic がまだ empty または partial なら、should_switch=false とし、同じ話題をもう少し深める自然な追加質問を返してください。",
+  "current_topic が filled に近い場合だけ、should_switch=true とし、next_topic へ移る短い前置きと最初の質問を返してください。",
+  "ACP全体の未充足スロットは補助情報です。今の話題と無関係な領域へ急に飛ばないでください。",
   "高齢者を責めず、介護者がそのまま読み上げられる日本語にしてください。",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
-  '{"message":"...","target_slot":"...","reason":"...","sensitivity":"low | medium | high"}',
+  '{"should_switch":false,"message":"...","target_slot":"...","next_topic":"...","reason":"...","sensitivity":"low | medium | high"}',
 ].join("\n");
 
 const SYSTEM_END_CHECK = [
@@ -127,7 +137,11 @@ export async function updateSlotsFromConversation(
 export async function generateNextQuestion(
   context: ConversationContext,
 ): Promise<NextQuestionResult> {
-  const fallback = fallbackNextQuestion(context.utterances, context.slotStates);
+  const fallback = fallbackNextQuestion(
+    context.utterances,
+    context.slotStates,
+    context.currentTopic,
+  );
   const result = await requestJson<Partial<NextQuestionResult>>(
     SYSTEM_NEXT_QUESTION,
     buildConversationPayload(context),
@@ -146,13 +160,7 @@ export async function generateNextQuestion(
 export async function generateTopicSwitch(
   context: ConversationContext,
 ): Promise<TopicSwitchResult> {
-  const next = fallbackNextQuestion(context.utterances, context.slotStates);
-  const fallback: TopicSwitchResult = {
-    message: `${next.transition_phrase || "少し別の角度から伺ってもよいですか。"}${next.question}`,
-    target_slot: next.target_slot,
-    reason: "未確認または部分的なACP項目へ、直前の会話から自然に移るため。",
-    sensitivity: next.sensitivity,
-  };
+  const fallback = fallbackTopicSwitch(context);
   const result = await requestJson<Partial<TopicSwitchResult>>(
     SYSTEM_TOPIC_SWITCH,
     buildConversationPayload(context),
@@ -162,6 +170,11 @@ export async function generateTopicSwitch(
   return {
     message: nonEmpty(result.message, fallback.message),
     target_slot: nonEmpty(result.target_slot, fallback.target_slot),
+    should_switch:
+      typeof result.should_switch === "boolean"
+        ? result.should_switch
+        : fallback.should_switch,
+    next_topic: nonEmpty(result.next_topic, fallback.next_topic),
     reason: nonEmpty(result.reason, fallback.reason),
     sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
   };
@@ -253,8 +266,24 @@ function getClient(apiKey: string) {
 }
 
 function buildConversationPayload(context: ConversationContext) {
+  const currentTopic = resolveTopic(context.currentTopic);
+  const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
+
   return {
     discussion_topic: DISCUSSION_TOPIC,
+    current_topic: {
+      slot_name: currentTopic.slot_name,
+      title: context.currentTopicTitle || currentTopic.title,
+      status: findSlotState(context.slotStates, currentTopic.slot_name)?.status ?? "empty",
+      summary: findSlotState(context.slotStates, currentTopic.slot_name)?.summary ?? "",
+    },
+    next_topic: nextTopic
+      ? {
+          slot_name: nextTopic.slot_name,
+          title: context.nextTopicTitle || nextTopic.title,
+        }
+      : null,
+    current_topic_transcript: renderTranscript(getTopicRelatedUtterances(context)),
     all_conversation_log: renderTranscript(context.utterances),
     recent_5_turns: renderTranscript(recentUtterances(context.utterances, 5)),
     slot_states: context.slotStates,
@@ -364,15 +393,20 @@ function fallbackUpdateSlots(
 function fallbackNextQuestion(
   utterances: ConversationUtterance[],
   slotStates: AcpSlotState[],
+  currentTopic?: string,
 ): NextQuestionResult {
   const recentText = recentUtterances(utterances, 5)
     .map((utterance) => utterance.text)
     .join(" ");
+  const preferredTopic = resolveTopic(currentTopic);
+  const preferredSlot = preferredTopic.slot_name as AcpSlotName;
+  const preferredState = findSlotState(slotStates, preferredSlot);
   const contextualSlot = ACP_SLOT_NAMES.find((slotName) =>
     hasKeyword(recentText, SLOT_KEYWORDS[slotName]),
   );
   const unfilled = getUnfilledSlots(slotStates);
   const selected =
+    preferredState?.status !== "filled" ? preferredSlot :
     unfilled.find((slot) => slot.slot_name === contextualSlot)?.slot_name ??
     unfilled.find((slot) => slot.status === "partial")?.slot_name ??
     unfilled[0]?.slot_name ??
@@ -387,6 +421,38 @@ function fallbackNextQuestion(
     target_slot: targetSlot,
     reason: "直近の会話と未充足スロットの状態から、自然につながりやすい確認項目として選びました。",
     sensitivity: getSlotSensitivity(targetSlot),
+  };
+}
+
+function fallbackTopicSwitch(context: ConversationContext): TopicSwitchResult {
+  const currentTopic = resolveTopic(context.currentTopic);
+  const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
+  const currentSlot = currentTopic.slot_name as AcpSlotName;
+  const currentState = findSlotState(context.slotStates, currentSlot);
+  const canSwitch = currentState?.status === "filled" && Boolean(nextTopic);
+
+  if (canSwitch && nextTopic) {
+    const nextSlot = nextTopic.slot_name as AcpSlotName;
+
+    return {
+      should_switch: true,
+      message: `ここまでのお話を大切にしながら、次に「${nextTopic.title}」について少し伺ってもよいですか。\n${nextTopic.opening_prompt}`,
+      target_slot: nextSlot,
+      next_topic: nextTopic.slot_name,
+      reason: "現在の話題はある程度確認できているため、次の話題へ自然に移る判断をしました。",
+      sensitivity: getSlotSensitivity(nextSlot),
+    };
+  }
+
+  const question = FALLBACK_QUESTIONS[currentSlot] ?? FALLBACK_QUESTIONS.未解決課題;
+
+  return {
+    should_switch: false,
+    message: `今の話題をもう少しだけ確認してもよいですか。\n${question}`,
+    target_slot: currentSlot,
+    next_topic: currentTopic.slot_name,
+    reason: "現在の話題にまだ未確認または部分的な内容が残っているため、同じ話題で追加確認する判断をしました。",
+    sensitivity: getSlotSensitivity(currentSlot),
   };
 }
 
@@ -413,6 +479,29 @@ function fallbackEndCheck(slotStates: AcpSlotState[]): EndCheckResult {
       : "主要スロットに未確認または部分確認の項目が残っています。",
     remaining_slots: remaining,
   };
+}
+
+function resolveTopic(slotName: string | undefined) {
+  return (
+    DISCUSSION_TOPICS.find((topic) => topic.slot_name === slotName) ??
+    DISCUSSION_TOPICS[0]
+  );
+}
+
+function findSlotState(slotStates: AcpSlotState[], slotName: string) {
+  return slotStates.find((slot) => slot.slot_name === slotName);
+}
+
+function getTopicRelatedUtterances(context: ConversationContext) {
+  const topic = resolveTopic(context.currentTopic);
+  const keywords = SLOT_KEYWORDS[topic.slot_name as AcpSlotName] ?? [];
+  const related = context.utterances.filter((utterance) =>
+    hasKeyword(utterance.text, keywords),
+  );
+
+  return related.length > 0
+    ? related.slice(-12)
+    : recentUtterances(context.utterances, 8);
 }
 
 function getSlotSensitivity(slotName: AcpSlotName): Sensitivity {

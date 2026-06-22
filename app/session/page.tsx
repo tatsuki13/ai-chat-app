@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
-import { DISCUSSION_TOPIC } from "../../lib/acp-mvp";
+import { DISCUSSION_TOPIC, DISCUSSION_TOPICS } from "../../lib/acp-mvp";
 
 type Speaker = "caregiver" | "elder";
 type ButtonType = "next_question" | "switch_topic" | "check_end" | "update_slots";
@@ -31,11 +31,13 @@ type PromptPanelState = {
 
 const STORAGE_KEY = "acp-hitl-current-session-id";
 const MAX_RENDERED_UTTERANCES = 120;
-const INITIAL_PROMPT_PANEL: PromptPanelState = {
-  title: "最初の話題提供",
-  body: "最近の生活で、これからも続けたいことは何ですか。\nお二人で、話しやすいところから話してみてください。",
-  tone: "question",
-};
+function createOpeningPrompt(topic = DISCUSSION_TOPICS[0]): PromptPanelState {
+  return {
+    title: "最初の話題提供",
+    body: topic.opening_prompt,
+    tone: "question",
+  };
+}
 
 export default function SessionPage() {
   const [session, setSession] = useState<SessionInfo | null>(null);
@@ -45,8 +47,9 @@ export default function SessionPage() {
   const [draft, setDraft] = useState("");
   const [busyAction, setBusyAction] = useState<ButtonType | "start" | "id" | null>("start");
   const [promptPanel, setPromptPanel] = useState<PromptPanelState | null>(
-    INITIAL_PROMPT_PANEL,
+    createOpeningPrompt(),
   );
+  const [currentTopicIndex, setCurrentTopicIndex] = useState(0);
   const [statusText, setStatusText] = useState("準備中");
   const [isEditingId, setIsEditingId] = useState(false);
   const [idDraft, setIdDraft] = useState("");
@@ -54,6 +57,8 @@ export default function SessionPage() {
   const idInputRef = useRef<HTMLInputElement | null>(null);
 
   const displayId = session?.participant_code || session?.id || "準備中";
+  const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
+  const nextTopic = DISCUSSION_TOPICS[currentTopicIndex + 1] ?? null;
   const visibleUtterances = utterances.slice(-MAX_RENDERED_UTTERANCES);
   const hiddenUtteranceCount = Math.max(
     0,
@@ -164,6 +169,8 @@ export default function SessionPage() {
         const data = await postJson<NextQuestionResponse>("/api/ai/next-question", {
           session_id: session.id,
           trigger_event_id: triggerEventId,
+          current_topic: currentTopic.slot_name,
+          current_topic_title: currentTopic.title,
         });
         const body = joinPrompt(
           data.suggestion.transition_phrase,
@@ -182,10 +189,21 @@ export default function SessionPage() {
         const data = await postJson<TopicSwitchResponse>("/api/ai/switch-topic", {
           session_id: session.id,
           trigger_event_id: triggerEventId,
+          current_topic: currentTopic.slot_name,
+          current_topic_title: currentTopic.title,
+          next_topic: nextTopic?.slot_name,
+          next_topic_title: nextTopic?.title,
         });
+        if (data.suggestion.should_switch && nextTopic) {
+          setCurrentTopicIndex((current) =>
+            Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
+          );
+        }
 
         setPromptPanel({
-          title: "話題を変える一言",
+          title: data.suggestion.should_switch
+            ? "次の話題へ"
+            : "今の話題でもう少し確認",
           body: data.suggestion.message,
           suggestionId: data.suggestion.id,
           tone: "switch",
@@ -239,7 +257,8 @@ export default function SessionPage() {
     if (!confirmed) return;
 
     setBusyAction("start");
-    setPromptPanel(INITIAL_PROMPT_PANEL);
+    setCurrentTopicIndex(0);
+    setPromptPanel(createOpeningPrompt());
     setIsEditingId(false);
 
     try {
@@ -382,7 +401,12 @@ export default function SessionPage() {
             </div>
           </details>
           <div className="px-4 py-4">
-            <PromptPanel prompt={promptPanel} />
+            <PromptPanel
+              prompt={promptPanel}
+              topicTitle={currentTopic.title}
+              topicIndex={currentTopicIndex + 1}
+              topicCount={DISCUSSION_TOPICS.length}
+            />
           </div>
         </section>
 
@@ -461,7 +485,7 @@ export default function SessionPage() {
             onClick={() => handleAction("next_question")}
           />
           <ActionButton
-            label="話題を変える"
+            label="次の話題へ"
             tone="blue"
             busy={busyAction === "switch_topic"}
             disabled={!session || Boolean(busyAction)}
@@ -487,7 +511,12 @@ export default function SessionPage() {
   );
 }
 
-function PromptPanel(props: { prompt: PromptPanelState | null }) {
+function PromptPanel(props: {
+  prompt: PromptPanelState | null;
+  topicTitle: string;
+  topicIndex: number;
+  topicCount: number;
+}) {
   if (!props.prompt) {
     return (
       <div className="rounded-lg border border-dashed border-stone-300 bg-stone-50 px-4 py-5">
@@ -512,7 +541,14 @@ function PromptPanel(props: { prompt: PromptPanelState | null }) {
 
   return (
     <div className={`rounded-lg border px-4 py-4 ${toneClass}`}>
-      <div className="text-[13px] font-black text-stone-600">{props.prompt.title}</div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded-full border border-white/60 bg-white/70 px-2.5 py-1 text-[12px] font-black text-stone-600">
+          話題 {props.topicIndex}/{props.topicCount}: {props.topicTitle}
+        </span>
+        <span className="text-[13px] font-black text-stone-600">
+          {props.prompt.title}
+        </span>
+      </div>
       <p className="mt-2 whitespace-pre-wrap text-[24px] font-black leading-relaxed text-stone-950">
         {props.prompt.body}
       </p>
@@ -531,8 +567,8 @@ function getPendingPrompt(buttonType: ButtonType): PromptPanelState {
 
   if (buttonType === "switch_topic") {
     return {
-      title: "話題を変える一言",
-      body: "自然につながる話題転換を生成しています。",
+      title: "次の話題へ",
+      body: "今の話題を終えてよいか確認し、必要なら追加質問を生成しています。",
       tone: "status",
     };
   }
@@ -760,6 +796,8 @@ type TopicSwitchResponse = {
   suggestion: {
     id: string;
     message: string;
+    should_switch: boolean;
+    next_topic: string;
   };
 };
 

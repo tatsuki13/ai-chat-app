@@ -17,6 +17,69 @@ export const DISCUSSION_TOPIC = {
     "生活の希望、介護や医療への考え、家族に伝えておきたいことを、無理のない範囲で話し合います。",
 };
 
+export const DISCUSSION_TOPICS = [
+  {
+    slot_name: "今後の生活希望",
+    title: "最近の生活と、これからも続けたいこと",
+    opening_prompt:
+      "最近の生活で、これからも続けたいことは何ですか。\nお二人で、話しやすいところから話してみてください。",
+  },
+  {
+    slot_name: "価値観",
+    title: "大切にしたいこと",
+    opening_prompt:
+      "普段の暮らしの中で、これだけは大切にしたいと思うことはありますか。",
+  },
+  {
+    slot_name: "介護希望",
+    title: "手助けが必要になった時の希望",
+    opening_prompt:
+      "もし暮らしの中で手助けが必要になった場合、どのような支援なら受け入れやすいですか。",
+  },
+  {
+    slot_name: "医療処置への希望",
+    title: "医療や治療について大切にしたいこと",
+    opening_prompt:
+      "治療や医療を受ける場面で、大切にしたいことや避けたいことはありますか。",
+  },
+  {
+    slot_name: "代理意思決定者",
+    title: "相談して決めてほしい人",
+    opening_prompt:
+      "ご自身で判断しにくい時、医療や介護のことを誰に相談して決めてほしいですか。",
+  },
+  {
+    slot_name: "家族に伝えたいこと",
+    title: "家族に伝えておきたいこと",
+    opening_prompt:
+      "ご家族に、今のうちに伝えておきたいことやお願いしておきたいことはありますか。",
+  },
+  {
+    slot_name: "不安・心配",
+    title: "不安や心配",
+    opening_prompt:
+      "これからのことで、不安に感じていることや心配なことはありますか。",
+  },
+  {
+    slot_name: "延命治療への考え",
+    title: "命に関わる治療についての考え",
+    opening_prompt:
+      "もし命に関わる状態になった時、延命治療について今の時点で考えていることはありますか。",
+  },
+  {
+    slot_name: "最期を迎えたい場所",
+    title: "最期の時期を過ごしたい場所",
+    opening_prompt:
+      "もし最期の時期を考えるとしたら、どこで誰と過ごせると安心だと思いますか。",
+  },
+  {
+    slot_name: "未解決課題",
+    title: "まだ決めきれないこと",
+    opening_prompt:
+      "今日話した中で、まだ決めきれないことや後で確認したいことはありますか。",
+  },
+] as const;
+
 export type AcpSlotName = (typeof ACP_SLOT_NAMES)[number];
 export type SlotStatus = "empty" | "partial" | "filled";
 export type Speaker = "caregiver" | "elder" | "family";
@@ -57,6 +120,8 @@ export type TopicSwitchResult = {
   target_slot: AcpSlotName | string;
   reason: string;
   sensitivity: Sensitivity;
+  should_switch: boolean;
+  next_topic: string;
 };
 
 export type EndCheckResult = {

@@ -37,6 +37,12 @@ export async function POST(request: Request) {
     const result = await generateTopicSwitch({
       ...context,
       slotStates,
+      currentTopic: optionalString(body.current_topic ?? body.currentTopic),
+      currentTopicTitle: optionalString(
+        body.current_topic_title ?? body.currentTopicTitle,
+      ),
+      nextTopic: optionalString(body.next_topic ?? body.nextTopic),
+      nextTopicTitle: optionalString(body.next_topic_title ?? body.nextTopicTitle),
     });
     const savedSuggestion = await saveAiSuggestion({
       sessionId,
@@ -55,6 +61,8 @@ export async function POST(request: Request) {
         content: savedSuggestion.content,
         message: result.message,
         target_slot: result.target_slot,
+        should_switch: result.should_switch,
+        next_topic: result.next_topic,
         reason: result.reason,
         sensitivity: result.sensitivity,
         slot_states_updated: context.utterances.length > 0,

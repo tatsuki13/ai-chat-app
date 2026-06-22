@@ -37,6 +37,10 @@ export async function POST(request: Request) {
     const result = await generateNextQuestion({
       ...context,
       slotStates,
+      currentTopic: optionalString(body.current_topic ?? body.currentTopic),
+      currentTopicTitle: optionalString(
+        body.current_topic_title ?? body.currentTopicTitle,
+      ),
     });
     const savedSuggestion = await saveAiSuggestion({
       sessionId,
