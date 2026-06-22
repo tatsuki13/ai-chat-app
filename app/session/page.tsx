@@ -30,7 +30,7 @@ type PromptPanelState = {
 };
 
 const STORAGE_KEY = "acp-hitl-current-session-id";
-const MAX_RENDERED_UTTERANCES = 300;
+const MAX_RENDERED_UTTERANCES = 30;
 function createOpeningPrompt(topic = DISCUSSION_TOPICS[0]): PromptPanelState {
   return {
     title: "最初の話題提供",
