@@ -107,3 +107,103 @@ model Intervention {
   @@index([reason])
   @@index([timestamp])
 }
+
+model Session {
+  id              String              @id @default(cuid())
+  participantCode String?             @map("participant_code")
+  condition       String?
+  startedAt       DateTime            @default(now()) @map("started_at")
+  endedAt         DateTime?           @map("ended_at")
+
+  utterances      SessionUtterance[]
+  buttonEvents    ButtonEvent[]
+  aiSuggestions   AiSuggestionLog[]
+  slotStates      SlotState[]
+  finalMinutes    FinalMinute[]
+
+  @@index([participantCode])
+  @@index([startedAt])
+  @@map("sessions")
+}
+
+model SessionUtterance {
+  id        String   @id @default(cuid())
+  sessionId String   @map("session_id")
+  speaker   String
+  text      String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([speaker])
+  @@index([createdAt])
+  @@map("utterances")
+}
+
+model ButtonEvent {
+  id            String            @id @default(cuid())
+  sessionId     String            @map("session_id")
+  buttonType    String            @map("button_type")
+  createdAt     DateTime          @default(now()) @map("created_at")
+
+  session       Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  aiSuggestions AiSuggestionLog[] @relation("TriggerButtonEvent")
+
+  @@index([sessionId])
+  @@index([buttonType])
+  @@index([createdAt])
+  @@map("button_events")
+}
+
+model AiSuggestionLog {
+  id             String       @id @default(cuid())
+  sessionId      String       @map("session_id")
+  triggerEventId String?      @map("trigger_event_id")
+  suggestionType String       @map("suggestion_type")
+  content        String       @db.Text
+  reasoning      String?      @db.Text
+  targetSlot     String?      @map("target_slot")
+  adopted        Boolean?
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  session        Session      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  triggerEvent   ButtonEvent? @relation("TriggerButtonEvent", fields: [triggerEventId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId])
+  @@index([triggerEventId])
+  @@index([suggestionType])
+  @@index([createdAt])
+  @@map("ai_suggestions")
+}
+
+model SlotState {
+  id                String   @id @default(cuid())
+  sessionId         String   @map("session_id")
+  slotName          String   @map("slot_name")
+  status            String
+  summary           String   @db.Text
+  evidenceUtterance String?  @db.Text @map("evidence_utterance")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  session           Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, slotName])
+  @@index([sessionId])
+  @@index([status])
+  @@map("slot_states")
+}
+
+model FinalMinute {
+  id        String   @id @default(cuid())
+  sessionId String   @map("session_id")
+  markdown  String   @db.Text
+  json      Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([createdAt])
+  @@map("final_minutes")
+}
