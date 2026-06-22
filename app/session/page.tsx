@@ -1,9 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 
 type Speaker = "caregiver" | "elder";
 type ButtonType = "next_question" | "switch_topic" | "check_end" | "update_slots";
+type PromptTone = "question" | "switch" | "end" | "status" | "error";
 
 type SessionInfo = {
   id: string;
@@ -20,26 +21,36 @@ type Utterance = {
   created_at: string;
 };
 
-type SuggestionModal = {
+type PromptPanelState = {
   title: string;
   body: string;
   suggestionId?: string;
   draftText?: string;
-  tone: "question" | "switch" | "end" | "status" | "error";
+  tone: PromptTone;
 };
 
 const STORAGE_KEY = "acp-hitl-current-session-id";
+const DISCUSSION_TOPIC = {
+  title: "これからの暮らしと大切にしたいこと",
+  description:
+    "生活の希望、介護や医療への考え、家族に伝えておきたいことを、無理のない範囲で話し合います。",
+};
 
 export default function SessionPage() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [utterances, setUtterances] = useState<Utterance[]>([]);
   const [speaker, setSpeaker] = useState<Speaker>("elder");
   const [draft, setDraft] = useState("");
-  const [busyAction, setBusyAction] = useState<ButtonType | "start" | null>("start");
-  const [modal, setModal] = useState<SuggestionModal | null>(null);
+  const [busyAction, setBusyAction] = useState<ButtonType | "start" | "id" | null>("start");
+  const [promptPanel, setPromptPanel] = useState<PromptPanelState | null>(null);
   const [statusText, setStatusText] = useState("準備中");
+  const [isEditingId, setIsEditingId] = useState(false);
+  const [idDraft, setIdDraft] = useState("");
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const idInputRef = useRef<HTMLInputElement | null>(null);
+
+  const displayId = session?.participant_code || session?.id || "準備中";
 
   useEffect(() => {
     let ignore = false;
@@ -73,7 +84,7 @@ export default function SessionPage() {
         if (!ignore) {
           setBusyAction(null);
           setStatusText("接続エラー");
-          setModal({
+          setPromptPanel({
             title: "セッションを開始できません",
             body: "DATABASE_URL とデータベース接続を確認してください。",
             tone: "error",
@@ -93,6 +104,15 @@ export default function SessionPage() {
     logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [utterances.length]);
 
+  useEffect(() => {
+    if (isEditingId) {
+      window.setTimeout(() => {
+        idInputRef.current?.focus();
+        idInputRef.current?.select();
+      }, 0);
+    }
+  }, [isEditingId]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -109,7 +129,7 @@ export default function SessionPage() {
     } catch {
       setDraft(text);
       setStatusText("保存エラー");
-      setModal({
+      setPromptPanel({
         title: "発話を保存できません",
         body: "通信状態またはデータベース接続を確認してください。",
         tone: "error",
@@ -136,8 +156,8 @@ export default function SessionPage() {
           data.suggestion.question,
         );
 
-        setModal({
-          title: "質問する",
+        setPromptPanel({
+          title: "AIからの質問",
           body,
           suggestionId: data.suggestion.id,
           draftText: body,
@@ -151,8 +171,8 @@ export default function SessionPage() {
           trigger_event_id: triggerEventId,
         });
 
-        setModal({
-          title: "話題を変える",
+        setPromptPanel({
+          title: "話題を変える一言",
           body: data.suggestion.message,
           suggestionId: data.suggestion.id,
           draftText: data.suggestion.message,
@@ -166,7 +186,7 @@ export default function SessionPage() {
           trigger_event_id: triggerEventId,
         });
 
-        setModal({
+        setPromptPanel({
           title: data.suggestion.can_end ? "終了確認" : "もう少し確認",
           body: data.suggestion.message,
           suggestionId: data.suggestion.id,
@@ -180,7 +200,7 @@ export default function SessionPage() {
           trigger_event_id: triggerEventId,
         });
 
-        setModal({
+        setPromptPanel({
           title: "議事録更新",
           body: "議事録を更新しました。",
           tone: "status",
@@ -190,7 +210,7 @@ export default function SessionPage() {
       setStatusText("保存済み");
     } catch {
       setStatusText("保存エラー");
-      setModal({
+      setPromptPanel({
         title: "AI支援を実行できません",
         body: "通信状態またはデータベース接続を確認してください。",
         tone: "error",
@@ -200,16 +220,15 @@ export default function SessionPage() {
     }
   }
 
-  async function handleUseSuggestion() {
-    if (!modal?.draftText) return;
+  async function handleUsePrompt() {
+    if (!promptPanel?.draftText) return;
 
-    if (modal.suggestionId) {
-      await markSuggestionAdopted(modal.suggestionId, true).catch(() => undefined);
+    if (promptPanel.suggestionId) {
+      await markSuggestionAdopted(promptPanel.suggestionId, true).catch(() => undefined);
     }
 
     setSpeaker("caregiver");
-    setDraft(modal.draftText);
-    setModal(null);
+    setDraft(promptPanel.draftText);
     window.setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
@@ -220,7 +239,8 @@ export default function SessionPage() {
     if (!confirmed) return;
 
     setBusyAction("start");
-    setModal(null);
+    setPromptPanel(null);
+    setIsEditingId(false);
 
     try {
       const created = await startSession();
@@ -231,7 +251,7 @@ export default function SessionPage() {
       setStatusText("保存中");
     } catch {
       setStatusText("接続エラー");
-      setModal({
+      setPromptPanel({
         title: "セッションを開始できません",
         body: "DATABASE_URL とデータベース接続を確認してください。",
         tone: "error",
@@ -241,10 +261,58 @@ export default function SessionPage() {
     }
   }
 
+  function startEditingId() {
+    if (!session || busyAction) return;
+
+    setIdDraft(session.participant_code || session.id);
+    setIsEditingId(true);
+  }
+
+  async function saveDisplayId() {
+    if (!session || !isEditingId) return;
+
+    const nextId = idDraft.trim();
+
+    if (nextId === (session.participant_code || session.id)) {
+      setIsEditingId(false);
+      return;
+    }
+
+    setBusyAction("id");
+    setStatusText("保存中");
+
+    try {
+      const updated = await updateSessionDisplayId(session.id, nextId);
+      setSession(updated);
+      setIsEditingId(false);
+      setStatusText("保存済み");
+    } catch {
+      setStatusText("保存エラー");
+      setPromptPanel({
+        title: "IDを保存できません",
+        body: "通信状態またはデータベース接続を確認してください。",
+        tone: "error",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  function handleIdKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void saveDisplayId();
+    }
+
+    if (event.key === "Escape") {
+      setIsEditingId(false);
+    }
+  }
+
   return (
-    <main className="min-h-dvh bg-[#f7f8f4] pb-[calc(136px+env(safe-area-inset-bottom))] text-stone-950">
+    <main className="min-h-dvh bg-[#f7f8f4] pb-[calc(124px+env(safe-area-inset-bottom))] text-stone-950">
       <header className="sticky top-0 z-20 border-b border-stone-200 bg-[#fdfdf9]/95 shadow-sm backdrop-blur">
-        <div className="mx-auto flex max-w-[820px] items-center justify-between gap-3 px-4 py-3">
+        <div className="mx-auto flex max-w-[860px] items-center justify-between gap-3 px-4 py-3">
           <div className="min-w-0">
             <p className="text-[13px] font-bold text-stone-500">ACP対話支援</p>
             <h1 className="truncate text-[22px] font-black leading-tight">
@@ -266,28 +334,76 @@ export default function SessionPage() {
         </div>
       </header>
 
-      <section className="mx-auto flex min-h-[calc(100dvh-238px)] max-w-[820px] flex-col px-4 py-4">
-        <div className="mb-3 flex items-center justify-between gap-3 text-[13px] font-bold text-stone-500">
-          <span>会話ログ</span>
-          <span className="truncate">ID: {session?.id ?? "準備中"}</span>
+      <section className="mx-auto flex min-h-[calc(100dvh-210px)] max-w-[860px] flex-col gap-3 px-4 py-4">
+        <div className="flex items-center justify-between gap-3 text-[13px] font-bold text-stone-500">
+          <span>セッション</span>
+          <div className="min-w-0 text-right">
+            {isEditingId ? (
+              <input
+                ref={idInputRef}
+                value={idDraft}
+                onBlur={() => void saveDisplayId()}
+                onChange={(event) => setIdDraft(event.target.value)}
+                onKeyDown={handleIdKeyDown}
+                className="h-9 max-w-[260px] rounded-lg border border-emerald-400 bg-white px-2 text-right text-[14px] font-black text-stone-950 outline-none ring-2 ring-emerald-100"
+                disabled={busyAction === "id"}
+              />
+            ) : (
+              <button
+                type="button"
+                onDoubleClick={startEditingId}
+                className="max-w-[320px] truncate rounded-md px-2 py-1 text-right font-black text-stone-600 hover:bg-stone-100"
+                title="ダブルクリックでIDを編集"
+              >
+                ID: {displayId}
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-stone-200 bg-white px-3 py-3 shadow-sm">
-          {busyAction === "start" && utterances.length === 0 ? (
-            <EmptyState text="セッションを準備しています" />
-          ) : utterances.length === 0 ? (
-            <EmptyState text="発話を入力するとここに表示されます" />
-          ) : (
-            <div className="space-y-3">
-              {utterances.map((utterance) => (
-                <SpeechBubble key={utterance.id} utterance={utterance} />
-              ))}
-              <div ref={logEndRef} />
-            </div>
-          )}
-        </div>
+        <section className="rounded-lg border border-stone-200 bg-white shadow-sm">
+          <div className="border-b border-stone-200 px-4 py-3">
+            <div className="text-[13px] font-black text-stone-500">話し合うお題</div>
+            <h2 className="mt-1 text-[22px] font-black leading-tight text-stone-950">
+              {DISCUSSION_TOPIC.title}
+            </h2>
+            <p className="mt-2 text-[15px] font-semibold leading-relaxed text-stone-600">
+              {DISCUSSION_TOPIC.description}
+            </p>
+          </div>
+          <div className="px-4 py-4">
+            <PromptPanel prompt={promptPanel} onUse={handleUsePrompt} />
+          </div>
+        </section>
 
-        <form onSubmit={handleSubmit} className="mt-3 rounded-lg border border-stone-200 bg-white p-3 shadow-sm">
+        <section className="flex min-h-[260px] flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
+          <div className="flex items-center justify-between border-b border-stone-200 px-4 py-3">
+            <h2 className="text-[18px] font-black leading-tight">会話ログ</h2>
+            <span className="text-[13px] font-bold text-stone-500">
+              {utterances.length}件
+            </span>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto bg-stone-50 px-3 py-3">
+            {busyAction === "start" && utterances.length === 0 ? (
+              <EmptyState text="セッションを準備しています" />
+            ) : utterances.length === 0 ? (
+              <EmptyState text="発話を入力するとここに表示されます" />
+            ) : (
+              <div className="space-y-3">
+                {utterances.map((utterance) => (
+                  <SpeechBubble key={utterance.id} utterance={utterance} />
+                ))}
+                <div ref={logEndRef} />
+              </div>
+            )}
+          </div>
+        </section>
+
+        <form
+          onSubmit={handleSubmit}
+          className="rounded-lg border border-stone-200 bg-white p-3 shadow-sm"
+        >
           <div className="grid grid-cols-2 gap-2">
             <SpeakerButton
               active={speaker === "elder"}
@@ -305,15 +421,15 @@ export default function SessionPage() {
               ref={textareaRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
-              rows={3}
+              rows={2}
               placeholder="発話を入力"
-              className="min-h-24 flex-1 resize-none rounded-lg border border-stone-300 bg-white px-3 py-3 text-[18px] leading-relaxed outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
+              className="min-h-20 flex-1 resize-none rounded-lg border border-stone-300 bg-white px-3 py-3 text-[18px] leading-relaxed outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
               disabled={!session || busyAction === "start"}
             />
             <button
               type="submit"
               disabled={!session || !draft.trim() || busyAction === "start"}
-              className="min-h-24 w-24 rounded-lg bg-stone-950 px-3 text-[17px] font-black text-white shadow-sm active:scale-[0.99] disabled:bg-stone-300"
+              className="min-h-20 w-24 rounded-lg bg-stone-950 px-3 text-[17px] font-black text-white shadow-sm active:scale-[0.99] disabled:bg-stone-300"
             >
               追加
             </button>
@@ -322,7 +438,7 @@ export default function SessionPage() {
       </section>
 
       <footer className="fixed inset-x-0 bottom-0 z-30 border-t border-stone-200 bg-[#fdfdf9]/95 shadow-[0_-12px_28px_rgba(28,25,23,0.12)] backdrop-blur">
-        <div className="mx-auto grid max-w-[820px] grid-cols-2 gap-3 px-4 py-4 sm:grid-cols-4">
+        <div className="mx-auto grid max-w-[860px] grid-cols-2 gap-3 px-4 py-4 sm:grid-cols-4">
           <ActionButton
             label="質問する"
             tone="emerald"
@@ -353,21 +469,55 @@ export default function SessionPage() {
           />
         </div>
       </footer>
-
-      {modal ? (
-        <SuggestionDialog
-          modal={modal}
-          onClose={() => setModal(null)}
-          onUse={modal.draftText ? handleUseSuggestion : undefined}
-        />
-      ) : null}
     </main>
+  );
+}
+
+function PromptPanel(props: { prompt: PromptPanelState | null; onUse: () => void }) {
+  if (!props.prompt) {
+    return (
+      <div className="rounded-lg border border-dashed border-stone-300 bg-stone-50 px-4 py-5">
+        <div className="text-[13px] font-black text-stone-500">AIからの質問</div>
+        <p className="mt-2 text-[20px] font-black leading-relaxed text-stone-500">
+          下の「質問する」または「話題を変える」を押すと、ここに介護者が読み上げられる文が表示されます。
+        </p>
+      </div>
+    );
+  }
+
+  const toneClass =
+    props.prompt.tone === "error"
+      ? "border-red-200 bg-red-50"
+      : props.prompt.tone === "end"
+        ? "border-amber-200 bg-amber-50"
+        : props.prompt.tone === "switch"
+          ? "border-sky-200 bg-sky-50"
+          : props.prompt.tone === "status"
+            ? "border-stone-200 bg-stone-50"
+            : "border-emerald-200 bg-emerald-50";
+
+  return (
+    <div className={`rounded-lg border px-4 py-4 ${toneClass}`}>
+      <div className="text-[13px] font-black text-stone-600">{props.prompt.title}</div>
+      <p className="mt-2 whitespace-pre-wrap text-[24px] font-black leading-relaxed text-stone-950">
+        {props.prompt.body}
+      </p>
+      {props.prompt.draftText ? (
+        <button
+          type="button"
+          onClick={props.onUse}
+          className="mt-4 min-h-12 rounded-lg bg-emerald-700 px-4 text-[17px] font-black text-white shadow-sm active:scale-[0.99]"
+        >
+          入力欄に入れる
+        </button>
+      ) : null}
+    </div>
   );
 }
 
 function EmptyState(props: { text: string }) {
   return (
-    <div className="flex min-h-[320px] items-center justify-center rounded-lg border border-dashed border-stone-300 bg-stone-50 px-4 text-center text-[17px] font-bold text-stone-500">
+    <div className="flex min-h-[210px] items-center justify-center rounded-lg border border-dashed border-stone-300 bg-white px-4 text-center text-[17px] font-bold text-stone-500">
       {props.text}
     </div>
   );
@@ -451,60 +601,6 @@ function ActionButton(props: {
   );
 }
 
-function SuggestionDialog(props: {
-  modal: SuggestionModal;
-  onClose: () => void;
-  onUse?: () => void;
-}) {
-  const accent =
-    props.modal.tone === "error"
-      ? "border-red-200 bg-red-50"
-      : props.modal.tone === "end"
-        ? "border-amber-200 bg-amber-50"
-        : props.modal.tone === "switch"
-          ? "border-sky-200 bg-sky-50"
-          : "border-emerald-200 bg-emerald-50";
-
-  return (
-    <>
-      <button
-        type="button"
-        aria-label="閉じる"
-        className="fixed inset-0 z-40 bg-stone-950/35"
-        onClick={props.onClose}
-      />
-      <section className="fixed inset-x-0 bottom-[152px] z-50 mx-auto max-w-[760px] px-4 sm:bottom-[120px]">
-        <div className={`rounded-lg border p-4 shadow-2xl ${accent}`}>
-          <div className="flex items-start justify-between gap-3">
-            <h2 className="text-[22px] font-black leading-tight text-stone-950">
-              {props.modal.title}
-            </h2>
-            <button
-              type="button"
-              onClick={props.onClose}
-              className="min-h-11 rounded-lg border border-stone-300 bg-white px-4 text-[16px] font-bold text-stone-700"
-            >
-              閉じる
-            </button>
-          </div>
-          <p className="mt-4 whitespace-pre-wrap text-[24px] font-black leading-relaxed text-stone-950">
-            {props.modal.body}
-          </p>
-          {props.onUse ? (
-            <button
-              type="button"
-              onClick={props.onUse}
-              className="mt-4 min-h-14 w-full rounded-lg bg-emerald-700 px-4 text-[18px] font-black text-white shadow-sm active:scale-[0.99]"
-            >
-              入力欄に入れる
-            </button>
-          ) : null}
-        </div>
-      </section>
-    </>
-  );
-}
-
 async function startSession(): Promise<SessionInfo> {
   const data = await postJson<{ session: SessionInfo }>("/api/session/start", {
     participant_code: `P-${new Date().toISOString().slice(0, 10)}`,
@@ -543,6 +639,20 @@ async function addUtterance(
   return data.utterance;
 }
 
+async function updateSessionDisplayId(
+  sessionId: string,
+  participantCode: string,
+): Promise<SessionInfo> {
+  const data = await patchJson<{ session: SessionInfo }>(
+    `/api/session/${encodeURIComponent(sessionId)}`,
+    {
+      participant_code: participantCode,
+    },
+  );
+
+  return data.session;
+}
+
 async function saveButtonEvent(sessionId: string, buttonType: ButtonType) {
   const data = await postJson<{
     button_event: {
@@ -563,8 +673,20 @@ async function markSuggestionAdopted(suggestionId: string, adopted: boolean) {
 }
 
 async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
+  return requestJson<T>(url, "POST", body);
+}
+
+async function patchJson<T = unknown>(url: string, body: unknown): Promise<T> {
+  return requestJson<T>(url, "PATCH", body);
+}
+
+async function requestJson<T = unknown>(
+  url: string,
+  method: "POST" | "PATCH",
+  body: unknown,
+): Promise<T> {
   const response = await fetch(url, {
-    method: "POST",
+    method,
     headers: {
       "Content-Type": "application/json",
     },
