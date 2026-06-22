@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import {
   ACP_SLOT_NAMES,
+  DISCUSSION_TOPIC,
   buildFallbackMinutes,
   getUnfilledSlots,
   mergeSlotStates,
@@ -70,6 +71,8 @@ const SYSTEM_END_CHECK = [
 const SYSTEM_FINAL_MINUTES = [
   "あなたはACP対話の実験用議事録を作成するAIです。",
   "会話ログとACPスロット状態から、研究者が確認しやすいMarkdown議事録とJSON要約を作ってください。",
+  "固定のお題は必ず議事録に含めてください。",
+  "AIが表示した質問や話題転換文は介入ログであり、会話ログや本人の根拠発話として扱わないでください。",
   "本人の希望と根拠発話を区別し、推測で断定しないでください。",
   "出力はJSONのみとしてください。",
   "",
@@ -199,8 +202,13 @@ export async function generateFinalMinutes(
   }
 
   return {
-    markdown: result.markdown,
-    json: result.json as FinalMinutesResult["json"],
+    ...ensureFinalMinutesIncludeTopic(
+      {
+        markdown: result.markdown,
+        json: result.json as FinalMinutesResult["json"],
+      },
+      context,
+    ),
   };
 }
 
@@ -246,6 +254,7 @@ function getClient(apiKey: string) {
 
 function buildConversationPayload(context: ConversationContext) {
   return {
+    discussion_topic: DISCUSSION_TOPIC,
     all_conversation_log: renderTranscript(context.utterances),
     recent_5_turns: renderTranscript(recentUtterances(context.utterances, 5)),
     slot_states: context.slotStates,
@@ -257,6 +266,58 @@ function buildConversationPayload(context: ConversationContext) {
     last_utterance: context.utterances.at(-1) ?? null,
     acp_slots: ACP_SLOT_NAMES,
   };
+}
+
+function ensureFinalMinutesIncludeTopic(
+  minutes: FinalMinutesResult,
+  context: ConversationContext,
+): FinalMinutesResult {
+  const topicBlock = [
+    "## 話し合ったお題",
+    "",
+    `### ${DISCUSSION_TOPIC.title}`,
+    DISCUSSION_TOPIC.description,
+    "",
+  ].join("\n");
+  const markdown = minutes.markdown.includes(DISCUSSION_TOPIC.title)
+    ? minutes.markdown
+    : insertAfterMarkdownTitle(minutes.markdown, topicBlock);
+  const rawJson =
+    minutes.json && typeof minutes.json === "object"
+      ? (minutes.json as Record<string, unknown>)
+      : {};
+
+  return {
+    markdown,
+    json: {
+      generated_at:
+        typeof rawJson.generated_at === "string"
+          ? rawJson.generated_at
+          : new Date().toISOString(),
+      discussion_topic: DISCUSSION_TOPIC,
+      utterances: Array.isArray(rawJson.utterances)
+        ? (rawJson.utterances as ConversationUtterance[])
+        : context.utterances,
+      slots: Array.isArray(rawJson.slots)
+        ? (rawJson.slots as AcpSlotState[])
+        : context.slotStates,
+      summary:
+        typeof rawJson.summary === "string"
+          ? rawJson.summary
+          : "会話ログとACPスロット状態から生成した議事録です。",
+    },
+  };
+}
+
+function insertAfterMarkdownTitle(markdown: string, insertion: string) {
+  const trimmed = markdown.trim();
+  const lines = trimmed.split("\n");
+
+  if (lines[0]?.startsWith("# ")) {
+    return [lines[0], "", insertion, ...lines.slice(1)].join("\n");
+  }
+
+  return `${insertion}\n${trimmed}`;
 }
 
 function fallbackUpdateSlots(

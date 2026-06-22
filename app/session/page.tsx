@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { DISCUSSION_TOPIC } from "../../lib/acp-mvp";
 
 type Speaker = "caregiver" | "elder";
 type ButtonType = "next_question" | "switch_topic" | "check_end" | "update_slots";
@@ -25,21 +26,13 @@ type PromptPanelState = {
   title: string;
   body: string;
   suggestionId?: string;
-  draftText?: string;
   tone: PromptTone;
 };
 
 const STORAGE_KEY = "acp-hitl-current-session-id";
-const DISCUSSION_TOPIC = {
-  title: "これからの暮らしと大切にしたいこと",
-  description:
-    "生活の希望、介護や医療への考え、家族に伝えておきたいことを、無理のない範囲で話し合います。",
-};
 const INITIAL_PROMPT_PANEL: PromptPanelState = {
   title: "最初の話題提供",
   body: "最近の生活で、これからも続けたいことは何ですか。\nお二人で、話しやすいところから話してみてください。",
-  draftText:
-    "最近の生活で、これからも続けたいことは何ですか。\nお二人で、話しやすいところから話してみてください。",
   tone: "question",
 };
 
@@ -56,7 +49,6 @@ export default function SessionPage() {
   const [isEditingId, setIsEditingId] = useState(false);
   const [idDraft, setIdDraft] = useState("");
   const logEndRef = useRef<HTMLDivElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
 
   const displayId = session?.participant_code || session?.id || "準備中";
@@ -169,7 +161,6 @@ export default function SessionPage() {
           title: "AIからの質問",
           body,
           suggestionId: data.suggestion.id,
-          draftText: body,
           tone: "question",
         });
       }
@@ -184,7 +175,6 @@ export default function SessionPage() {
           title: "話題を変える一言",
           body: data.suggestion.message,
           suggestionId: data.suggestion.id,
-          draftText: data.suggestion.message,
           tone: "switch",
         });
       }
@@ -227,18 +217,6 @@ export default function SessionPage() {
     } finally {
       setBusyAction(null);
     }
-  }
-
-  async function handleUsePrompt() {
-    if (!promptPanel?.draftText) return;
-
-    if (promptPanel.suggestionId) {
-      await markSuggestionAdopted(promptPanel.suggestionId, true).catch(() => undefined);
-    }
-
-    setSpeaker("caregiver");
-    setDraft(promptPanel.draftText);
-    window.setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
   async function handleNewSession() {
@@ -381,7 +359,7 @@ export default function SessionPage() {
             </p>
           </div>
           <div className="px-4 py-4">
-            <PromptPanel prompt={promptPanel} onUse={handleUsePrompt} />
+            <PromptPanel prompt={promptPanel} />
           </div>
         </section>
 
@@ -427,7 +405,6 @@ export default function SessionPage() {
           </div>
           <div className="mt-3 flex gap-2">
             <textarea
-              ref={textareaRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               rows={2}
@@ -482,7 +459,7 @@ export default function SessionPage() {
   );
 }
 
-function PromptPanel(props: { prompt: PromptPanelState | null; onUse: () => void }) {
+function PromptPanel(props: { prompt: PromptPanelState | null }) {
   if (!props.prompt) {
     return (
       <div className="rounded-lg border border-dashed border-stone-300 bg-stone-50 px-4 py-5">
@@ -511,15 +488,6 @@ function PromptPanel(props: { prompt: PromptPanelState | null; onUse: () => void
       <p className="mt-2 whitespace-pre-wrap text-[24px] font-black leading-relaxed text-stone-950">
         {props.prompt.body}
       </p>
-      {props.prompt.draftText ? (
-        <button
-          type="button"
-          onClick={props.onUse}
-          className="mt-4 min-h-12 rounded-lg bg-emerald-700 px-4 text-[17px] font-black text-white shadow-sm active:scale-[0.99]"
-        >
-          入力欄に入れる
-        </button>
-      ) : null}
     </div>
   );
 }
@@ -673,12 +641,6 @@ async function saveButtonEvent(sessionId: string, buttonType: ButtonType) {
   });
 
   return data.button_event.id;
-}
-
-async function markSuggestionAdopted(suggestionId: string, adopted: boolean) {
-  await postJson(`/api/ai-suggestion/${encodeURIComponent(suggestionId)}`, {
-    adopted,
-  });
 }
 
 async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {

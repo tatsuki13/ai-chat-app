@@ -11,6 +11,12 @@ export const ACP_SLOT_NAMES = [
   "未解決課題",
 ] as const;
 
+export const DISCUSSION_TOPIC = {
+  title: "これからの暮らしと大切にしたいこと",
+  description:
+    "生活の希望、介護や医療への考え、家族に伝えておきたいことを、無理のない範囲で話し合います。",
+};
+
 export type AcpSlotName = (typeof ACP_SLOT_NAMES)[number];
 export type SlotStatus = "empty" | "partial" | "filled";
 export type Speaker = "caregiver" | "elder" | "family";
@@ -64,6 +70,7 @@ export type FinalMinutesResult = {
   markdown: string;
   json: {
     generated_at: string;
+    discussion_topic: typeof DISCUSSION_TOPIC;
     utterances: ConversationUtterance[];
     slots: AcpSlotState[];
     summary: string;
@@ -161,6 +168,11 @@ export function buildFallbackMinutes(
     `生成日時: ${generatedAt}`,
     `発話数: ${utterances.length}`,
     "",
+    "## 話し合ったお題",
+    "",
+    `### ${DISCUSSION_TOPIC.title}`,
+    DISCUSSION_TOPIC.description,
+    "",
     "## ACPスロット",
     "",
   ];
@@ -184,6 +196,7 @@ export function buildFallbackMinutes(
     markdown: lines.join("\n"),
     json: {
       generated_at: generatedAt,
+      discussion_topic: DISCUSSION_TOPIC,
       utterances,
       slots,
       summary: "会話ログとACPスロット状態から生成した議事録です。",
