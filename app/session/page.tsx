@@ -560,7 +560,7 @@ function getPendingPrompt(buttonType: ButtonType): PromptPanelState {
   if (buttonType === "next_question") {
     return {
       title: "AIからの質問",
-      body: "現在の会話に合う質問を生成しています。",
+      body: "質問を生成しています。",
       tone: "status",
     };
   }
