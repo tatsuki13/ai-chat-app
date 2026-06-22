@@ -35,6 +35,13 @@ const DISCUSSION_TOPIC = {
   description:
     "生活の希望、介護や医療への考え、家族に伝えておきたいことを、無理のない範囲で話し合います。",
 };
+const INITIAL_PROMPT_PANEL: PromptPanelState = {
+  title: "最初の話題提供",
+  body: "最近の生活で、これからも続けたいことは何ですか。\nお二人で、話しやすいところから話してみてください。",
+  draftText:
+    "最近の生活で、これからも続けたいことは何ですか。\nお二人で、話しやすいところから話してみてください。",
+  tone: "question",
+};
 
 export default function SessionPage() {
   const [session, setSession] = useState<SessionInfo | null>(null);
@@ -42,7 +49,9 @@ export default function SessionPage() {
   const [speaker, setSpeaker] = useState<Speaker>("elder");
   const [draft, setDraft] = useState("");
   const [busyAction, setBusyAction] = useState<ButtonType | "start" | "id" | null>("start");
-  const [promptPanel, setPromptPanel] = useState<PromptPanelState | null>(null);
+  const [promptPanel, setPromptPanel] = useState<PromptPanelState | null>(
+    INITIAL_PROMPT_PANEL,
+  );
   const [statusText, setStatusText] = useState("準備中");
   const [isEditingId, setIsEditingId] = useState(false);
   const [idDraft, setIdDraft] = useState("");
@@ -239,7 +248,7 @@ export default function SessionPage() {
     if (!confirmed) return;
 
     setBusyAction("start");
-    setPromptPanel(null);
+    setPromptPanel(INITIAL_PROMPT_PANEL);
     setIsEditingId(false);
 
     try {
