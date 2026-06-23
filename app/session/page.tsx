@@ -58,7 +58,7 @@ export default function SessionPage() {
   const [idDraft, setIdDraft] = useState("");
   const [idError, setIdError] = useState("");
   const [topicBudgets, setTopicBudgets] = useState(createInitialTopicBudgets);
-  const [topicStartedAt, setTopicStartedAt] = useState(() => Date.now());
+  const [topicStartedAt, setTopicStartedAt] = useState<number | null>(null);
   const [timerNow, setTimerNow] = useState(() => Date.now());
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -74,7 +74,8 @@ export default function SessionPage() {
   );
   const topicBudgetSeconds =
     topicBudgets[currentTopicIndex] ?? TOPIC_BASE_SECONDS;
-  const topicElapsedSeconds = getElapsedSeconds(topicStartedAt, timerNow);
+  const topicElapsedSeconds =
+    topicStartedAt === null ? 0 : getElapsedSeconds(topicStartedAt, timerNow);
   const topicRemainingSeconds = topicBudgetSeconds - topicElapsedSeconds;
   const topicProgress =
     topicBudgetSeconds > 0
@@ -151,14 +152,14 @@ export default function SessionPage() {
   }, [utteranceTotal]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session || topicStartedAt === null) return;
 
     const timerId = window.setInterval(() => {
       setTimerNow(Date.now());
     }, TIMER_TICK_MS);
 
     return () => window.clearInterval(timerId);
-  }, [session?.id]);
+  }, [session?.id, topicStartedAt]);
 
   useEffect(() => {
     if (isEditingId) {
@@ -175,6 +176,7 @@ export default function SessionPage() {
     if (!session || !draft.trim()) return;
 
     const text = draft.trim();
+    startTopicTimerIfNeeded();
     setDraft("");
     setStatusText("保存中");
 
@@ -398,6 +400,14 @@ export default function SessionPage() {
 
     setCurrentTopicIndex(0);
     setTopicBudgets(createInitialTopicBudgets());
+    setTopicStartedAt(null);
+    setTimerNow(now);
+  }
+
+  function startTopicTimerIfNeeded() {
+    if (!session || topicStartedAt !== null) return;
+
+    const now = Date.now();
     setTopicStartedAt(now);
     setTimerNow(now);
   }
@@ -405,7 +415,8 @@ export default function SessionPage() {
   function advanceTopic() {
     if (!nextTopic) return;
 
-    const elapsedSeconds = getElapsedSeconds(topicStartedAt);
+    const elapsedSeconds =
+      topicStartedAt === null ? 0 : getElapsedSeconds(topicStartedAt);
     const now = Date.now();
 
     setTopicBudgets((current) =>
@@ -414,7 +425,7 @@ export default function SessionPage() {
     setCurrentTopicIndex((current) =>
       Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
     );
-    setTopicStartedAt(now);
+    setTopicStartedAt(null);
     setTimerNow(now);
   }
 
@@ -543,7 +554,7 @@ export default function SessionPage() {
 
               <div
                 ref={logScrollRef}
-                className="mt-2 h-[132px] overflow-y-auto rounded-md border border-dashed border-stone-300 bg-white px-3 py-3"
+                className="mt-2 h-[420px] overflow-y-auto rounded-md border border-dashed border-stone-300 bg-white px-3 py-3 lg:h-[460px]"
               >
                 {busyAction === "start" && utterances.length === 0 ? (
                   <EmptyState text="セッションを準備しています" />
@@ -581,7 +592,15 @@ export default function SessionPage() {
               <div className="mt-2 flex gap-2">
                 <textarea
                   value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
+                  onChange={(event) => {
+                    const nextDraft = event.target.value;
+
+                    if (nextDraft.trim()) {
+                      startTopicTimerIfNeeded();
+                    }
+
+                    setDraft(nextDraft);
+                  }}
                   rows={2}
                   placeholder="発話を入力"
                   className="min-h-20 flex-1 resize-none rounded-md border border-stone-300 bg-white px-3 py-3 text-[15px] leading-relaxed outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
@@ -590,7 +609,7 @@ export default function SessionPage() {
                 <button
                   type="submit"
                   disabled={!session || !draft.trim() || busyAction === "start"}
-                  className="min-h-20 w-24 rounded-md bg-stone-200 px-3 text-[14px] font-black text-stone-700 shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400"
+                  className="min-h-20 w-24 rounded-md bg-stone-950 px-3 text-[14px] font-black text-white shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400"
                 >
                   追加
                 </button>
@@ -822,12 +841,21 @@ function ActionButton(props: {
   disabled: boolean;
   onClick: () => void;
 }) {
+  const toneClass =
+    props.tone === "emerald"
+      ? "border-sky-700 bg-sky-700 text-white"
+      : props.tone === "blue"
+        ? "border-orange-500 bg-orange-500 text-white"
+        : props.tone === "amber"
+          ? "border-pink-200 bg-pink-100 text-pink-900"
+          : "border-stone-500 bg-stone-500 text-white";
+
   return (
     <button
       type="button"
       disabled={props.disabled}
       onClick={props.onClick}
-      className="min-h-12 rounded-md border border-stone-300 bg-stone-200 px-2 text-[13px] font-black leading-tight text-stone-700 shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400"
+      className={`min-h-12 rounded-md border px-2 text-[13px] font-black leading-tight shadow-sm active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-200 disabled:text-stone-400 ${toneClass}`}
     >
       {props.busy ? "処理中" : props.label}
     </button>
