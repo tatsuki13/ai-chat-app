@@ -9,6 +9,7 @@ import {
   generateTopicSwitch,
   updateSlotsFromConversation,
 } from "../../../../lib/llm";
+import { DISCUSSION_TOPICS } from "../../../../lib/acp-mvp";
 
 export const runtime = "nodejs";
 
@@ -32,6 +33,7 @@ export async function POST(request: Request) {
     );
     const nextTopic = optionalString(body.next_topic ?? body.nextTopic);
     const nextTopicTitle = optionalString(body.next_topic_title ?? body.nextTopicTitle);
+    const forceSwitch = Boolean(body.force_switch ?? body.forceSwitch);
     const context = await getSessionContext(sessionId);
     const slotStates =
       context.utterances.length > 0
@@ -46,14 +48,17 @@ export async function POST(request: Request) {
     if (context.utterances.length > 0) {
       await saveSlotStates(sessionId, slotStates);
     }
-    const result = await generateTopicSwitch({
-      ...context,
-      slotStates,
-      currentTopic,
-      currentTopicTitle,
-      nextTopic,
-      nextTopicTitle,
-    });
+    const result =
+      forceSwitch && nextTopic
+        ? createForcedTopicSwitch(nextTopic, nextTopicTitle)
+        : await generateTopicSwitch({
+            ...context,
+            slotStates,
+            currentTopic,
+            currentTopicTitle,
+            nextTopic,
+            nextTopicTitle,
+          });
     const savedSuggestion = await saveAiSuggestion({
       sessionId,
       triggerEventId: trigger.id,
@@ -95,4 +100,21 @@ function requiredString(value: unknown) {
 
 function optionalString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function createForcedTopicSwitch(nextTopic: string, nextTopicTitle?: string) {
+  const topic = DISCUSSION_TOPICS.find((item) => item.slot_name === nextTopic);
+  const title = nextTopicTitle || topic?.title || nextTopic;
+  const openingPrompt =
+    topic?.opening_prompt ?? `${title}について少し伺ってもよいですか。`;
+
+  return {
+    should_switch: true,
+    message: `ここまでのお話を大切にしながら、次に「${title}」について少し伺ってもよいですか。\n${openingPrompt}`,
+    target_slot: nextTopic,
+    next_topic: nextTopic,
+    reason:
+      "次の話題へ進む操作が選択されたため、時間配分に合わせて話題を切り替えました。",
+    sensitivity: "low" as const,
+  };
 }

@@ -31,6 +31,9 @@ type PromptPanelState = {
 
 const STORAGE_KEY = "acp-hitl-current-session-id";
 const MAX_RENDERED_UTTERANCES = 30;
+const TOPIC_BASE_SECONDS = 5 * 60;
+const TIMER_TICK_MS = 1000;
+
 function createOpeningPrompt(topic = DISCUSSION_TOPICS[0]): PromptPanelState {
   return {
     title: "最初の話題提供",
@@ -54,6 +57,10 @@ export default function SessionPage() {
   const [isEditingId, setIsEditingId] = useState(false);
   const [idDraft, setIdDraft] = useState("");
   const [idError, setIdError] = useState("");
+  const [topicBudgets, setTopicBudgets] = useState(createInitialTopicBudgets);
+  const [topicStartedAt, setTopicStartedAt] = useState(() => Date.now());
+  const [timerNow, setTimerNow] = useState(() => Date.now());
+  const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -65,6 +72,14 @@ export default function SessionPage() {
     0,
     utteranceTotal - visibleUtterances.length,
   );
+  const topicBudgetSeconds =
+    topicBudgets[currentTopicIndex] ?? TOPIC_BASE_SECONDS;
+  const topicElapsedSeconds = getElapsedSeconds(topicStartedAt, timerNow);
+  const topicRemainingSeconds = topicBudgetSeconds - topicElapsedSeconds;
+  const topicProgress =
+    topicBudgetSeconds > 0
+      ? Math.min(1, topicElapsedSeconds / topicBudgetSeconds)
+      : 1;
 
   useEffect(() => {
     let ignore = false;
@@ -80,6 +95,7 @@ export default function SessionPage() {
             setSession(restored.session);
             setUtterances(restored.utterances);
             setUtteranceTotal(restored.utterance_count);
+            resetTopicTiming();
             setStatusText("保存中");
             setBusyAction(null);
           }
@@ -93,6 +109,7 @@ export default function SessionPage() {
           window.localStorage.setItem(STORAGE_KEY, created.id);
           setSession(created);
           setUtteranceTotal(0);
+          resetTopicTiming();
           setStatusText("保存済み");
           setBusyAction(null);
         }
@@ -117,8 +134,31 @@ export default function SessionPage() {
   }, []);
 
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [utterances.length]);
+    const frame = window.requestAnimationFrame(() => {
+      const container = logScrollRef.current;
+
+      if (container) {
+        container.scrollTo({
+          top: container.scrollHeight,
+          behavior: "smooth",
+        });
+      }
+
+      logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [utteranceTotal]);
+
+  useEffect(() => {
+    if (!session) return;
+
+    const timerId = window.setInterval(() => {
+      setTimerNow(Date.now());
+    }, TIMER_TICK_MS);
+
+    return () => window.clearInterval(timerId);
+  }, [session?.id]);
 
   useEffect(() => {
     if (isEditingId) {
@@ -194,11 +234,10 @@ export default function SessionPage() {
           current_topic_title: currentTopic.title,
           next_topic: nextTopic?.slot_name,
           next_topic_title: nextTopic?.title,
+          force_switch: true,
         });
         if (data.suggestion.should_switch && nextTopic) {
-          setCurrentTopicIndex((current) =>
-            Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
-          );
+          advanceTopic();
         }
 
         setPromptPanel({
@@ -262,10 +301,10 @@ export default function SessionPage() {
     if (!confirmed) return;
 
     setBusyAction("start");
-    setCurrentTopicIndex(0);
     setPromptPanel(createOpeningPrompt());
     setIsEditingId(false);
     setIdError("");
+    resetTopicTiming();
 
     try {
       const created = await startSession();
@@ -274,6 +313,7 @@ export default function SessionPage() {
       setUtterances([]);
       setUtteranceTotal(0);
       setDraft("");
+      resetTopicTiming();
       setStatusText("保存済み");
     } catch {
       setStatusText("接続エラー");
@@ -351,6 +391,31 @@ export default function SessionPage() {
     if (event.key === "Escape") {
       cancelEditingId();
     }
+  }
+
+  function resetTopicTiming() {
+    const now = Date.now();
+
+    setCurrentTopicIndex(0);
+    setTopicBudgets(createInitialTopicBudgets());
+    setTopicStartedAt(now);
+    setTimerNow(now);
+  }
+
+  function advanceTopic() {
+    if (!nextTopic) return;
+
+    const elapsedSeconds = getElapsedSeconds(topicStartedAt);
+    const now = Date.now();
+
+    setTopicBudgets((current) =>
+      distributeRemainingTopicTime(current, currentTopicIndex, elapsedSeconds),
+    );
+    setCurrentTopicIndex((current) =>
+      Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
+    );
+    setTopicStartedAt(now);
+    setTimerNow(now);
   }
 
   return (
@@ -451,12 +516,18 @@ export default function SessionPage() {
               {DISCUSSION_TOPIC.description}
             </div>
           </details>
-          <div className="px-4 py-4">
+          <div className="relative px-4 py-4 sm:pr-[104px]">
             <PromptPanel
               prompt={promptPanel}
               topicTitle={currentTopic.title}
               topicIndex={currentTopicIndex + 1}
               topicCount={DISCUSSION_TOPICS.length}
+            />
+            <TopicTimer
+              topicIndex={currentTopicIndex + 1}
+              topicCount={DISCUSSION_TOPICS.length}
+              remainingSeconds={topicRemainingSeconds}
+              progress={topicProgress}
             />
           </div>
         </section>
@@ -469,7 +540,10 @@ export default function SessionPage() {
             </span>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto bg-stone-50 px-3 py-3">
+          <div
+            ref={logScrollRef}
+            className="min-h-0 flex-1 overflow-y-auto bg-stone-50 px-3 py-3"
+          >
             {busyAction === "start" && utterances.length === 0 ? (
               <EmptyState text="セッションを準備しています" />
             ) : utterances.length === 0 ? (
@@ -603,6 +677,47 @@ function PromptPanel(props: {
       <p className="mt-2 whitespace-pre-wrap text-[24px] font-black leading-relaxed text-stone-950">
         {props.prompt.body}
       </p>
+    </div>
+  );
+}
+
+function TopicTimer(props: {
+  topicIndex: number;
+  topicCount: number;
+  remainingSeconds: number;
+  progress: number;
+}) {
+  const isOvertime = props.remainingSeconds < 0;
+  const timerColor = isOvertime ? "#b45309" : "#047857";
+  const progressDegrees = Math.round(props.progress * 360);
+  const formattedTime = formatTimerSeconds(Math.abs(props.remainingSeconds));
+
+  return (
+    <div className="mt-3 h-24 w-24 rounded-lg border border-stone-200 bg-white p-2 shadow-sm sm:absolute sm:-right-4 sm:top-4 sm:mt-0">
+      <div
+        className="grid h-full w-full place-items-center rounded-full"
+        style={{
+          background: `conic-gradient(${timerColor} ${progressDegrees}deg, #e7e5e4 0deg)`,
+        }}
+      >
+        <div className="grid h-[72px] w-[72px] place-items-center rounded-full bg-white text-center">
+          <div>
+            <div className="text-[10px] font-black leading-none text-stone-500">
+              {props.topicIndex}/{props.topicCount}
+            </div>
+            <div
+              className={`mt-1 text-[18px] font-black leading-none ${
+                isOvertime ? "text-amber-700" : "text-emerald-800"
+              }`}
+            >
+              {isOvertime ? `+${formattedTime}` : formattedTime}
+            </div>
+            <div className="mt-1 text-[10px] font-black leading-none text-stone-500">
+              {isOvertime ? "超過" : "残り"}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -850,6 +965,47 @@ function formatDateTime(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function createInitialTopicBudgets() {
+  return DISCUSSION_TOPICS.map(() => TOPIC_BASE_SECONDS);
+}
+
+function getElapsedSeconds(startedAt: number, now = Date.now()) {
+  return Math.max(0, Math.floor((now - startedAt) / 1000));
+}
+
+function distributeRemainingTopicTime(
+  budgets: number[],
+  completedTopicIndex: number,
+  elapsedSeconds: number,
+) {
+  const currentBudget = budgets[completedTopicIndex] ?? TOPIC_BASE_SECONDS;
+  const remainingSeconds = Math.max(0, currentBudget - elapsedSeconds);
+  const firstRemainingIndex = completedTopicIndex + 1;
+  const remainingTopicCount = Math.max(
+    0,
+    DISCUSSION_TOPICS.length - firstRemainingIndex,
+  );
+
+  if (remainingSeconds === 0 || remainingTopicCount === 0) return budgets;
+
+  const secondsPerTopic = Math.floor(remainingSeconds / remainingTopicCount);
+  const extraSeconds = remainingSeconds % remainingTopicCount;
+
+  return budgets.map((budget, index) => {
+    if (index < firstRemainingIndex) return budget;
+
+    const remainderBonus = index - firstRemainingIndex < extraSeconds ? 1 : 0;
+    return budget + secondsPerTopic + remainderBonus;
+  });
+}
+
+function formatTimerSeconds(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+
+  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
 type NextQuestionResponse = {
