@@ -419,111 +419,108 @@ export default function SessionPage() {
   }
 
   return (
-    <main className="min-h-dvh bg-[#f7f8f4] pb-[calc(124px+env(safe-area-inset-bottom))] text-stone-950">
-      <header className="sticky top-0 z-20 border-b border-stone-200 bg-[#fdfdf9]/95 shadow-sm backdrop-blur">
-        <div className="mx-auto flex max-w-[1100px] items-center justify-between gap-3 px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-[13px] font-bold text-stone-500">ACP対話支援</p>
-            <h1 className="truncate text-[22px] font-black leading-tight">
-              プレACPセッション
-            </h1>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[13px] font-bold text-emerald-800">
-              {statusText}
-            </span>
-            <button
-              type="button"
-              onClick={handleNewSession}
-              className="min-h-11 rounded-lg border border-stone-300 bg-white px-3 text-[14px] font-bold text-stone-700 shadow-sm active:scale-[0.99]"
-            >
-              新規
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <section className="mx-auto flex min-h-[calc(100dvh-210px)] max-w-[1100px] flex-col gap-3 px-4 py-4">
-        <div className="rounded-lg border border-stone-200 bg-white px-4 py-3 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <span className="text-[13px] font-black text-stone-500">
-              参加者ID
-            </span>
-            {isEditingId ? (
-              <div className="flex min-w-0 flex-1 flex-wrap justify-end gap-2">
-                <input
-                  ref={idInputRef}
-                  value={idDraft}
-                  onChange={(event) => setIdDraft(event.target.value)}
-                  onKeyDown={handleIdKeyDown}
-                  className="h-10 min-w-0 flex-1 rounded-lg border border-emerald-400 bg-white px-3 text-[16px] font-black text-stone-950 outline-none ring-2 ring-emerald-100 sm:max-w-[320px]"
-                  disabled={busyAction === "id"}
-                />
-                <button
-                  type="button"
-                  onClick={() => void saveDisplayId()}
-                  disabled={busyAction === "id"}
-                  className="h-10 rounded-lg bg-emerald-700 px-4 text-[14px] font-black text-white disabled:bg-stone-300"
-                >
-                  保存
-                </button>
-                <button
-                  type="button"
-                  onClick={cancelEditingId}
-                  disabled={busyAction === "id"}
-                  className="h-10 rounded-lg border border-stone-300 bg-white px-4 text-[14px] font-black text-stone-700 disabled:text-stone-400"
-                >
-                  取消
-                </button>
+    <main className="min-h-dvh bg-[#f7f8f4] text-stone-950">
+      <section className="mx-auto w-full max-w-[1120px] px-4 py-4">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,860px)_240px]">
+          <div className="min-w-0 space-y-3">
+            <details className="group rounded-md border border-stone-200 bg-white shadow-sm">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-black text-stone-500">
+                    今日の機会
+                  </div>
+                  <div className="mt-1 truncate text-[15px] font-black leading-tight text-stone-950">
+                    {DISCUSSION_TOPIC.title}
+                  </div>
+                </div>
+                <span className="grid h-8 w-8 shrink-0 place-items-center text-[16px] font-black leading-none text-stone-800 transition group-open:rotate-180">
+                  ▼
+                </span>
+              </summary>
+              <div className="border-t border-stone-100 px-4 pb-3 pt-2 text-[13px] font-semibold leading-relaxed text-stone-600">
+                {DISCUSSION_TOPIC.description}
               </div>
-            ) : (
-              <div className="flex min-w-0 items-center gap-2">
-                <span className="truncate text-[18px] font-black text-stone-950">
-                  {participantCode}
+            </details>
+
+            <header className="flex flex-wrap items-end justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[12px] font-bold text-stone-500">
+                  ACP対話支援
+                </p>
+                <h1 className="truncate text-[22px] font-black leading-tight">
+                  プレACPセッション
+                </h1>
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="text-[12px] font-bold text-stone-500">
+                    参加者ID
+                  </span>
+                  {isEditingId ? (
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <input
+                        ref={idInputRef}
+                        value={idDraft}
+                        onChange={(event) => setIdDraft(event.target.value)}
+                        onKeyDown={handleIdKeyDown}
+                        className="h-8 min-w-0 rounded-md border border-emerald-400 bg-white px-2 text-[13px] font-black text-stone-950 outline-none ring-2 ring-emerald-100"
+                        disabled={busyAction === "id"}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void saveDisplayId()}
+                        disabled={busyAction === "id"}
+                        className="h-8 rounded-md bg-emerald-700 px-3 text-[12px] font-black text-white disabled:bg-stone-300"
+                      >
+                        保存
+                      </button>
+                      <button
+                        type="button"
+                        onClick={cancelEditingId}
+                        disabled={busyAction === "id"}
+                        className="h-8 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 disabled:text-stone-400"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={startEditingId}
+                      disabled={!session || Boolean(busyAction)}
+                      className="max-w-[260px] truncate rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[12px] font-black text-stone-700 shadow-sm disabled:text-stone-400"
+                    >
+                      {participantCode}
+                    </button>
+                  )}
+                </div>
+                {idError ? (
+                  <p className="mt-1 text-[12px] font-bold text-red-700">
+                    {idError}
+                  </p>
+                ) : null}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[12px] font-bold text-emerald-800">
+                  {statusText}
                 </span>
                 <button
                   type="button"
-                  onClick={startEditingId}
-                  disabled={!session || Boolean(busyAction)}
-                  className="h-10 rounded-lg border border-stone-300 bg-white px-4 text-[14px] font-black text-stone-700 disabled:text-stone-400"
+                  onClick={handleNewSession}
+                  className="min-h-8 rounded-md border border-stone-300 bg-white px-3 text-[13px] font-bold text-stone-700 shadow-sm active:scale-[0.99]"
                 >
-                  編集
+                  新規
                 </button>
               </div>
-            )}
+            </header>
           </div>
-          {idError ? (
-            <p className="mt-2 text-[13px] font-bold text-red-700">{idError}</p>
-          ) : null}
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px] lg:items-end">
-          <section className="rounded-lg border border-stone-200 bg-white shadow-sm">
-            <div className="flex items-start justify-between gap-3 border-b border-stone-200 px-4 py-4">
-              <div className="min-w-0">
-                <div className="text-[13px] font-black text-stone-500">
-                  今日の機会
-                </div>
-                <h2 className="mt-2 text-[22px] font-black leading-tight text-stone-950">
-                  {DISCUSSION_TOPIC.title}
-                </h2>
-                <p className="mt-3 text-[15px] font-semibold leading-relaxed text-stone-600">
-                  {DISCUSSION_TOPIC.description}
-                </p>
-              </div>
-              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-stone-300 bg-white text-[13px] font-black text-stone-600">
-                \/
-              </span>
-            </div>
-            <div className="px-4 py-4">
-              <PromptPanel
-                prompt={promptPanel}
-                topicTitle={currentTopic.title}
-                topicIndex={currentTopicIndex + 1}
-                topicCount={DISCUSSION_TOPICS.length}
-              />
-            </div>
-          </section>
+        <div className="mt-3 grid gap-4 lg:grid-cols-[minmax(0,860px)_240px] lg:items-start">
+          <PromptPanel
+            prompt={promptPanel}
+            topicTitle={currentTopic.title}
+            topicIndex={currentTopicIndex + 1}
+            topicCount={DISCUSSION_TOPICS.length}
+          />
           <TopicTimer
             topicIndex={currentTopicIndex + 1}
             topicCount={DISCUSSION_TOPICS.length}
@@ -532,106 +529,107 @@ export default function SessionPage() {
           />
         </div>
 
-        <section className="flex h-[52dvh] min-h-[360px] max-h-[660px] flex-col overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
-          <div className="flex items-center justify-between border-b border-stone-200 px-4 py-3">
-            <h2 className="text-[18px] font-black leading-tight">会話ログ</h2>
-            <span className="text-[13px] font-bold text-stone-500">
-              {utteranceTotal}件
-            </span>
-          </div>
-
-          <div
-            ref={logScrollRef}
-            className="min-h-0 flex-1 overflow-y-auto bg-stone-50 px-3 py-3"
-          >
-            {busyAction === "start" && utterances.length === 0 ? (
-              <EmptyState text="セッションを準備しています" />
-            ) : utterances.length === 0 ? (
-              <EmptyState text="発話を入力するとここに表示されます" />
-            ) : (
-              <div className="space-y-3">
-                {hiddenUtteranceCount > 0 ? (
-                  <div className="rounded-lg border border-stone-200 bg-white px-3 py-2 text-center text-[13px] font-bold text-stone-500">
-                    以前の発話 {hiddenUtteranceCount} 件
-                  </div>
-                ) : null}
-                {visibleUtterances.map((utterance) => (
-                  <SpeechBubble key={utterance.id} utterance={utterance} />
-                ))}
-                <div ref={logEndRef} />
+        <div className="mt-3 grid gap-4 lg:grid-cols-[minmax(0,860px)_240px]">
+          <div className="min-w-0 space-y-3">
+            <section>
+              <div className="flex items-center justify-between">
+                <h2 className="text-[14px] font-black leading-tight">
+                  会話ログ
+                </h2>
+                <span className="text-[12px] font-bold text-stone-500">
+                  {utteranceTotal}件
+                </span>
               </div>
-            )}
-          </div>
-        </section>
 
-        <form
-          onSubmit={handleSubmit}
-          className="rounded-lg border border-stone-200 bg-white p-3 shadow-sm"
-        >
-          <div className="grid grid-cols-2 gap-2">
-            <SpeakerButton
-              active={speaker === "elder"}
-              label="本人"
-              onClick={() => setSpeaker("elder")}
-            />
-            <SpeakerButton
-              active={speaker === "caregiver"}
-              label="介護者"
-              onClick={() => setSpeaker("caregiver")}
-            />
-          </div>
-          <div className="mt-3 flex gap-2">
-            <textarea
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              rows={2}
-              placeholder="発話を入力"
-              className="min-h-20 flex-1 resize-none rounded-lg border border-stone-300 bg-white px-3 py-3 text-[18px] leading-relaxed outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
-              disabled={!session || busyAction === "start"}
-            />
-            <button
-              type="submit"
-              disabled={!session || !draft.trim() || busyAction === "start"}
-              className="min-h-20 w-24 rounded-lg bg-stone-950 px-3 text-[17px] font-black text-white shadow-sm active:scale-[0.99] disabled:bg-stone-300"
-            >
-              追加
-            </button>
-          </div>
-        </form>
-      </section>
+              <div
+                ref={logScrollRef}
+                className="mt-2 h-[132px] overflow-y-auto rounded-md border border-dashed border-stone-300 bg-white px-3 py-3"
+              >
+                {busyAction === "start" && utterances.length === 0 ? (
+                  <EmptyState text="セッションを準備しています" />
+                ) : utterances.length === 0 ? (
+                  <EmptyState text="発話を入力するとここに表示されます" />
+                ) : (
+                  <div className="space-y-3">
+                    {hiddenUtteranceCount > 0 ? (
+                      <div className="rounded-md border border-stone-200 bg-white px-3 py-2 text-center text-[12px] font-bold text-stone-500">
+                        以前の発話 {hiddenUtteranceCount} 件
+                      </div>
+                    ) : null}
+                    {visibleUtterances.map((utterance) => (
+                      <SpeechBubble key={utterance.id} utterance={utterance} />
+                    ))}
+                    <div ref={logEndRef} />
+                  </div>
+                )}
+              </div>
+            </section>
 
-      <footer className="fixed inset-x-0 bottom-0 z-30 border-t border-stone-200 bg-[#fdfdf9]/95 shadow-[0_-12px_28px_rgba(28,25,23,0.12)] backdrop-blur">
-        <div className="mx-auto grid max-w-[1100px] grid-cols-2 gap-3 px-4 py-4 sm:grid-cols-4">
-          <ActionButton
-            label="質問する"
-            tone="emerald"
-            busy={busyAction === "next_question"}
-            disabled={!session || Boolean(busyAction)}
-            onClick={() => handleAction("next_question")}
-          />
-          <ActionButton
-            label="次の話題へ"
-            tone="blue"
-            busy={busyAction === "switch_topic"}
-            disabled={!session || Boolean(busyAction)}
-            onClick={() => handleAction("switch_topic")}
-          />
-          <ActionButton
-            label="全体終了確認"
-            tone="amber"
-            busy={busyAction === "check_end"}
-            disabled={!session || Boolean(busyAction)}
-            onClick={() => handleAction("check_end")}
-          />
-          <ActionButton
-            label="議事録更新"
-            tone="stone"
-            busy={busyAction === "update_slots"}
-            disabled={!session || Boolean(busyAction)}
-            onClick={() => handleAction("update_slots")}
-          />
+            <form onSubmit={handleSubmit}>
+              <div className="grid grid-cols-2 gap-2">
+                <SpeakerButton
+                  active={speaker === "elder"}
+                  label="本人"
+                  onClick={() => setSpeaker("elder")}
+                />
+                <SpeakerButton
+                  active={speaker === "caregiver"}
+                  label="介護者"
+                  onClick={() => setSpeaker("caregiver")}
+                />
+              </div>
+              <div className="mt-2 flex gap-2">
+                <textarea
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  rows={2}
+                  placeholder="発話を入力"
+                  className="min-h-20 flex-1 resize-none rounded-md border border-stone-300 bg-white px-3 py-3 text-[15px] leading-relaxed outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
+                  disabled={!session || busyAction === "start"}
+                />
+                <button
+                  type="submit"
+                  disabled={!session || !draft.trim() || busyAction === "start"}
+                  className="min-h-20 w-24 rounded-md bg-stone-200 px-3 text-[14px] font-black text-stone-700 shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400"
+                >
+                  追加
+                </button>
+              </div>
+            </form>
+
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <ActionButton
+                label="質問する"
+                tone="emerald"
+                busy={busyAction === "next_question"}
+                disabled={!session || Boolean(busyAction)}
+                onClick={() => handleAction("next_question")}
+              />
+              <ActionButton
+                label="次の話題へ"
+                tone="blue"
+                busy={busyAction === "switch_topic"}
+                disabled={!session || Boolean(busyAction)}
+                onClick={() => handleAction("switch_topic")}
+              />
+              <ActionButton
+                label="全体終了確認"
+                tone="amber"
+                busy={busyAction === "check_end"}
+                disabled={!session || Boolean(busyAction)}
+                onClick={() => handleAction("check_end")}
+              />
+              <ActionButton
+                label="議事録更新"
+                tone="stone"
+                busy={busyAction === "update_slots"}
+                disabled={!session || Boolean(busyAction)}
+                onClick={() => handleAction("update_slots")}
+              />
+            </div>
+          </div>
         </div>
-      </footer>
+      </section>
     </main>
   );
 }
@@ -644,9 +642,9 @@ function PromptPanel(props: {
 }) {
   if (!props.prompt) {
     return (
-      <div className="flex min-h-[240px] flex-col rounded-lg border border-dashed border-stone-300 bg-stone-50 px-4 py-5 lg:min-h-[300px]">
-        <div className="text-[13px] font-black text-stone-500">AIからの質問</div>
-        <p className="mt-2 text-[20px] font-black leading-relaxed text-stone-500">
+      <div className="flex min-h-[220px] flex-col rounded-md border border-dashed border-stone-300 bg-white px-4 py-5 lg:h-[240px]">
+        <div className="text-[12px] font-black text-stone-500">AIからの質問</div>
+        <p className="mt-2 text-[18px] font-black leading-relaxed text-stone-500">
           下の「質問する」または「次の話題へ」を押すと、ここに介護者が読み上げられる文が表示されます。
         </p>
       </div>
@@ -655,26 +653,26 @@ function PromptPanel(props: {
 
   const toneClass =
     props.prompt.tone === "error"
-      ? "border-red-200 bg-red-50"
+      ? "border-red-300 bg-red-50"
       : props.prompt.tone === "end"
-        ? "border-amber-200 bg-amber-50"
+        ? "border-amber-300 bg-amber-50"
         : props.prompt.tone === "switch"
-          ? "border-sky-200 bg-sky-50"
+          ? "border-sky-300 bg-sky-50"
           : props.prompt.tone === "status"
-            ? "border-stone-200 bg-stone-50"
-            : "border-emerald-200 bg-emerald-50";
+            ? "border-stone-300 bg-white"
+            : "border-emerald-600 bg-emerald-50";
 
   return (
-    <div className={`flex min-h-[240px] flex-col rounded-lg border px-4 py-4 lg:min-h-[300px] ${toneClass}`}>
-      <div className="space-y-1.5">
-        <div className="w-fit rounded-full border border-white/60 bg-white/70 px-2.5 py-1 text-[12px] font-black text-stone-600">
+    <div className={`flex min-h-[220px] flex-col overflow-hidden rounded-md border px-4 py-4 lg:h-[240px] ${toneClass}`}>
+      <div className="space-y-2">
+        <div className="w-fit rounded-full border border-emerald-100 bg-emerald-100 px-3 py-1 text-[12px] font-black text-emerald-800">
           話題 {props.topicIndex}/{props.topicCount}: {props.topicTitle}
         </div>
-        <div className="text-[13px] font-black text-stone-600">
+        <div className="text-[13px] font-black text-stone-700">
           {props.prompt.title}
         </div>
       </div>
-      <p className="mt-2 whitespace-pre-wrap text-[24px] font-black leading-relaxed text-stone-950">
+      <p className="mt-4 min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap text-[24px] font-black leading-relaxed text-stone-950">
         {props.prompt.body}
       </p>
     </div>
@@ -693,30 +691,30 @@ function TopicTimer(props: {
   const formattedTime = formatTimerSeconds(Math.abs(props.remainingSeconds));
 
   return (
-    <div className="mx-auto flex aspect-square h-56 w-56 shrink-0 flex-col rounded-lg border border-stone-200 bg-white p-4 shadow-sm lg:mx-0 lg:h-[300px] lg:w-[300px]">
-      <div className="text-center text-[15px] font-black text-emerald-700 lg:text-[18px]">
+    <div className="mx-auto flex aspect-square h-56 w-56 shrink-0 flex-col rounded-md border border-stone-200 bg-white p-4 shadow-md lg:mx-0 lg:h-[240px] lg:w-[240px]">
+      <div className="text-center text-[14px] font-black text-emerald-700">
         残り時間
       </div>
       <div className="mt-3 flex min-h-0 flex-1 items-center justify-center">
         <div
-          className="grid aspect-square h-full max-h-[220px] place-items-center rounded-full"
+          className="grid aspect-square h-full max-h-[172px] place-items-center rounded-full"
           style={{
-            background: `conic-gradient(${timerColor} ${progressDegrees}deg, #e7e5e4 0deg)`,
+            background: `conic-gradient(${timerColor} ${progressDegrees}deg, #d6d3d1 0deg)`,
           }}
         >
-          <div className="grid h-[76%] w-[76%] place-items-center rounded-full bg-white text-center">
+          <div className="grid h-[74%] w-[74%] place-items-center rounded-full bg-white text-center">
             <div>
-              <div className="text-[13px] font-black leading-none text-stone-500">
+              <div className="text-[11px] font-black leading-none text-stone-500">
                 {props.topicIndex}/{props.topicCount}
               </div>
               <div
-                className={`mt-3 text-[34px] font-black leading-none lg:text-[44px] ${
+                className={`mt-2 text-[36px] font-black leading-none ${
                   isOvertime ? "text-amber-700" : "text-emerald-800"
                 }`}
               >
                 {isOvertime ? `+${formattedTime}` : formattedTime}
               </div>
-              <div className="mt-3 text-[13px] font-black leading-none text-stone-500">
+              <div className="mt-2 text-[11px] font-black leading-none text-stone-500">
                 {isOvertime ? "超過" : "残り"}
               </div>
             </div>
@@ -761,7 +759,7 @@ function getPendingPrompt(buttonType: ButtonType): PromptPanelState {
 
 function EmptyState(props: { text: string }) {
   return (
-    <div className="flex min-h-[210px] items-center justify-center rounded-lg border border-dashed border-stone-300 bg-white px-4 text-center text-[17px] font-bold text-stone-500">
+    <div className="flex min-h-full items-center justify-center rounded-md bg-white px-4 text-center text-[13px] font-bold text-stone-500">
       {props.text}
     </div>
   );
@@ -772,7 +770,7 @@ function SpeakerButton(props: { active: boolean; label: string; onClick: () => v
     <button
       type="button"
       onClick={props.onClick}
-      className={`min-h-12 rounded-lg border px-3 text-[17px] font-black active:scale-[0.99] ${
+      className={`min-h-10 rounded-md border px-3 text-[13px] font-black active:scale-[0.99] ${
         props.active
           ? "border-emerald-700 bg-emerald-700 text-white"
           : "border-stone-300 bg-white text-stone-700"
@@ -789,24 +787,24 @@ function SpeechBubble(props: { utterance: Utterance }) {
   return (
     <div className={`flex ${isCaregiver ? "justify-end" : "justify-start"}`}>
       <article
-        className={`max-w-[88%] rounded-lg border px-3 py-2 shadow-sm ${
+        className={`max-w-[88%] rounded-md border px-3 py-2 shadow-sm ${
           isCaregiver
             ? "border-sky-700 bg-sky-700 text-white"
             : "border-stone-200 bg-[#fffdf7] text-stone-950"
         }`}
       >
         <div
-          className={`mb-1 text-[12px] font-black ${
+          className={`mb-1 text-[11px] font-black ${
             isCaregiver ? "text-sky-100" : "text-emerald-700"
           }`}
         >
           {isCaregiver ? "介護者" : "本人"}
         </div>
-        <p className="whitespace-pre-wrap break-words text-[18px] leading-relaxed">
+        <p className="whitespace-pre-wrap break-words text-[15px] leading-relaxed">
           {props.utterance.text}
         </p>
         <time
-          className={`mt-2 block text-[11px] font-bold ${
+          className={`mt-2 block text-[10px] font-bold ${
             isCaregiver ? "text-sky-100" : "text-stone-400"
           }`}
         >
@@ -824,21 +822,12 @@ function ActionButton(props: {
   disabled: boolean;
   onClick: () => void;
 }) {
-  const toneClass =
-    props.tone === "emerald"
-      ? "bg-emerald-700 text-white"
-      : props.tone === "blue"
-        ? "bg-sky-700 text-white"
-        : props.tone === "amber"
-          ? "bg-amber-500 text-stone-950"
-          : "bg-stone-950 text-white";
-
   return (
     <button
       type="button"
       disabled={props.disabled}
       onClick={props.onClick}
-      className={`min-h-20 rounded-lg px-2 text-[17px] font-black leading-tight shadow-sm active:scale-[0.99] disabled:bg-stone-300 disabled:text-stone-500 ${toneClass}`}
+      className="min-h-12 rounded-md border border-stone-300 bg-stone-200 px-2 text-[13px] font-black leading-tight text-stone-700 shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400"
     >
       {props.busy ? "処理中" : props.label}
     </button>
