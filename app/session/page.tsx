@@ -421,7 +421,7 @@ export default function SessionPage() {
   return (
     <main className="min-h-dvh bg-[#f7f8f4] pb-[calc(124px+env(safe-area-inset-bottom))] text-stone-950">
       <header className="sticky top-0 z-20 border-b border-stone-200 bg-[#fdfdf9]/95 shadow-sm backdrop-blur">
-        <div className="mx-auto flex max-w-[860px] items-center justify-between gap-3 px-4 py-3">
+        <div className="mx-auto flex max-w-[1100px] items-center justify-between gap-3 px-4 py-3">
           <div className="min-w-0">
             <p className="text-[13px] font-bold text-stone-500">ACP対話支援</p>
             <h1 className="truncate text-[22px] font-black leading-tight">
@@ -443,7 +443,7 @@ export default function SessionPage() {
         </div>
       </header>
 
-      <section className="mx-auto flex min-h-[calc(100dvh-210px)] max-w-[860px] flex-col gap-3 px-4 py-4">
+      <section className="mx-auto flex min-h-[calc(100dvh-210px)] max-w-[1100px] flex-col gap-3 px-4 py-4">
         <div className="rounded-lg border border-stone-200 bg-white px-4 py-3 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="text-[13px] font-black text-stone-500">
@@ -497,44 +497,40 @@ export default function SessionPage() {
           ) : null}
         </div>
 
-        <section className="rounded-lg border border-stone-200 bg-white shadow-sm">
-          <details className="group border-b border-stone-200">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px] lg:items-end">
+          <section className="rounded-lg border border-stone-200 bg-white shadow-sm">
+            <div className="flex items-start justify-between gap-3 border-b border-stone-200 px-4 py-4">
               <div className="min-w-0">
                 <div className="text-[13px] font-black text-stone-500">
                   今日の機会
                 </div>
-                <h2 className="mt-1 truncate text-[20px] font-black leading-tight text-stone-950">
+                <h2 className="mt-2 text-[22px] font-black leading-tight text-stone-950">
                   {DISCUSSION_TOPIC.title}
                 </h2>
+                <p className="mt-3 text-[15px] font-semibold leading-relaxed text-stone-600">
+                  {DISCUSSION_TOPIC.description}
+                </p>
               </div>
-              <span className="shrink-0 rounded-full border border-stone-300 bg-stone-50 px-3 py-1 text-[13px] font-black text-stone-600">
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-stone-300 bg-white text-[13px] font-black text-stone-600">
                 \/
               </span>
-            </summary>
-            <div className="border-t border-stone-100 px-4 pb-4 text-[15px] font-semibold leading-relaxed text-stone-600">
-              {DISCUSSION_TOPIC.description}
             </div>
-          </details>
-          <div className="px-4 py-4 sm:overflow-visible">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-stretch sm:gap-6">
-              <div className="min-w-0 flex-1">
-                <PromptPanel
-                  prompt={promptPanel}
-                  topicTitle={currentTopic.title}
-                  topicIndex={currentTopicIndex + 1}
-                  topicCount={DISCUSSION_TOPICS.length}
-                />
-              </div>
-              <TopicTimer
+            <div className="px-4 py-4">
+              <PromptPanel
+                prompt={promptPanel}
+                topicTitle={currentTopic.title}
                 topicIndex={currentTopicIndex + 1}
                 topicCount={DISCUSSION_TOPICS.length}
-                remainingSeconds={topicRemainingSeconds}
-                progress={topicProgress}
               />
             </div>
-          </div>
-        </section>
+          </section>
+          <TopicTimer
+            topicIndex={currentTopicIndex + 1}
+            topicCount={DISCUSSION_TOPICS.length}
+            remainingSeconds={topicRemainingSeconds}
+            progress={topicProgress}
+          />
+        </div>
 
         <section className="flex h-[52dvh] min-h-[360px] max-h-[660px] flex-col overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-stone-200 px-4 py-3">
@@ -605,7 +601,7 @@ export default function SessionPage() {
       </section>
 
       <footer className="fixed inset-x-0 bottom-0 z-30 border-t border-stone-200 bg-[#fdfdf9]/95 shadow-[0_-12px_28px_rgba(28,25,23,0.12)] backdrop-blur">
-        <div className="mx-auto grid max-w-[860px] grid-cols-2 gap-3 px-4 py-4 sm:grid-cols-4">
+        <div className="mx-auto grid max-w-[1100px] grid-cols-2 gap-3 px-4 py-4 sm:grid-cols-4">
           <ActionButton
             label="質問する"
             tone="emerald"
@@ -648,7 +644,7 @@ function PromptPanel(props: {
 }) {
   if (!props.prompt) {
     return (
-      <div className="h-full rounded-lg border border-dashed border-stone-300 bg-stone-50 px-4 py-5">
+      <div className="flex min-h-[240px] flex-col rounded-lg border border-dashed border-stone-300 bg-stone-50 px-4 py-5 lg:min-h-[300px]">
         <div className="text-[13px] font-black text-stone-500">AIからの質問</div>
         <p className="mt-2 text-[20px] font-black leading-relaxed text-stone-500">
           下の「質問する」または「次の話題へ」を押すと、ここに介護者が読み上げられる文が表示されます。
@@ -669,7 +665,7 @@ function PromptPanel(props: {
             : "border-emerald-200 bg-emerald-50";
 
   return (
-    <div className={`h-full rounded-lg border px-4 py-4 ${toneClass}`}>
+    <div className={`flex min-h-[240px] flex-col rounded-lg border px-4 py-4 lg:min-h-[300px] ${toneClass}`}>
       <div className="space-y-1.5">
         <div className="w-fit rounded-full border border-white/60 bg-white/70 px-2.5 py-1 text-[12px] font-black text-stone-600">
           話題 {props.topicIndex}/{props.topicCount}: {props.topicTitle}
@@ -697,27 +693,32 @@ function TopicTimer(props: {
   const formattedTime = formatTimerSeconds(Math.abs(props.remainingSeconds));
 
   return (
-    <div className="aspect-square h-28 w-28 shrink-0 self-center rounded-lg border border-stone-200 bg-white p-2 shadow-sm sm:h-auto sm:w-auto sm:min-h-[132px] sm:self-stretch sm:ml-4">
-      <div
-        className="grid h-full w-full place-items-center rounded-full"
-        style={{
-          background: `conic-gradient(${timerColor} ${progressDegrees}deg, #e7e5e4 0deg)`,
-        }}
-      >
-        <div className="grid h-[76%] w-[76%] place-items-center rounded-full bg-white text-center">
-          <div>
-            <div className="text-[10px] font-black leading-none text-stone-500">
-              {props.topicIndex}/{props.topicCount}
-            </div>
-            <div
-              className={`mt-1 text-[24px] font-black leading-none ${
-                isOvertime ? "text-amber-700" : "text-emerald-800"
-              }`}
-            >
-              {isOvertime ? `+${formattedTime}` : formattedTime}
-            </div>
-            <div className="mt-1 text-[10px] font-black leading-none text-stone-500">
-              {isOvertime ? "超過" : "残り"}
+    <div className="mx-auto flex aspect-square h-56 w-56 shrink-0 flex-col rounded-lg border border-stone-200 bg-white p-4 shadow-sm lg:mx-0 lg:h-[300px] lg:w-[300px]">
+      <div className="text-center text-[15px] font-black text-emerald-700 lg:text-[18px]">
+        残り時間
+      </div>
+      <div className="mt-3 flex min-h-0 flex-1 items-center justify-center">
+        <div
+          className="grid aspect-square h-full max-h-[220px] place-items-center rounded-full"
+          style={{
+            background: `conic-gradient(${timerColor} ${progressDegrees}deg, #e7e5e4 0deg)`,
+          }}
+        >
+          <div className="grid h-[76%] w-[76%] place-items-center rounded-full bg-white text-center">
+            <div>
+              <div className="text-[13px] font-black leading-none text-stone-500">
+                {props.topicIndex}/{props.topicCount}
+              </div>
+              <div
+                className={`mt-3 text-[34px] font-black leading-none lg:text-[44px] ${
+                  isOvertime ? "text-amber-700" : "text-emerald-800"
+                }`}
+              >
+                {isOvertime ? `+${formattedTime}` : formattedTime}
+              </div>
+              <div className="mt-3 text-[13px] font-black leading-none text-stone-500">
+                {isOvertime ? "超過" : "残り"}
+              </div>
             </div>
           </div>
         </div>
