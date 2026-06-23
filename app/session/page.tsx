@@ -509,7 +509,7 @@ export default function SessionPage() {
                 </h2>
               </div>
               <span className="shrink-0 rounded-full border border-stone-300 bg-stone-50 px-3 py-1 text-[13px] font-black text-stone-600">
-                Ｖ
+                \/
               </span>
             </summary>
             <div className="border-t border-stone-100 px-4 pb-4 text-[15px] font-semibold leading-relaxed text-stone-600">
@@ -517,7 +517,7 @@ export default function SessionPage() {
             </div>
           </details>
           <div className="px-4 py-4 sm:overflow-visible">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-stretch">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-stretch sm:gap-6">
               <div className="min-w-0 flex-1">
                 <PromptPanel
                   prompt={promptPanel}
@@ -697,7 +697,7 @@ function TopicTimer(props: {
   const formattedTime = formatTimerSeconds(Math.abs(props.remainingSeconds));
 
   return (
-    <div className="aspect-square h-28 w-28 shrink-0 self-center rounded-lg border border-stone-200 bg-white p-2 shadow-sm sm:h-auto sm:w-auto sm:min-h-[132px] sm:self-stretch sm:translate-x-6">
+    <div className="aspect-square h-28 w-28 shrink-0 self-center rounded-lg border border-stone-200 bg-white p-2 shadow-sm sm:h-auto sm:w-auto sm:min-h-[132px] sm:self-stretch sm:ml-4">
       <div
         className="grid h-full w-full place-items-center rounded-full"
         style={{
