@@ -33,6 +33,7 @@ type ConversationContext = {
 type ExplicitNoneResponse = {
   slotName: AcpSlotName;
   utterance: ConversationUtterance;
+  index: number;
 };
 
 const SYSTEM_NEXT_QUESTION = [
@@ -56,9 +57,11 @@ const SYSTEM_UPDATE_SLOTS = [
   "会話ログを読み、指定されたACPスロットごとに状態を更新してください。",
   "statusは empty / partial / filled のいずれかです。",
   "emptyは情報なし、partialは話題は出たが具体性が足りない、filledは本人の希望・理由・文脈がある程度記録されている状態です。",
-  "本人が質問に対して「特にない」「今はない」「思いつかない」などと明示した場合、それは無回答ではなく有効回答です。該当スロットは filled とし、summaryには今は特に思い当たることがない旨を記録してください。",
+  "本人が質問に対して「特にない」「今はない」「わからない」「言えない」「思いつかない」などと明示した場合、それは無回答ではなく有効回答です。summaryには「明示回答: ...」として、今は言語化しにくい／思い当たらない旨を記録してください。",
+  "ただし、その後の別話題で同じスロットに関係する本人発話が出た場合は、明示回答だけで固定せず、後から出た根拠発話でsummaryを更新してください。",
+  "他の話題の発言からスロットを補う場合は、本人発話を根拠にし、summaryまたはevidence_utteranceの先頭に「(AI推測)」を付けてください。",
   "明示的な「ない」を、AIの推測で別の希望や価値観に置き換えないでください。",
-  "本人の発話を根拠として優先し、推測で埋めないでください。",
+  "本人の発話を根拠として優先し、根拠のない想像では埋めないでください。",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
@@ -69,7 +72,9 @@ const SYSTEM_TOPIC_SWITCH = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、今の話題を終えて次へ進んでよいかを判定し、介護者が自然に話題を運べる一文を1つだけ生成することです。",
   "まず current_topic が十分に話されたかを、current_topic に関係する発話とスロット状態から判断してください。",
-  "本人が current_topic について「特にない」「今はない」「思いつかない」などと答えている場合、それを有効な回答として扱い、同じ直接質問を繰り返さないでください。",
+  "本人が current_topic について「特にない」「今はない」「わからない」「言えない」「思いつかない」などと答えている場合、それを有効な回答として扱い、同じ直接質問を繰り返さないでください。",
+  "明示的に言語化できない回答が出ており、まだ一度も別角度で確認していない場合だけ、should_switch=false として、具体的経験・嫌だったこと・避けたいこと・最近の過ごし方などから1つだけ別角度で確認してください。",
+  "すでに別角度でも確認した、または本人がこれ以上話しにくそうな場合は、その明示回答を尊重して should_switch=true とし、次の話題へ進んでください。",
   "current_topic がまだ empty または partial なら、should_switch=false とし、同じ話題をもう少し深める自然な追加質問を返してください。",
   "should_switch=false の場合でも、直前に明示的な「ない」があるなら、同じ「ありますか」形式ではなく、具体的経験・嫌だったこと・避けたいことなど別角度の確認にしてください。",
   "current_topic が filled に近い場合だけ、should_switch=true とし、next_topic へ移る短い前置きと最初の質問を返してください。",
@@ -97,6 +102,8 @@ const SYSTEM_FINAL_MINUTES = [
   "固定のお題は必ず議事録に含めてください。",
   "AIが表示した質問や話題転換文は介入ログであり、会話ログや本人の根拠発話として扱わないでください。",
   "本人の希望と根拠発話を区別し、推測で断定しないでください。",
+  "本人が「ない」「わからない」「言えない」と答えた項目は、欠落ではなく明示回答として記録してください。",
+  "他の話題の発言から補った内容は「(AI推測)」を付け、根拠発話を併記してください。",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
@@ -394,19 +401,24 @@ function fallbackUpdateSlots(
   const currentByName = new Map(currentSlots.map((slot) => [slot.slot_name, slot]));
 
   return ACP_SLOT_NAMES.map((slotName) => {
-    const explicitNone = findExplicitNoneResponseForSlot(
+    const explicitNone = findExplicitNoneResponseRecordForSlot(
       utterances,
       slotName,
       currentTopic,
     );
-    if (explicitNone) {
-      return createExplicitNoneSlotState(slotName, explicitNone);
-    }
 
-    const evidence = [...utterances]
+    const evidence = utterances
+      .map((utterance, index) => ({ utterance, index }))
       .reverse()
-      .find((utterance) => hasKeyword(utterance.text, SLOT_KEYWORDS[slotName]));
+      .find(({ utterance, index }) => {
+        if (!hasKeyword(utterance.text, SLOT_KEYWORDS[slotName])) return false;
+        return !explicitNone || index > explicitNone.index;
+      });
     const current = currentByName.get(slotName);
+
+    if (explicitNone && !evidence) {
+      return createExplicitNoneSlotState(slotName, explicitNone.utterance);
+    }
 
     if (!evidence) {
       return (
@@ -420,19 +432,22 @@ function fallbackUpdateSlots(
     }
 
     const status =
-      evidence.speaker === "elder" && evidence.text.replace(/\s/g, "").length >= 18
+      evidence.utterance.speaker === "elder" &&
+      evidence.utterance.text.replace(/\s/g, "").length >= 18
         ? "filled"
         : "partial";
-    const speaker = evidence.speaker === "elder" ? "本人" : "介護者";
+    const speaker = evidence.utterance.speaker === "elder" ? "本人" : "介護者";
+    const inferredPrefix =
+      explicitNone && evidence.index > explicitNone.index ? "(AI推測) " : "";
 
     return {
       slot_name: slotName,
       status,
       summary:
         status === "filled"
-          ? truncate(evidence.text, 120)
+          ? `${inferredPrefix}${truncate(evidence.utterance.text, 120)}`
           : "話題は出ているが、本人の希望・理由・条件の確認がまだ十分ではありません。",
-      evidence_utterance: `${speaker}: ${truncate(evidence.text, 160)}`,
+      evidence_utterance: `${inferredPrefix}${speaker}: ${truncate(evidence.utterance.text, 160)}`,
     };
   });
 }
@@ -447,6 +462,14 @@ function applyExplicitNoneResponses(
   const byName = new Map(slots.map((slot) => [slot.slot_name, slot]));
 
   responses.forEach((response) => {
+    const current = byName.get(response.slotName);
+    const hasNewerEvidence =
+      current?.evidence_utterance &&
+      !isExplicitNoneSummary(current.summary) &&
+      !isExplicitNoneSummary(current.evidence_utterance);
+
+    if (hasNewerEvidence) return;
+
     byName.set(
       response.slotName,
       createExplicitNoneSlotState(response.slotName, response.utterance),
@@ -592,13 +615,14 @@ function detectExplicitNoneResponses(
     responsesBySlot.set(promptedSlot, {
       slotName: promptedSlot,
       utterance,
+      index,
     });
   });
 
   return [...responsesBySlot.values()];
 }
 
-function findExplicitNoneResponseForSlot(
+function findExplicitNoneResponseRecordForSlot(
   utterances: ConversationUtterance[],
   slotName: AcpSlotName,
   currentTopic?: string,
@@ -607,7 +631,7 @@ function findExplicitNoneResponseForSlot(
     utterances,
     slotStates: [],
     currentTopic,
-  }).find((response) => response.slotName === slotName)?.utterance;
+  }).find((response) => response.slotName === slotName);
 }
 
 function findPromptedSlotBeforeAnswer(
@@ -648,12 +672,18 @@ function isExplicitNoneAnswer(text: string) {
   if (!normalized || normalized.length > 24) return false;
 
   return (
-    /^(?:今は|今のところ|現時点では)?(?:特に|とくに|別に|あまり)?(?:ない|ありません|ないです|なし|思いつかない|浮かばない)(?:な|かな|ですね|です|と思う)?$/.test(
+    /^(?:今は|今のところ|現時点では)?(?:特に|とくに|別に|あまり)?(?:ない|ありません|ないです|なし|思いつかない|浮かばない|わからない|分からない|言えない|いえない)(?:な|かな|ですね|です|と思う)?$/.test(
       normalized,
     ) ||
-    /^(?:今は|今のところ|現時点では)?(?:特に|とくに).*(?:ない|ありません|なし|思いつかない|浮かばない)$/.test(
+    /^(?:今は|今のところ|現時点では)?(?:特に|とくに).*(?:ない|ありません|なし|思いつかない|浮かばない|わからない|分からない|言えない|いえない)$/.test(
       normalized,
     )
+  );
+}
+
+function isExplicitNoneSummary(text: string) {
+  return /明示回答|思い当たるものはない|思い当たることはない|わからない|分からない|言えない/.test(
+    text,
   );
 }
 
@@ -672,8 +702,8 @@ function createExplicitNoneSlotState(
     status: "filled",
     summary:
       slotName === "価値観"
-        ? "本人は、今は特に大切にしていることとして思い当たるものはないと話している。"
-        : `本人は「${slotName}」について、今は特に思い当たることはないと話している。`,
+        ? "明示回答: 本人は、今は特に大切にしていることとして思い当たるものはない／言語化しにくいと話している。"
+        : `明示回答: 本人は「${slotName}」について、今は特に思い当たることはない／言語化しにくいと話している。`,
     evidence_utterance: formatSpeakerEvidence(utterance),
   };
 }

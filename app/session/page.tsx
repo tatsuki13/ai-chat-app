@@ -236,7 +236,6 @@ export default function SessionPage() {
           current_topic_title: currentTopic.title,
           next_topic: nextTopic?.slot_name,
           next_topic_title: nextTopic?.title,
-          force_switch: true,
         });
         if (data.suggestion.should_switch && nextTopic) {
           advanceTopic();
@@ -554,14 +553,14 @@ export default function SessionPage() {
 
               <div
                 ref={logScrollRef}
-                className="mt-2 h-[420px] overflow-y-auto rounded-md border border-dashed border-stone-300 bg-white px-3 py-3 lg:h-[460px]"
+                className="mt-2 h-[640px] overflow-y-auto rounded-md border border-dashed border-stone-300 bg-white px-3 py-3 lg:h-[720px]"
               >
                 {busyAction === "start" && utterances.length === 0 ? (
                   <EmptyState text="セッションを準備しています" />
                 ) : utterances.length === 0 ? (
                   <EmptyState text="発話を入力するとここに表示されます" />
                 ) : (
-                  <div className="space-y-3">
+                  <div className="space-y-2">
                     {hiddenUtteranceCount > 0 ? (
                       <div className="rounded-md border border-stone-200 bg-white px-3 py-2 text-center text-[12px] font-bold text-stone-500">
                         以前の発話 {hiddenUtteranceCount} 件
@@ -661,9 +660,9 @@ function PromptPanel(props: {
 }) {
   if (!props.prompt) {
     return (
-      <div className="flex min-h-[220px] flex-col rounded-md border border-dashed border-stone-300 bg-white px-4 py-5 lg:h-[240px]">
+      <div className="flex min-h-[180px] flex-col rounded-md border border-dashed border-stone-300 bg-white px-4 py-4 lg:h-[200px]">
         <div className="text-[12px] font-black text-stone-500">AIからの質問</div>
-        <p className="mt-2 text-[18px] font-black leading-relaxed text-stone-500">
+        <p className="mt-2 text-[17px] font-black leading-relaxed text-stone-500">
           下の「質問する」または「次の話題へ」を押すと、ここに介護者が読み上げられる文が表示されます。
         </p>
       </div>
@@ -682,8 +681,8 @@ function PromptPanel(props: {
             : "border-emerald-600 bg-emerald-50";
 
   return (
-    <div className={`flex min-h-[220px] flex-col overflow-hidden rounded-md border px-4 py-4 lg:h-[240px] ${toneClass}`}>
-      <div className="space-y-2">
+    <div className={`flex min-h-[180px] flex-col overflow-hidden rounded-md border px-4 py-4 lg:h-[200px] ${toneClass}`}>
+      <div className="space-y-1.5">
         <div className="w-fit rounded-full border border-emerald-100 bg-emerald-100 px-3 py-1 text-[12px] font-black text-emerald-800">
           話題 {props.topicIndex}/{props.topicCount}: {props.topicTitle}
         </div>
@@ -691,7 +690,7 @@ function PromptPanel(props: {
           {props.prompt.title}
         </div>
       </div>
-      <p className="mt-4 min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap text-[24px] font-black leading-relaxed text-stone-950">
+      <p className="mt-3 min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap text-[22px] font-black leading-relaxed text-stone-950">
         {props.prompt.body}
       </p>
     </div>
@@ -710,13 +709,13 @@ function TopicTimer(props: {
   const formattedTime = formatTimerSeconds(Math.abs(props.remainingSeconds));
 
   return (
-    <div className="mx-auto flex aspect-square h-56 w-56 shrink-0 flex-col rounded-md border border-stone-200 bg-white p-4 shadow-md lg:mx-0 lg:h-[240px] lg:w-[240px]">
+    <div className="mx-auto flex aspect-square h-52 w-52 shrink-0 flex-col rounded-md border border-stone-200 bg-white p-4 shadow-md lg:mx-0 lg:h-[200px] lg:w-[200px]">
       <div className="text-center text-[14px] font-black text-emerald-700">
         残り時間
       </div>
       <div className="mt-3 flex min-h-0 flex-1 items-center justify-center">
         <div
-          className="grid aspect-square h-full max-h-[172px] place-items-center rounded-full"
+          className="grid aspect-square h-full max-h-[136px] place-items-center rounded-full"
           style={{
             background: `conic-gradient(${timerColor} ${progressDegrees}deg, #d6d3d1 0deg)`,
           }}
@@ -727,7 +726,7 @@ function TopicTimer(props: {
                 {props.topicIndex}/{props.topicCount}
               </div>
               <div
-                className={`mt-2 text-[36px] font-black leading-none ${
+                className={`mt-2 text-[32px] font-black leading-none ${
                   isOvertime ? "text-amber-700" : "text-emerald-800"
                 }`}
               >
@@ -806,24 +805,24 @@ function SpeechBubble(props: { utterance: Utterance }) {
   return (
     <div className={`flex ${isCaregiver ? "justify-end" : "justify-start"}`}>
       <article
-        className={`max-w-[88%] rounded-md border px-3 py-2 shadow-sm ${
+        className={`max-w-[88%] rounded-md border px-3 py-1.5 shadow-sm ${
           isCaregiver
             ? "border-sky-700 bg-sky-700 text-white"
             : "border-stone-200 bg-[#fffdf7] text-stone-950"
         }`}
       >
         <div
-          className={`mb-1 text-[11px] font-black ${
+          className={`mb-0.5 text-[10px] font-black ${
             isCaregiver ? "text-sky-100" : "text-emerald-700"
           }`}
         >
           {isCaregiver ? "介護者" : "本人"}
         </div>
-        <p className="whitespace-pre-wrap break-words text-[15px] leading-relaxed">
+        <p className="whitespace-pre-wrap break-words text-[14px] leading-snug">
           {props.utterance.text}
         </p>
         <time
-          className={`mt-2 block text-[10px] font-bold ${
+          className={`mt-1 block text-[10px] font-bold ${
             isCaregiver ? "text-sky-100" : "text-stone-400"
           }`}
         >
