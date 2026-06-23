@@ -8,7 +8,6 @@ export const ACP_SLOT_NAMES = [
   "代理意思決定者",
   "家族に伝えたいこと",
   "不安・心配",
-  "未解決課題",
 ] as const;
 
 export const DISCUSSION_TOPIC = {
@@ -71,12 +70,6 @@ export const DISCUSSION_TOPICS = [
     title: "最期の時期を過ごしたい場所",
     opening_prompt:
       "もし最期の時期を考えるとしたら、どこで誰と過ごせると安心だと思いますか。",
-  },
-  {
-    slot_name: "未解決課題",
-    title: "まだ決めきれないこと",
-    opening_prompt:
-      "今日話した中で、まだ決めきれないことや後で確認したいことはありますか。",
   },
 ] as const;
 
@@ -142,8 +135,15 @@ export type FinalMinutesResult = {
     discussion_topic: typeof DISCUSSION_TOPIC;
     utterances: ConversationUtterance[];
     slots: AcpSlotState[];
+    auxiliary_items?: AuxiliaryMinutesItem[];
     summary: string;
   };
+};
+
+export type AuxiliaryMinutesItem = {
+  item_name: string;
+  summary: string;
+  evidence_utterance: string;
 };
 
 export const BUTTON_LABELS: Record<ButtonType, string> = {
@@ -232,6 +232,10 @@ export function buildFallbackMinutes(
   session?: { id?: string; participant_code?: string | null },
 ): FinalMinutesResult {
   const generatedAt = new Date().toISOString();
+  const acpSlots = slots.filter((slot) =>
+    ACP_SLOT_NAMES.includes(slot.slot_name as AcpSlotName),
+  );
+  const auxiliaryItems = [buildUnresolvedAuxiliaryItem(utterances)];
   const lines = [
     "# ACP対話 議事録",
     "",
@@ -249,11 +253,20 @@ export function buildFallbackMinutes(
     "",
   ];
 
-  slots.forEach((slot) => {
+  acpSlots.forEach((slot) => {
     lines.push(`### ${slot.slot_name}`);
     lines.push(`- status: ${slot.status}`);
     lines.push(`- summary: ${slot.summary || "未確認"}`);
     lines.push(`- evidence_utterance: ${slot.evidence_utterance || "なし"}`);
+    lines.push("");
+  });
+
+  lines.push("## 補助項目");
+  lines.push("");
+  auxiliaryItems.forEach((item) => {
+    lines.push(`### ${item.item_name}`);
+    lines.push(`- summary: ${item.summary}`);
+    lines.push(`- evidence_utterance: ${item.evidence_utterance || "なし"}`);
     lines.push("");
   });
 
@@ -271,10 +284,46 @@ export function buildFallbackMinutes(
       session,
       discussion_topic: DISCUSSION_TOPIC,
       utterances,
-      slots,
+      slots: acpSlots,
+      auxiliary_items: auxiliaryItems,
       summary: "会話ログとACPスロット状態から生成した議事録です。",
     },
   };
+}
+
+function buildUnresolvedAuxiliaryItem(
+  utterances: ConversationUtterance[],
+): AuxiliaryMinutesItem {
+  const evidence = [...utterances]
+    .reverse()
+    .find((utterance) =>
+      /未解決|決めきれない|決まっていない|まだ|後で|あとで|確認|相談|迷って|迷う|わからない|分からない/.test(
+        utterance.text,
+      ),
+    );
+
+  if (!evidence) {
+    return {
+      item_name: "未解決課題・次回確認事項",
+      summary: "会話ログ上、明確な未解決課題や次回確認事項は確認されていません。",
+      evidence_utterance: "",
+    };
+  }
+
+  const speaker = SPEAKER_LABELS[evidence.speaker] ?? evidence.speaker;
+
+  return {
+    item_name: "未解決課題・次回確認事項",
+    summary: `補助項目として記録: ${truncate(evidence.text, 120)}`,
+    evidence_utterance: `${speaker}: ${truncate(evidence.text, 160)}`,
+  };
+}
+
+function truncate(text: string, maxLength: number) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1)}…`;
 }
 
 export function toJsonValue<T>(value: T): T {

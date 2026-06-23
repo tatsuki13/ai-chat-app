@@ -10,6 +10,7 @@ import {
   recentUtterances,
   renderTranscript,
   type AcpSlotName,
+  type AuxiliaryMinutesItem,
   type AcpSlotState,
   type ConversationUtterance,
   type EndCheckResult,
@@ -40,6 +41,7 @@ const SYSTEM_NEXT_QUESTION = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
   "質問選択の主軸は current_topic です。ACP全体の未充足スロットは補助情報として扱ってください。",
+  "target_slot には acp_slots に含まれるACPスロットだけを指定してください。「未解決課題」は指定してはいけません。",
   "current_topic と無関係な未充足スロットへ急に移らないでください。",
   "未充足スロットを機械的に埋めるのではなく、直前の会話から自然につながる質問を選んでください。",
   "本人が「特にない」「今はない」「思いつかない」などと答えた場合、それを有効な回答として受け止め、同じ直接質問を繰り返さないでください。",
@@ -60,6 +62,7 @@ const SYSTEM_UPDATE_SLOTS = [
   "本人が質問に対して「特にない」「今はない」「わからない」「言えない」「思いつかない」などと明示した場合、それは無回答ではなく有効回答です。summaryには「明示回答: ...」として、今は言語化しにくい／思い当たらない旨を記録してください。",
   "ただし、その後の別話題で同じスロットに関係する本人発話が出た場合は、明示回答だけで固定せず、後から出た根拠発話でsummaryを更新してください。",
   "他の話題の発言からスロットを補う場合は、本人発話を根拠にし、summaryまたはevidence_utteranceの先頭に「(AI推測)」を付けてください。",
+  "未解決課題・次回確認事項はACPスロットではありません。slotsには絶対に「未解決課題」を出力しないでください。",
   "明示的な「ない」を、AIの推測で別の希望や価値観に置き換えないでください。",
   "本人の発話を根拠として優先し、根拠のない想像では埋めないでください。",
   "出力はJSONのみとしてください。",
@@ -71,6 +74,7 @@ const SYSTEM_UPDATE_SLOTS = [
 const SYSTEM_TOPIC_SWITCH = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、今の話題を終えて次へ進んでよいかを判定し、介護者が自然に話題を運べる一文を1つだけ生成することです。",
+  "target_slot と next_topic には、acp_slots に含まれるACPスロットだけを指定してください。「未解決課題」は指定してはいけません。",
   "まず current_topic が十分に話されたかを、current_topic に関係する発話とスロット状態から判断してください。",
   "本人が current_topic について「特にない」「今はない」「わからない」「言えない」「思いつかない」などと答えている場合、それを有効な回答として扱い、同じ直接質問を繰り返さないでください。",
   "明示的に言語化できない回答が出ており、まだ一度も別角度で確認していない場合だけ、should_switch=false として、具体的経験・嫌だったこと・避けたいこと・最近の過ごし方などから1つだけ別角度で確認してください。",
@@ -104,10 +108,11 @@ const SYSTEM_FINAL_MINUTES = [
   "本人の希望と根拠発話を区別し、推測で断定しないでください。",
   "本人が「ない」「わからない」「言えない」と答えた項目は、欠落ではなく明示回答として記録してください。",
   "他の話題の発言から補った内容は「(AI推測)」を付け、根拠発話を併記してください。",
+  "未解決課題・次回確認事項はACPスロットに含めず、json.auxiliary_items とMarkdownの補助項目に分けて記録してください。",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
-  '{"markdown":"# ACP対話 議事録\\n...","json":{"generated_at":"...","session":{"id":"...","participant_code":"..."},"summary":"...","slots":[...],"utterances":[...]}}',
+  '{"markdown":"# ACP対話 議事録\\n...","json":{"generated_at":"...","session":{"id":"...","participant_code":"..."},"summary":"...","slots":[...],"auxiliary_items":[{"item_name":"未解決課題・次回確認事項","summary":"...","evidence_utterance":"..."}],"utterances":[...]}}',
 ].join("\n");
 
 const SLOT_KEYWORDS: Record<AcpSlotName, string[]> = {
@@ -120,7 +125,6 @@ const SLOT_KEYWORDS: Record<AcpSlotName, string[]> = {
   代理意思決定者: ["決めて", "判断", "相談", "任せ", "代理", "娘", "息子", "配偶者", "妻", "夫"],
   家族に伝えたいこと: ["伝えたい", "言っておきたい", "ありがとう", "お願い", "家族", "迷惑"],
   "不安・心配": ["不安", "心配", "怖い", "困る", "迷う", "負担", "一人", "孤独"],
-  未解決課題: ["決まっていない", "まだ", "わからない", "確認", "課題", "問題", "迷って"],
 };
 
 const FALLBACK_QUESTIONS: Record<AcpSlotName, string> = {
@@ -133,7 +137,6 @@ const FALLBACK_QUESTIONS: Record<AcpSlotName, string> = {
   代理意思決定者: "ご自身で判断しにくい時、医療や介護のことを誰に相談して決めてほしいですか？",
   家族に伝えたいこと: "ご家族に、今のうちに伝えておきたいことやお願いしておきたいことはありますか？",
   "不安・心配": "これからのことで、不安に感じていることや心配なことはありますか？",
-  未解決課題: "今日話した中で、まだ決めきれないことや後で確認したいことはありますか？",
 };
 
 let client: OpenAI | null = null;
@@ -178,7 +181,7 @@ export async function generateNextQuestion(
   return {
     question: nonEmpty(result.question, fallback.question),
     transition_phrase: nonEmpty(result.transition_phrase, fallback.transition_phrase),
-    target_slot: nonEmpty(result.target_slot, fallback.target_slot),
+    target_slot: normalizeAcpTargetSlot(result.target_slot, fallback.target_slot),
     reason: nonEmpty(result.reason, fallback.reason),
     sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
   };
@@ -196,12 +199,12 @@ export async function generateTopicSwitch(
 
   return {
     message: nonEmpty(result.message, fallback.message),
-    target_slot: nonEmpty(result.target_slot, fallback.target_slot),
+    target_slot: normalizeAcpTargetSlot(result.target_slot, fallback.target_slot),
     should_switch:
       typeof result.should_switch === "boolean"
         ? result.should_switch
         : fallback.should_switch,
-    next_topic: nonEmpty(result.next_topic, fallback.next_topic),
+    next_topic: normalizeAcpTargetSlot(result.next_topic, fallback.next_topic),
     reason: nonEmpty(result.reason, fallback.reason),
     sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
   };
@@ -299,6 +302,7 @@ function getClient(apiKey: string) {
 function buildConversationPayload(context: ConversationContext) {
   const currentTopic = resolveTopic(context.currentTopic);
   const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
+  const acpSlotStates = filterAcpSlotStates(context.slotStates);
 
   return {
     discussion_topic: DISCUSSION_TOPIC,
@@ -306,8 +310,8 @@ function buildConversationPayload(context: ConversationContext) {
     current_topic: {
       slot_name: currentTopic.slot_name,
       title: context.currentTopicTitle || currentTopic.title,
-      status: findSlotState(context.slotStates, currentTopic.slot_name)?.status ?? "empty",
-      summary: findSlotState(context.slotStates, currentTopic.slot_name)?.summary ?? "",
+      status: findSlotState(acpSlotStates, currentTopic.slot_name)?.status ?? "empty",
+      summary: findSlotState(acpSlotStates, currentTopic.slot_name)?.summary ?? "",
     },
     next_topic: nextTopic
       ? {
@@ -318,8 +322,8 @@ function buildConversationPayload(context: ConversationContext) {
     current_topic_transcript: renderTranscript(getTopicRelatedUtterances(context)),
     all_conversation_log: renderTranscript(context.utterances),
     recent_5_turns: renderTranscript(recentUtterances(context.utterances, 5)),
-    slot_states: context.slotStates,
-    unfilled_slots: getUnfilledSlots(context.slotStates).map((slot) => ({
+    slot_states: acpSlotStates,
+    unfilled_slots: getUnfilledSlots(acpSlotStates).map((slot) => ({
       slot_name: slot.slot_name,
       status: slot.status,
       summary: slot.summary,
@@ -365,8 +369,15 @@ function ensureFinalMinutesIncludeTopic(
         ? (rawJson.utterances as ConversationUtterance[])
         : context.utterances,
       slots: Array.isArray(rawJson.slots)
-        ? (rawJson.slots as AcpSlotState[])
-        : context.slotStates,
+        ? filterAcpSlotStates(rawJson.slots as AcpSlotState[])
+        : filterAcpSlotStates(context.slotStates),
+      auxiliary_items: Array.isArray(rawJson.auxiliary_items)
+        ? (rawJson.auxiliary_items as AuxiliaryMinutesItem[])
+        : buildFallbackMinutes(
+            context.utterances,
+            context.slotStates,
+            getSessionMetadata(context),
+          ).json.auxiliary_items,
       summary:
         typeof rawJson.summary === "string"
           ? rawJson.summary
@@ -509,10 +520,10 @@ function fallbackNextQuestion(
     unfilled.find((slot) => slot.slot_name === contextualSlot)?.slot_name ??
     unfilled.find((slot) => slot.status === "partial")?.slot_name ??
     unfilled[0]?.slot_name ??
-    "未解決課題";
+    preferredSlot;
   const targetSlot = ACP_SLOT_NAMES.includes(selected as AcpSlotName)
     ? (selected as AcpSlotName)
-    : "未解決課題";
+    : preferredSlot;
 
   return {
     question: FALLBACK_QUESTIONS[targetSlot],
@@ -543,7 +554,7 @@ function fallbackTopicSwitch(context: ConversationContext): TopicSwitchResult {
     };
   }
 
-  const question = FALLBACK_QUESTIONS[currentSlot] ?? FALLBACK_QUESTIONS.未解決課題;
+  const question = FALLBACK_QUESTIONS[currentSlot] ?? FALLBACK_QUESTIONS.価値観;
 
   return {
     should_switch: false,
@@ -589,6 +600,21 @@ function resolveTopic(slotName: string | undefined) {
 
 function findSlotState(slotStates: AcpSlotState[], slotName: string) {
   return slotStates.find((slot) => slot.slot_name === slotName);
+}
+
+function filterAcpSlotStates(slots: AcpSlotState[]) {
+  return slots.filter((slot) =>
+    ACP_SLOT_NAMES.includes(slot.slot_name as AcpSlotName),
+  );
+}
+
+function normalizeAcpTargetSlot(value: unknown, fallback: string) {
+  const text = typeof value === "string" ? value.trim() : "";
+
+  if (ACP_SLOT_NAMES.includes(text as AcpSlotName)) return text;
+  if (ACP_SLOT_NAMES.includes(fallback as AcpSlotName)) return fallback;
+
+  return ACP_SLOT_NAMES[0];
 }
 
 function detectExplicitNoneResponses(

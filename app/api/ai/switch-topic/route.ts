@@ -104,15 +104,18 @@ function optionalString(value: unknown) {
 
 function createForcedTopicSwitch(nextTopic: string, nextTopicTitle?: string) {
   const topic = DISCUSSION_TOPICS.find((item) => item.slot_name === nextTopic);
-  const title = nextTopicTitle || topic?.title || nextTopic;
+  const resolvedTopic = topic ?? DISCUSSION_TOPICS[0];
+  const resolvedSlotName = resolvedTopic.slot_name;
+  const title = topic ? nextTopicTitle || topic.title : resolvedTopic.title;
   const openingPrompt =
-    topic?.opening_prompt ?? `${title}について少し伺ってもよいですか。`;
+    topic?.opening_prompt ??
+    `${resolvedTopic.title}について少し伺ってもよいですか。`;
 
   return {
     should_switch: true,
     message: `ここまでのお話を大切にしながら、次に「${title}」について少し伺ってもよいですか。\n${openingPrompt}`,
-    target_slot: nextTopic,
-    next_topic: nextTopic,
+    target_slot: resolvedSlotName,
+    next_topic: resolvedSlotName,
     reason:
       "次の話題へ進む操作が選択されたため、時間配分に合わせて話題を切り替えました。",
     sensitivity: "low" as const,
