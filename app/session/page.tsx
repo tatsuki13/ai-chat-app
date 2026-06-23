@@ -355,6 +355,7 @@ export default function SessionPage() {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: audioConstraints,
       });
+      logAudioTrackSettings(stream);
       const context = new AudioContextClass();
       const source = context.createMediaStreamSource(stream);
       const splitter = context.createChannelSplitter(2);
@@ -1598,6 +1599,23 @@ function getAudioFileExtension(mimeType: string) {
   if (mimeType.includes("mp4")) return "mp4";
   if (mimeType.includes("ogg")) return "ogg";
   return "webm";
+}
+
+function logAudioTrackSettings(stream: MediaStream) {
+  const [track] = stream.getAudioTracks();
+  if (!track) {
+    console.log("[RODE debug] no audio track");
+    return;
+  }
+
+  const settings = track.getSettings();
+
+  console.log("[RODE debug] getUserMedia audio track settings", {
+    channelCount: settings.channelCount,
+    sampleRate: settings.sampleRate,
+    deviceId: settings.deviceId,
+    label: track.label,
+  });
 }
 
 function readAudioLevel(data: Uint8Array) {
