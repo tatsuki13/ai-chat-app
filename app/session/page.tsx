@@ -247,7 +247,7 @@ export default function SessionPage() {
             : "今の話題でもう少し確認",
           body: data.suggestion.message,
           suggestionId: data.suggestion.id,
-          tone: "switch",
+          tone: data.suggestion.should_switch ? "switch" : "question",
         });
       }
 
