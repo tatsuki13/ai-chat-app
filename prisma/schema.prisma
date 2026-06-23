@@ -106,7 +106,7 @@ model Intervention {
 
 model Session {
   id              String             @id @default(cuid())
-  participantCode String?            @map("participant_code")
+  participantCode String?            @unique @map("participant_code")
   condition       String?
   startedAt       DateTime           @default(now()) @map("started_at")
   endedAt         DateTime?          @map("ended_at")
@@ -116,7 +116,6 @@ model Session {
   slotStates      SlotState[]
   utterances      SessionUtterance[]
 
-  @@index([participantCode])
   @@index([startedAt])
   @@map("sessions")
 }

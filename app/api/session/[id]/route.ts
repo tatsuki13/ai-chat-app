@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../../../lib/prisma";
 
 export const runtime = "nodejs";
@@ -84,6 +85,29 @@ export async function PATCH(request: Request, context: RouteContext) {
     const participantCode = normalizeParticipantCode(
       body.participant_code ?? body.participantCode,
     );
+
+    if (!participantCode) {
+      return NextResponse.json(
+        { error: "participant_code cannot be empty" },
+        { status: 400 },
+      );
+    }
+
+    const existing = await prisma.session.findFirst({
+      where: {
+        participantCode,
+        NOT: { id },
+      },
+      select: { id: true },
+    });
+
+    if (existing) {
+      return NextResponse.json(
+        { error: "participant_code already exists" },
+        { status: 409 },
+      );
+    }
+
     const session = await prisma.session.update({
       where: { id },
       data: {
@@ -103,6 +127,13 @@ export async function PATCH(request: Request, context: RouteContext) {
   } catch (error) {
     console.error(error);
 
+    if (isUniqueConstraintError(error)) {
+      return NextResponse.json(
+        { error: "participant_code already exists" },
+        { status: 409 },
+      );
+    }
+
     return NextResponse.json(
       { error: "Failed to update session" },
       { status: 500 },
@@ -116,4 +147,8 @@ function normalizeParticipantCode(value: unknown) {
   const trimmed = value.trim();
 
   return trimmed || null;
+}
+
+function isUniqueConstraintError(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }

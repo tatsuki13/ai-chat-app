@@ -41,6 +41,8 @@ export async function POST(request: Request) {
     const minutes = await generateFinalMinutes({
       utterances: context.utterances,
       slotStates,
+      sessionId: context.session.id,
+      participantCode: context.session.participantCode,
       currentTopic,
       currentTopicTitle,
     });

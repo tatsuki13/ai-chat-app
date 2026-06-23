@@ -135,6 +135,10 @@ export type FinalMinutesResult = {
   markdown: string;
   json: {
     generated_at: string;
+    session?: {
+      id?: string;
+      participant_code?: string | null;
+    };
     discussion_topic: typeof DISCUSSION_TOPIC;
     utterances: ConversationUtterance[];
     slots: AcpSlotState[];
@@ -225,12 +229,15 @@ export function renderTranscript(utterances: ConversationUtterance[]) {
 export function buildFallbackMinutes(
   utterances: ConversationUtterance[],
   slots: AcpSlotState[],
+  session?: { id?: string; participant_code?: string | null },
 ): FinalMinutesResult {
   const generatedAt = new Date().toISOString();
   const lines = [
     "# ACP対話 議事録",
     "",
     `生成日時: ${generatedAt}`,
+    `参加者ID: ${session?.participant_code || "-"}`,
+    `内部ID: ${session?.id || "-"}`,
     `発話数: ${utterances.length}`,
     "",
     "## 話し合ったお題",
@@ -261,6 +268,7 @@ export function buildFallbackMinutes(
     markdown: lines.join("\n"),
     json: {
       generated_at: generatedAt,
+      session,
       discussion_topic: DISCUSSION_TOPIC,
       utterances,
       slots,

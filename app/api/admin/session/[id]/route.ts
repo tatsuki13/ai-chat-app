@@ -59,6 +59,7 @@ export async function GET(_request: Request, context: RouteContext) {
       utterances: session.utterances.map((utterance) => ({
         id: utterance.id,
         session_id: utterance.sessionId,
+        participant_code: session.participantCode,
         speaker: utterance.speaker,
         text: utterance.text,
         created_at: utterance.createdAt.toISOString(),
@@ -66,12 +67,14 @@ export async function GET(_request: Request, context: RouteContext) {
       button_events: session.buttonEvents.map((event) => ({
         id: event.id,
         session_id: event.sessionId,
+        participant_code: session.participantCode,
         button_type: event.buttonType,
         created_at: event.createdAt.toISOString(),
       })),
       ai_suggestions: session.aiSuggestions.map((suggestion) => ({
         id: suggestion.id,
         session_id: suggestion.sessionId,
+        participant_code: session.participantCode,
         trigger_event_id: suggestion.triggerEventId,
         suggestion_type: suggestion.suggestionType,
         content: suggestion.content,
@@ -84,6 +87,7 @@ export async function GET(_request: Request, context: RouteContext) {
       final_minutes: session.finalMinutes.map((minutes) => ({
         id: minutes.id,
         session_id: minutes.sessionId,
+        participant_code: session.participantCode,
         markdown: minutes.markdown,
         json: minutes.json,
         created_at: minutes.createdAt.toISOString(),

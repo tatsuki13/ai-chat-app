@@ -22,6 +22,8 @@ import {
 type ConversationContext = {
   utterances: ConversationUtterance[];
   slotStates: AcpSlotState[];
+  sessionId?: string;
+  participantCode?: string | null;
   currentTopic?: string;
   currentTopicTitle?: string;
   nextTopic?: string;
@@ -98,7 +100,7 @@ const SYSTEM_FINAL_MINUTES = [
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
-  '{"markdown":"# ACP対話 議事録\\n...","json":{"generated_at":"...","summary":"...","slots":[...],"utterances":[...]}}',
+  '{"markdown":"# ACP対話 議事録\\n...","json":{"generated_at":"...","session":{"id":"...","participant_code":"..."},"summary":"...","slots":[...],"utterances":[...]}}',
 ].join("\n");
 
 const SLOT_KEYWORDS: Record<AcpSlotName, string[]> = {
@@ -221,7 +223,11 @@ export async function checkConversationEnd(
 export async function generateFinalMinutes(
   context: ConversationContext,
 ): Promise<FinalMinutesResult> {
-  const fallback = buildFallbackMinutes(context.utterances, context.slotStates);
+  const fallback = buildFallbackMinutes(
+    context.utterances,
+    context.slotStates,
+    getSessionMetadata(context),
+  );
   const result = await requestJson<Partial<FinalMinutesResult>>(
     SYSTEM_FINAL_MINUTES,
     buildConversationPayload(context),
@@ -289,6 +295,7 @@ function buildConversationPayload(context: ConversationContext) {
 
   return {
     discussion_topic: DISCUSSION_TOPIC,
+    session: getSessionMetadata(context),
     current_topic: {
       slot_name: currentTopic.slot_name,
       title: context.currentTopicTitle || currentTopic.title,
@@ -345,6 +352,7 @@ function ensureFinalMinutesIncludeTopic(
         typeof rawJson.generated_at === "string"
           ? rawJson.generated_at
           : new Date().toISOString(),
+      session: getSessionMetadata(context),
       discussion_topic: DISCUSSION_TOPIC,
       utterances: Array.isArray(rawJson.utterances)
         ? (rawJson.utterances as ConversationUtterance[])
@@ -357,6 +365,13 @@ function ensureFinalMinutesIncludeTopic(
           ? rawJson.summary
           : "会話ログとACPスロット状態から生成した議事録です。",
     },
+  };
+}
+
+function getSessionMetadata(context: ConversationContext) {
+  return {
+    id: context.sessionId,
+    participant_code: context.participantCode ?? null,
   };
 }
 

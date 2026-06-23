@@ -160,7 +160,12 @@ export default function AdminPage() {
                       : "border-stone-200 bg-white hover:bg-stone-50"
                   }`}
                 >
-                  <div className="truncate text-[15px] font-black">{session.id}</div>
+                  <div className="truncate text-[17px] font-black">
+                    {session.participant_code ?? "参加者ID未設定"}
+                  </div>
+                  <div className="mt-1 truncate font-mono text-[11px] font-bold text-stone-400">
+                    {session.id}
+                  </div>
                   <div className="mt-1 text-[13px] font-bold text-stone-500">
                     {formatDateTime(session.started_at)}
                   </div>
@@ -190,8 +195,8 @@ export default function AdminPage() {
             <>
               <Panel title="セッション">
                 <div className="grid gap-3 text-[14px] font-bold text-stone-700 md:grid-cols-4">
-                  <Info label="ID" value={detail.session.id} />
-                  <Info label="participant_code" value={detail.session.participant_code ?? "-"} />
+                  <Info label="参加者ID" value={detail.session.participant_code ?? "-"} />
+                  <Info label="内部ID" value={detail.session.id} />
                   <Info label="condition" value={detail.session.condition ?? "-"} />
                   <Info label="started_at" value={formatDateTime(detail.session.started_at)} />
                 </div>

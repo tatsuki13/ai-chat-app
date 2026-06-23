@@ -53,10 +53,11 @@ export default function SessionPage() {
   const [statusText, setStatusText] = useState("準備中");
   const [isEditingId, setIsEditingId] = useState(false);
   const [idDraft, setIdDraft] = useState("");
+  const [idError, setIdError] = useState("");
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
 
-  const displayId = session?.participant_code || session?.id || "準備中";
+  const participantCode = session?.participant_code || "未設定";
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
   const nextTopic = DISCUSSION_TOPICS[currentTopicIndex + 1] ?? null;
   const visibleUtterances = utterances.slice(-MAX_RENDERED_UTTERANCES);
@@ -92,7 +93,7 @@ export default function SessionPage() {
           window.localStorage.setItem(STORAGE_KEY, created.id);
           setSession(created);
           setUtteranceTotal(0);
-          setStatusText("保存中");
+          setStatusText("保存済み");
           setBusyAction(null);
         }
       } catch {
@@ -264,6 +265,7 @@ export default function SessionPage() {
     setCurrentTopicIndex(0);
     setPromptPanel(createOpeningPrompt());
     setIsEditingId(false);
+    setIdError("");
 
     try {
       const created = await startSession();
@@ -272,7 +274,7 @@ export default function SessionPage() {
       setUtterances([]);
       setUtteranceTotal(0);
       setDraft("");
-      setStatusText("保存中");
+      setStatusText("保存済み");
     } catch {
       setStatusText("接続エラー");
       setPromptPanel({
@@ -288,7 +290,8 @@ export default function SessionPage() {
   function startEditingId() {
     if (!session || busyAction) return;
 
-    setIdDraft(session.participant_code || session.id);
+    setIdDraft(session.participant_code || "");
+    setIdError("");
     setIsEditingId(true);
   }
 
@@ -297,29 +300,46 @@ export default function SessionPage() {
 
     const nextId = idDraft.trim();
 
-    if (nextId === (session.participant_code || session.id)) {
+    if (!nextId) {
+      setIdError("参加者IDを入力してください");
+      return;
+    }
+
+    if (nextId === session.participant_code) {
       setIsEditingId(false);
       return;
     }
 
     setBusyAction("id");
     setStatusText("保存中");
+    setIdError("");
 
     try {
       const updated = await updateSessionDisplayId(session.id, nextId);
       setSession(updated);
       setIsEditingId(false);
       setStatusText("保存済み");
-    } catch {
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "通信状態またはデータベース接続を確認してください。";
+      setIdError(message);
       setStatusText("保存エラー");
       setPromptPanel({
-        title: "IDを保存できません",
-        body: "通信状態またはデータベース接続を確認してください。",
+        title: "参加者IDを保存できません",
+        body: message,
         tone: "error",
       });
     } finally {
       setBusyAction(null);
     }
+  }
+
+  function cancelEditingId() {
+    setIsEditingId(false);
+    setIdDraft("");
+    setIdError("");
   }
 
   function handleIdKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -329,7 +349,7 @@ export default function SessionPage() {
     }
 
     if (event.key === "Escape") {
-      setIsEditingId(false);
+      cancelEditingId();
     }
   }
 
@@ -359,30 +379,57 @@ export default function SessionPage() {
       </header>
 
       <section className="mx-auto flex min-h-[calc(100dvh-210px)] max-w-[860px] flex-col gap-3 px-4 py-4">
-        <div className="flex items-center justify-between gap-3 text-[13px] font-bold text-stone-500">
-          <span>セッション</span>
-          <div className="min-w-0 text-right">
+        <div className="rounded-lg border border-stone-200 bg-white px-4 py-3 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-[13px] font-black text-stone-500">
+              参加者ID
+            </span>
             {isEditingId ? (
-              <input
-                ref={idInputRef}
-                value={idDraft}
-                onBlur={() => void saveDisplayId()}
-                onChange={(event) => setIdDraft(event.target.value)}
-                onKeyDown={handleIdKeyDown}
-                className="h-9 max-w-[260px] rounded-lg border border-emerald-400 bg-white px-2 text-right text-[14px] font-black text-stone-950 outline-none ring-2 ring-emerald-100"
-                disabled={busyAction === "id"}
-              />
+              <div className="flex min-w-0 flex-1 flex-wrap justify-end gap-2">
+                <input
+                  ref={idInputRef}
+                  value={idDraft}
+                  onChange={(event) => setIdDraft(event.target.value)}
+                  onKeyDown={handleIdKeyDown}
+                  className="h-10 min-w-0 flex-1 rounded-lg border border-emerald-400 bg-white px-3 text-[16px] font-black text-stone-950 outline-none ring-2 ring-emerald-100 sm:max-w-[320px]"
+                  disabled={busyAction === "id"}
+                />
+                <button
+                  type="button"
+                  onClick={() => void saveDisplayId()}
+                  disabled={busyAction === "id"}
+                  className="h-10 rounded-lg bg-emerald-700 px-4 text-[14px] font-black text-white disabled:bg-stone-300"
+                >
+                  保存
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelEditingId}
+                  disabled={busyAction === "id"}
+                  className="h-10 rounded-lg border border-stone-300 bg-white px-4 text-[14px] font-black text-stone-700 disabled:text-stone-400"
+                >
+                  取消
+                </button>
+              </div>
             ) : (
-              <button
-                type="button"
-                onDoubleClick={startEditingId}
-                className="max-w-[320px] truncate rounded-md px-2 py-1 text-right font-black text-stone-600 hover:bg-stone-100"
-                title="ダブルクリックでIDを編集"
-              >
-                ID: {displayId}
-              </button>
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="truncate text-[18px] font-black text-stone-950">
+                  {participantCode}
+                </span>
+                <button
+                  type="button"
+                  onClick={startEditingId}
+                  disabled={!session || Boolean(busyAction)}
+                  className="h-10 rounded-lg border border-stone-300 bg-white px-4 text-[14px] font-black text-stone-700 disabled:text-stone-400"
+                >
+                  編集
+                </button>
+              </div>
             )}
           </div>
+          {idError ? (
+            <p className="mt-2 text-[13px] font-bold text-red-700">{idError}</p>
+          ) : null}
         </div>
 
         <section className="rounded-lg border border-stone-200 bg-white shadow-sm">
@@ -680,7 +727,6 @@ function ActionButton(props: {
 
 async function startSession(): Promise<SessionInfo> {
   const data = await postJson<{ session: SessionInfo }>("/api/session/start", {
-    participant_code: `P-${new Date().toISOString().slice(0, 10)}`,
     condition: "mvp",
   });
 
@@ -766,10 +812,28 @@ async function requestJson<T = unknown>(
   });
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${url}`);
+    const errorBody = await response.json().catch(() => null);
+    const errorText =
+      errorBody && typeof errorBody.error === "string"
+        ? errorBody.error
+        : `Request failed: ${url}`;
+
+    throw new Error(toUserFacingError(errorText));
   }
 
   return response.json() as Promise<T>;
+}
+
+function toUserFacingError(error: string) {
+  if (error === "participant_code already exists") {
+    return "この参加者IDはすでに使われています。";
+  }
+
+  if (error === "participant_code cannot be empty") {
+    return "参加者IDを入力してください。";
+  }
+
+  return error;
 }
 
 function joinPrompt(transition: string, question: string) {
