@@ -9,6 +9,14 @@ type PromptTone = "question" | "switch" | "end" | "status" | "error";
 type AudioCaptureState = "idle" | "starting" | "recording" | "error";
 type AudioLevelMap = Record<Speaker, number>;
 
+type AudioTrackDebugSettings = {
+  label: string;
+  deviceId: string;
+  groupId: string;
+  channelCount: number | null;
+  sampleRate: number | null;
+};
+
 type SessionInfo = {
   id: string;
   participant_code: string | null;
@@ -55,6 +63,7 @@ const STORAGE_KEY = "acp-hitl-current-session-id";
 const MAX_RENDERED_UTTERANCES = 30;
 const TOPIC_BASE_SECONDS = 5 * 60;
 const TIMER_TICK_MS = 1000;
+const SHOW_AUDIO_DEBUG_PANEL = process.env.NEXT_PUBLIC_AUDIO_DEBUG === "true";
 
 function createOpeningPrompt(topic = DISCUSSION_TOPICS[0]): PromptPanelState {
   return {
@@ -93,14 +102,17 @@ export default function SessionPage() {
     elder: 0,
     caregiver: 0,
   });
-  const [sttEnabled, setSttEnabled] = useState(false);
+  const [audioTrackSettings, setAudioTrackSettings] =
+    useState<AudioTrackDebugSettings | null>(null);
+  const [sttEnabled] = useState(true);
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
   const topicStartedAtRef = useRef<number | null>(null);
-  const sttEnabledRef = useRef(false);
+  const sttEnabledRef = useRef(true);
   const audioCaptureRef = useRef<AudioCaptureHandle | null>(null);
+  const audioAutoStartSessionRef = useRef<string | null>(null);
   const audioChunkCounterRef = useRef(0);
 
   const participantCode = session?.participant_code || "未設定";
@@ -188,11 +200,16 @@ export default function SessionPage() {
 
   useEffect(() => {
     sttEnabledRef.current = sttEnabled;
-
-    if (audioCaptureRef.current) {
-      setStatusText(sttEnabled ? "音声入力中" : "L/R確認中");
-    }
   }, [sttEnabled]);
+
+  useEffect(() => {
+    if (!session || busyAction === "start") return;
+    if (audioCaptureRef.current || audioCaptureState === "starting") return;
+    if (audioAutoStartSessionRef.current === session.id) return;
+
+    audioAutoStartSessionRef.current = session.id;
+    void startStereoCapture();
+  }, [session?.id, busyAction, audioCaptureState]);
 
   useEffect(() => {
     void refreshAudioInputDevices();
@@ -317,8 +334,7 @@ export default function SessionPage() {
 
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setAudioCaptureState("error");
-      setAudioCaptureError("このブラウザはステレオ音声入力に対応していません。");
-      setStatusText("音声入力エラー");
+      setAudioCaptureError("音声入力を確認してください。");
       return;
     }
 
@@ -329,14 +345,12 @@ export default function SessionPage() {
 
     if (!AudioContextClass) {
       setAudioCaptureState("error");
-      setAudioCaptureError("このブラウザはWeb Audio APIに対応していません。");
-      setStatusText("音声入力エラー");
+      setAudioCaptureError("音声入力を確認してください。");
       return;
     }
 
     setAudioCaptureState("starting");
     setAudioCaptureError("");
-    setStatusText("音声入力準備中");
 
     let captureHandle: AudioCaptureHandle | null = null;
 
@@ -355,7 +369,9 @@ export default function SessionPage() {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: audioConstraints,
       });
-      logAudioTrackSettings(stream);
+      const nextTrackSettings = getAudioTrackDebugSettings(stream);
+      setAudioTrackSettings(nextTrackSettings);
+      logAudioTrackSettings(nextTrackSettings);
       const context = new AudioContextClass();
       const source = context.createMediaStreamSource(stream);
       const splitter = context.createChannelSplitter(2);
@@ -400,13 +416,12 @@ export default function SessionPage() {
       startAudioLevelMeters(captureHandle);
       void refreshAudioInputDevices();
       setAudioCaptureState("recording");
-      setStatusText(sttEnabledRef.current ? "音声入力中" : "L/R確認中");
     } catch (error) {
       stopAudioCapture(captureHandle ?? audioCaptureRef.current);
       audioCaptureRef.current = null;
       setAudioCaptureState("error");
-      setAudioCaptureError(getAudioCaptureError(error));
-      setStatusText("音声入力エラー");
+      console.warn("Audio input failed", getAudioCaptureError(error));
+      setAudioCaptureError("音声入力を確認してください。");
     }
   }
 
@@ -420,8 +435,7 @@ export default function SessionPage() {
   }
 
   function getAudioAwareSavedStatus() {
-    if (!audioCaptureRef.current) return "保存済み";
-    return sttEnabledRef.current ? "音声入力中" : "L/R確認中";
+    return "保存済み";
   }
 
   function createChannelRecorder(
@@ -441,8 +455,7 @@ export default function SessionPage() {
     };
     recorder.onerror = () => {
       setAudioCaptureState("error");
-      setAudioCaptureError("音声チャンクの生成に失敗しました。");
-      setStatusText("音声入力エラー");
+      setAudioCaptureError("音声入力を確認してください。");
     };
 
     return recorder;
@@ -494,17 +507,11 @@ export default function SessionPage() {
         ),
       );
       setUtteranceTotal((current) => current + 1);
-      setStatusText(
-        audioCaptureRef.current
-          ? sttEnabledRef.current
-            ? "音声入力中"
-            : "L/R確認中"
-          : "保存済み",
-      );
+      setStatusText("保存済み");
     } catch (error) {
       setAudioCaptureState("error");
-      setAudioCaptureError(getAudioCaptureError(error));
-      setStatusText("音声入力エラー");
+      console.warn("Audio transcription failed", getAudioCaptureError(error));
+      setAudioCaptureError("音声入力を確認してください。");
     }
   }
 
@@ -938,96 +945,37 @@ export default function SessionPage() {
             </section>
 
             <form onSubmit={handleSubmit}>
-              <div className="mb-2 rounded-md border border-stone-200 bg-white px-3 py-2 shadow-sm">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="text-[12px] font-black text-stone-700">
-                      RODE Split入力
-                    </div>
-                    <div className="mt-0.5 text-[11px] font-bold text-stone-500">
-                      TX1=L elder / TX2=R caregiver
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void handleToggleStereoCapture()}
-                    disabled={
-                      !session ||
-                      busyAction === "start" ||
-                      audioCaptureState === "starting"
-                    }
-                    className={`min-h-9 rounded-md px-3 text-[12px] font-black text-white shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400 ${
-                      audioCaptureActive ? "bg-red-700" : "bg-stone-950"
-                    }`}
-                  >
-                    {audioCaptureActive
-                      ? "停止"
-                      : audioCaptureState === "starting"
-                        ? "開始中"
-                        : "音声入力開始"}
-                  </button>
-                </div>
-                {audioCaptureError ? (
-                  <p className="mt-2 text-[12px] font-bold text-red-700">
-                    {audioCaptureError}
-                  </p>
-                ) : null}
-                <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                  <select
-                    value={selectedAudioDeviceId}
-                    onChange={(event) =>
-                      setSelectedAudioDeviceId(event.target.value)
-                    }
-                    disabled={audioCaptureActive}
-                    className="min-h-9 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-bold text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100 disabled:text-stone-400"
-                  >
-                    <option value="">既定のマイク</option>
-                    {audioInputDevices.map((device, index) => (
-                      <option key={device.deviceId} value={device.deviceId}>
-                        {device.label || `音声入力 ${index + 1}`}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => void refreshAudioInputDevices()}
-                    disabled={audioCaptureActive}
-                    className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 shadow-sm active:scale-[0.99] disabled:bg-stone-100 disabled:text-stone-400"
-                  >
-                    更新
-                  </button>
-                </div>
-                <div className="mt-2 grid grid-cols-2 gap-2">
-                  <AudioLevelMeter
-                    label="elder / L"
-                    level={audioLevels.elder}
-                    tone="elder"
-                  />
-                  <AudioLevelMeter
-                    label="caregiver / R"
-                    level={audioLevels.caregiver}
-                    tone="caregiver"
-                  />
-                </div>
-                <label className="mt-2 flex min-h-9 items-center gap-2 rounded-md border border-stone-200 bg-stone-50 px-3 text-[12px] font-black text-stone-700">
-                  <input
-                    type="checkbox"
-                    checked={sttEnabled}
-                    onChange={(event) => setSttEnabled(event.target.checked)}
-                    className="h-4 w-4 accent-emerald-700"
-                  />
-                  文字起こしして保存
-                </label>
-              </div>
+              {audioCaptureError ? (
+                <p className="mb-2 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[12px] font-bold text-red-700">
+                  音声入力を確認してください
+                </p>
+              ) : null}
+              {SHOW_AUDIO_DEBUG_PANEL ? (
+                <AudioDebugPanel
+                  audioCaptureActive={audioCaptureActive}
+                  audioCaptureState={audioCaptureState}
+                  audioInputDevices={audioInputDevices}
+                  audioTrackSettings={audioTrackSettings}
+                  busyAction={busyAction}
+                  selectedAudioDeviceId={selectedAudioDeviceId}
+                  onDeviceChange={setSelectedAudioDeviceId}
+                  onRefreshDevices={refreshAudioInputDevices}
+                  onToggleCapture={handleToggleStereoCapture}
+                />
+              ) : null}
               <div className="grid grid-cols-2 gap-2">
                 <SpeakerButton
                   active={speaker === "elder"}
                   label="本人"
+                  level={audioLevels.elder}
+                  tone="elder"
                   onClick={() => setSpeaker("elder")}
                 />
                 <SpeakerButton
                   active={speaker === "caregiver"}
                   label="介護者"
+                  level={audioLevels.caregiver}
+                  tone="caregiver"
                   onClick={() => setSpeaker("caregiver")}
                 />
               </div>
@@ -1226,19 +1174,116 @@ function EmptyState(props: { text: string }) {
   );
 }
 
-function SpeakerButton(props: { active: boolean; label: string; onClick: () => void }) {
+function SpeakerButton(props: {
+  active: boolean;
+  label: string;
+  level: number;
+  tone: Speaker;
+  onClick: () => void;
+}) {
+  const percentage = Math.round(Math.min(1, Math.max(0, props.level)) * 100);
+  const barClass =
+    props.tone === "caregiver" ? "bg-sky-500" : "bg-emerald-500";
+
   return (
     <button
       type="button"
       onClick={props.onClick}
-      className={`min-h-10 rounded-md border px-3 text-[13px] font-black active:scale-[0.99] ${
+      className={`min-h-14 rounded-md border px-3 py-2 text-[13px] font-black active:scale-[0.99] ${
         props.active
           ? "border-emerald-700 bg-emerald-700 text-white"
           : "border-stone-300 bg-white text-stone-700"
       }`}
     >
-      {props.label}
+      <span className="block">{props.label}</span>
+      <span className="mt-1 flex items-center gap-2">
+        <span
+          className={`text-[10px] font-black ${
+            props.active ? "text-white/80" : "text-stone-400"
+          }`}
+        >
+          音声
+        </span>
+        <span
+          className={`block h-1.5 flex-1 overflow-hidden rounded-full ${
+            props.active ? "bg-white/35" : "bg-stone-200"
+          }`}
+        >
+          <span
+            className={`block h-full rounded-full transition-[width] duration-75 ${barClass}`}
+            style={{ width: `${percentage}%` }}
+          />
+        </span>
+      </span>
     </button>
+  );
+}
+
+function AudioDebugPanel(props: {
+  audioCaptureActive: boolean;
+  audioCaptureState: AudioCaptureState;
+  audioInputDevices: MediaDeviceInfo[];
+  audioTrackSettings: AudioTrackDebugSettings | null;
+  busyAction: ButtonType | "start" | "id" | null;
+  selectedAudioDeviceId: string;
+  onDeviceChange: (deviceId: string) => void;
+  onRefreshDevices: () => Promise<void>;
+  onToggleCapture: () => Promise<void>;
+}) {
+  return (
+    <div className="mb-2 rounded-md border border-stone-200 bg-white px-3 py-2 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[12px] font-black text-stone-700">
+            RODE Split入力
+          </div>
+          <div className="mt-0.5 text-[11px] font-bold text-stone-500">
+            TX1=L / TX2=R
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void props.onToggleCapture()}
+          disabled={
+            props.busyAction === "start" ||
+            props.audioCaptureState === "starting"
+          }
+          className={`min-h-9 rounded-md px-3 text-[12px] font-black text-white shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400 ${
+            props.audioCaptureActive ? "bg-red-700" : "bg-stone-950"
+          }`}
+        >
+          {props.audioCaptureActive
+            ? "停止"
+            : props.audioCaptureState === "starting"
+              ? "開始中"
+              : "開始"}
+        </button>
+      </div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+        <select
+          value={props.selectedAudioDeviceId}
+          onChange={(event) => props.onDeviceChange(event.target.value)}
+          disabled={props.audioCaptureActive}
+          className="min-h-9 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-bold text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100 disabled:text-stone-400"
+        >
+          <option value="">既定のマイク</option>
+          {props.audioInputDevices.map((device, index) => (
+            <option key={device.deviceId} value={device.deviceId}>
+              {device.label || `音声入力 ${index + 1}`}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => void props.onRefreshDevices()}
+          disabled={props.audioCaptureActive}
+          className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 shadow-sm active:scale-[0.99] disabled:bg-stone-100 disabled:text-stone-400"
+        >
+          更新
+        </button>
+      </div>
+      <AudioTrackSettingsPanel settings={props.audioTrackSettings} />
+    </div>
   );
 }
 
@@ -1267,6 +1312,70 @@ function AudioLevelMeter(props: {
           style={{ width: `${percentage}%` }}
         />
       </div>
+    </div>
+  );
+}
+
+function AudioTrackSettingsPanel(props: {
+  settings: AudioTrackDebugSettings | null;
+}) {
+  const settings = props.settings;
+
+  return (
+    <div className="mt-2 rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[12px] font-black text-stone-700">
+          getSettings()
+        </div>
+        {settings?.channelCount === 1 ? (
+          <span className="rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-[11px] font-black text-amber-800">
+            この入力はモノラルとして取得されています
+          </span>
+        ) : settings?.channelCount && settings.channelCount >= 2 ? (
+          <span className="rounded-full border border-emerald-200 bg-emerald-100 px-2 py-0.5 text-[11px] font-black text-emerald-800">
+            ステレオ取得
+          </span>
+        ) : null}
+      </div>
+      {settings ? (
+        <dl className="mt-2 grid gap-1 text-[11px] font-bold text-stone-600 sm:grid-cols-2">
+          <DebugSetting label="label" value={settings.label || "未取得"} />
+          <DebugSetting
+            label="channelCount"
+            value={formatDebugSetting(settings.channelCount)}
+          />
+          <DebugSetting
+            label="sampleRate"
+            value={formatDebugSetting(settings.sampleRate)}
+          />
+          <DebugSetting
+            label="deviceId"
+            value={settings.deviceId || "未取得"}
+          />
+          <DebugSetting
+            label="groupId"
+            value={settings.groupId || "未取得"}
+          />
+        </dl>
+      ) : (
+        <p className="mt-2 text-[11px] font-bold text-stone-500">
+          音声入力開始後に表示されます。
+        </p>
+      )}
+      <p className="mt-2 text-[11px] font-bold leading-relaxed text-stone-500">
+        TX1だけ話すとelder/L、TX2だけ話すとcaregiver/Rのメーターが動くか確認してください。
+      </p>
+    </div>
+  );
+}
+
+function DebugSetting(props: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-md bg-white px-2 py-1">
+      <dt className="text-[10px] font-black text-stone-400">{props.label}</dt>
+      <dd className="mt-0.5 break-all text-[11px] font-bold text-stone-700">
+        {props.value}
+      </dd>
     </div>
   );
 }
@@ -1344,8 +1453,8 @@ function SpeechBubble(props: {
               disabled={isSaving}
               className="min-h-9 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-black text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100"
             >
-              <option value="elder">elder / 本人</option>
-              <option value="caregiver">caregiver / 介護者</option>
+              <option value="elder">本人</option>
+              <option value="caregiver">介護者</option>
             </select>
             <textarea
               value={editText}
@@ -1410,7 +1519,7 @@ function SpeechBubble(props: {
               isCaregiver ? "text-sky-100" : "text-emerald-700"
             }`}
           >
-            {isCaregiver ? "caregiver / 介護者" : "elder / 本人"}
+            {isCaregiver ? "介護者" : "本人"}
           </div>
           <button
             type="button"
@@ -1601,21 +1710,36 @@ function getAudioFileExtension(mimeType: string) {
   return "webm";
 }
 
-function logAudioTrackSettings(stream: MediaStream) {
+function getAudioTrackDebugSettings(
+  stream: MediaStream,
+): AudioTrackDebugSettings | null {
   const [track] = stream.getAudioTracks();
   if (!track) {
-    console.log("[RODE debug] no audio track");
-    return;
+    return null;
   }
 
   const settings = track.getSettings();
 
-  console.log("[RODE debug] getUserMedia audio track settings", {
-    channelCount: settings.channelCount,
-    sampleRate: settings.sampleRate,
-    deviceId: settings.deviceId,
+  return {
     label: track.label,
-  });
+    deviceId: settings.deviceId ?? "",
+    groupId: settings.groupId ?? "",
+    channelCount: settings.channelCount ?? null,
+    sampleRate: settings.sampleRate ?? null,
+  };
+}
+
+function logAudioTrackSettings(settings: AudioTrackDebugSettings | null) {
+  if (!settings) {
+    console.log("[RODE debug] no audio track");
+    return;
+  }
+
+  console.log("[RODE debug] getUserMedia audio track settings", settings);
+}
+
+function formatDebugSetting(value: number | null) {
+  return typeof value === "number" ? String(value) : "未取得";
 }
 
 function readAudioLevel(data: Uint8Array) {
