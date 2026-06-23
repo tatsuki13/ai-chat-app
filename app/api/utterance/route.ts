@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../lib/prisma";
+import { saveStudyUtteranceForAppUtterance } from "../../../lib/research-store";
 
 export const runtime = "nodejs";
 
@@ -23,6 +24,13 @@ export async function POST(request: Request) {
         speaker,
         text,
       },
+    });
+    await saveStudyUtteranceForAppUtterance({
+      id: utterance.id,
+      sessionId: utterance.sessionId,
+      speaker: utterance.speaker,
+      text: utterance.text,
+      createdAt: utterance.createdAt,
     });
 
     return NextResponse.json({

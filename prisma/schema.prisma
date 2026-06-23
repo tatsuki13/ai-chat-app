@@ -18,6 +18,7 @@ model ExperimentSession {
   rawLog                          Json?
   createdAt                       DateTime   @default(now())
   updatedAt                       DateTime   @updatedAt
+  studySession                    StudySession?
   topicLogs                       TopicLog[]
 
   @@index([condition])
@@ -58,6 +59,7 @@ model TopicLog {
   updatedAt                 DateTime          @updatedAt
   interventions             Intervention[]
   session                   ExperimentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  studyTopicTrial           StudyTopicTrial?
   utterances                Utterance[]
 
   @@unique([sessionId, topicIndex])
@@ -76,6 +78,7 @@ model Utterance {
   charCount  Int?
   rawEntry   Json?
   createdAt  DateTime @default(now())
+  studyUtterance StudyUtterance?
   topicLog   TopicLog @relation(fields: [topicLogId], references: [id], onDelete: Cascade)
 
   @@index([topicLogId])
@@ -97,6 +100,7 @@ model Intervention {
   timestamp          DateTime
   rawEntry           Json?
   createdAt          DateTime @default(now())
+  studyIntervention  StudyIntervention?
   topicLog           TopicLog @relation(fields: [topicLogId], references: [id], onDelete: Cascade)
 
   @@index([topicLogId])
@@ -114,6 +118,7 @@ model Session {
   buttonEvents    ButtonEvent[]
   finalMinutes    FinalMinute[]
   slotStates      SlotState[]
+  studySession    StudySession?
   utterances      SessionUtterance[]
 
   @@index([startedAt])
@@ -127,6 +132,7 @@ model SessionUtterance {
   text      String
   createdAt DateTime @default(now()) @map("created_at")
   session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  studyUtterance StudyUtterance?
 
   @@index([sessionId])
   @@index([speaker])
@@ -141,6 +147,7 @@ model ButtonEvent {
   createdAt     DateTime          @default(now()) @map("created_at")
   aiSuggestions AiSuggestionLog[] @relation("TriggerButtonEvent")
   session       Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  studyInterventions StudyIntervention[]
 
   @@index([sessionId])
   @@index([buttonType])
@@ -159,6 +166,7 @@ model AiSuggestionLog {
   adopted        Boolean?
   createdAt      DateTime     @default(now()) @map("created_at")
   session        Session      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  studyIntervention StudyIntervention?
   triggerEvent   ButtonEvent? @relation("TriggerButtonEvent", fields: [triggerEventId], references: [id])
 
   @@index([sessionId])
@@ -190,11 +198,319 @@ model FinalMinute {
   markdown  String
   json      Json
   createdAt DateTime @default(now()) @map("created_at")
+  minutesEvaluation MinutesEvaluation?
   session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
   @@index([createdAt])
   @@map("final_minutes")
+}
+
+model StudySession {
+  id                  String                       @id @default(cuid())
+  appSessionId        String?                      @unique @map("app_session_id")
+  experimentSessionId String?                      @unique @map("experiment_session_id")
+  participantCode     String?                      @map("participant_code")
+  condition           String?
+  source              String                       @default("session_app")
+  protocolVersion     String?                      @map("protocol_version")
+  startedAt           DateTime                     @default(now()) @map("started_at")
+  completedAt         DateTime?                    @map("completed_at")
+  rawLog              Json?                        @map("raw_log")
+  createdAt           DateTime                     @default(now()) @map("created_at")
+  updatedAt           DateTime                     @updatedAt @map("updated_at")
+  appSession          Session?                     @relation(fields: [appSessionId], references: [id], onDelete: SetNull)
+  experimentSession   ExperimentSession?           @relation(fields: [experimentSessionId], references: [id], onDelete: SetNull)
+  auxiliaryItems      SessionAuxiliaryItem[]
+  dialogueEvaluation  DialogueEvaluationResponse?
+  interventions       StudyIntervention[]
+  minutesEvaluations  MinutesEvaluation[]
+  nasaTlx             NasaTlxResponse?
+  sessionMetric       SessionMetric?
+  slotStates          StudySlotState[]
+  topicTrials         StudyTopicTrial[]
+  utterances          StudyUtterance[]
+
+  @@index([condition])
+  @@index([participantCode])
+  @@index([startedAt])
+  @@map("study_sessions")
+}
+
+model StudyTopicTrial {
+  id                        String              @id @default(cuid())
+  sessionId                 String              @map("session_id")
+  legacyTopicLogId          String?             @unique @map("legacy_topic_log_id")
+  topicId                   String              @map("topic_id")
+  topicIndex                Int                 @map("topic_index")
+  title                     String?
+  promptedSlotId            String?             @map("prompted_slot_id")
+  question                  String?
+  presentedAt               DateTime?           @map("presented_at")
+  startedAt                 DateTime?           @map("started_at")
+  endedAt                   DateTime?           @map("ended_at")
+  firstUtteranceAt          DateTime?           @map("first_utterance_at")
+  latencyToFirstUtteranceMs Int?                @map("latency_to_first_utterance_ms")
+  endReason                 String?             @map("end_reason")
+  createdAt                 DateTime            @default(now()) @map("created_at")
+  updatedAt                 DateTime            @updatedAt @map("updated_at")
+  legacyTopicLog            TopicLog?           @relation(fields: [legacyTopicLogId], references: [id], onDelete: SetNull)
+  metric                    TopicMetric?
+  session                   StudySession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  interventions             StudyIntervention[]
+  utterances                StudyUtterance[]
+
+  @@unique([sessionId, topicIndex])
+  @@index([sessionId])
+  @@index([topicId])
+  @@index([promptedSlotId])
+  @@map("study_topic_trials")
+}
+
+model StudyUtterance {
+  id                String              @id @default(cuid())
+  sessionId         String              @map("session_id")
+  topicTrialId      String?             @map("topic_trial_id")
+  appUtteranceId    String?             @unique @map("app_utterance_id")
+  legacyUtteranceId String?             @unique @map("legacy_utterance_id")
+  speaker           String
+  text              String
+  eventType         String?             @map("event_type")
+  timestamp         DateTime
+  charCount         Int                 @default(0) @map("char_count")
+  wordCount         Int?                @map("word_count")
+  selfDisclosureCue Boolean             @default(false) @map("self_disclosure_cue")
+  rawEntry          Json?               @map("raw_entry")
+  createdAt         DateTime            @default(now()) @map("created_at")
+  appUtterance      SessionUtterance?   @relation(fields: [appUtteranceId], references: [id], onDelete: SetNull)
+  legacyUtterance   Utterance?          @relation(fields: [legacyUtteranceId], references: [id], onDelete: SetNull)
+  session           StudySession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  topicTrial        StudyTopicTrial?    @relation(fields: [topicTrialId], references: [id], onDelete: SetNull)
+  slotEvidence      StudySlotEvidence[]
+
+  @@index([sessionId])
+  @@index([topicTrialId])
+  @@index([speaker])
+  @@index([timestamp])
+  @@map("study_utterances")
+}
+
+model StudyIntervention {
+  id                   String              @id @default(cuid())
+  sessionId            String              @map("session_id")
+  topicTrialId         String?             @map("topic_trial_id")
+  appSuggestionId      String?             @unique @map("app_suggestion_id")
+  buttonEventId        String?             @map("button_event_id")
+  legacyInterventionId String?             @unique @map("legacy_intervention_id")
+  interventionType     String              @map("intervention_type")
+  reason               String?
+  interventionNumber   Int?                @map("intervention_number")
+  promptedSlotId       String?             @map("prompted_slot_id")
+  aiText               String              @map("ai_text")
+  aiReasoning          String?             @map("ai_reasoning")
+  source               String              @default("conversation_ai")
+  adopted              Boolean?
+  silenceDurationMs    Int?                @map("silence_duration_ms")
+  timestamp            DateTime            @default(now())
+  rawEntry             Json?               @map("raw_entry")
+  createdAt            DateTime            @default(now()) @map("created_at")
+  appSuggestion         AiSuggestionLog?    @relation(fields: [appSuggestionId], references: [id], onDelete: SetNull)
+  buttonEvent           ButtonEvent?        @relation(fields: [buttonEventId], references: [id], onDelete: SetNull)
+  effect                InterventionEffect?
+  legacyIntervention    Intervention?       @relation(fields: [legacyInterventionId], references: [id], onDelete: SetNull)
+  session               StudySession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  topicTrial            StudyTopicTrial?    @relation(fields: [topicTrialId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId])
+  @@index([topicTrialId])
+  @@index([interventionType])
+  @@index([promptedSlotId])
+  @@index([timestamp])
+  @@map("study_interventions")
+}
+
+model AcpSlotDefinition {
+  id         String           @id
+  label      String
+  category   String?
+  priority   Int              @default(0)
+  active     Boolean          @default(true)
+  createdAt  DateTime         @default(now()) @map("created_at")
+  updatedAt  DateTime         @updatedAt @map("updated_at")
+  slotStates StudySlotState[]
+
+  @@index([active])
+  @@index([priority])
+  @@map("acp_slot_definitions")
+}
+
+model StudySlotState {
+  id                String              @id @default(cuid())
+  sessionId         String              @map("session_id")
+  slotId            String              @map("slot_id")
+  status            String
+  summary           String
+  sourceType        String              @default("unknown") @map("source_type")
+  confidence        Float?
+  evidenceUtterance String?             @map("evidence_utterance")
+  updatedAt         DateTime            @updatedAt @map("updated_at")
+  evidence          StudySlotEvidence[]
+  session           StudySession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  slot              AcpSlotDefinition   @relation(fields: [slotId], references: [id], onDelete: Restrict)
+
+  @@unique([sessionId, slotId])
+  @@index([sessionId])
+  @@index([slotId])
+  @@index([status])
+  @@index([sourceType])
+  @@map("study_slot_states")
+}
+
+model StudySlotEvidence {
+  id           String           @id @default(cuid())
+  slotStateId  String           @map("slot_state_id")
+  utteranceId  String?          @map("utterance_id")
+  evidenceType String           @map("evidence_type")
+  note         String?
+  sourceText   String?          @map("source_text")
+  confidence   Float?
+  createdAt    DateTime         @default(now()) @map("created_at")
+  slotState    StudySlotState   @relation(fields: [slotStateId], references: [id], onDelete: Cascade)
+  utterance    StudyUtterance?  @relation(fields: [utteranceId], references: [id], onDelete: SetNull)
+
+  @@index([slotStateId])
+  @@index([utteranceId])
+  @@index([evidenceType])
+  @@map("study_slot_evidence")
+}
+
+model SessionMetric {
+  id                       String       @id @default(cuid())
+  sessionId                String       @unique @map("session_id")
+  totalTurns               Int          @default(0) @map("total_turns")
+  totalWords               Int          @default(0) @map("total_words")
+  totalCharacters          Int          @default(0) @map("total_characters")
+  totalDurationSec         Int?         @map("total_duration_sec")
+  topicCount               Int          @default(0) @map("topic_count")
+  interventionCount        Int          @default(0) @map("intervention_count")
+  silenceInterventionCount Int          @default(0) @map("silence_intervention_count")
+  filledSlotCount          Int          @default(0) @map("filled_slot_count")
+  slotCompletionRate       Float        @default(0) @map("slot_completion_rate")
+  selfDisclosureScore      Float?       @map("self_disclosure_score")
+  computedAt               DateTime     @default(now()) @map("computed_at")
+  methodVersion            String?      @map("method_version")
+  session                  StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("session_metrics")
+}
+
+model TopicMetric {
+  id                 String          @id @default(cuid())
+  topicTrialId       String          @unique @map("topic_trial_id")
+  topicDurationSec   Int?            @map("topic_duration_sec")
+  userTurnCount      Int             @default(0) @map("user_turn_count")
+  userWordCount      Int             @default(0) @map("user_word_count")
+  caregiverTurnCount Int             @default(0) @map("caregiver_turn_count")
+  caregiverWordCount Int             @default(0) @map("caregiver_word_count")
+  interventionCount  Int             @default(0) @map("intervention_count")
+  silenceCount       Int             @default(0) @map("silence_count")
+  totalSilenceMs     Int             @default(0) @map("total_silence_ms")
+  maxSilenceMs       Int             @default(0) @map("max_silence_ms")
+  avgSilenceMs       Float?          @map("avg_silence_ms")
+  newSlotsFilled     Int             @default(0) @map("new_slots_filled")
+  computedAt         DateTime        @default(now()) @map("computed_at")
+  topicTrial         StudyTopicTrial @relation(fields: [topicTrialId], references: [id], onDelete: Cascade)
+
+  @@map("topic_metrics")
+}
+
+model InterventionEffect {
+  id              String            @id @default(cuid())
+  interventionId  String            @unique @map("intervention_id")
+  wordsBefore     Int               @default(0) @map("words_before")
+  wordsAfter      Int               @default(0) @map("words_after")
+  turnsBefore     Int               @default(0) @map("turns_before")
+  turnsAfter      Int               @default(0) @map("turns_after")
+  slotFilledAfter Boolean           @default(false) @map("slot_filled_after")
+  silenceBefore   Int?              @map("silence_before")
+  silenceAfter    Int?              @map("silence_after")
+  computedAt      DateTime          @default(now()) @map("computed_at")
+  intervention    StudyIntervention @relation(fields: [interventionId], references: [id], onDelete: Cascade)
+
+  @@map("intervention_effects")
+}
+
+model NasaTlxResponse {
+  id                 String       @id @default(cuid())
+  sessionId          String       @unique @map("session_id")
+  mentalDemand       Int          @map("mental_demand")
+  physicalDemand     Int          @map("physical_demand")
+  temporalDemand     Int          @map("temporal_demand")
+  performance        Int
+  effort             Int
+  frustration        Int
+  overallScore       Float        @map("overall_score")
+  source             String       @default("manual")
+  externalResponseId String?      @map("external_response_id")
+  rawPayload         Json?        @map("raw_payload")
+  createdAt          DateTime     @default(now()) @map("created_at")
+  session            StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([source])
+  @@map("nasa_tlx_responses")
+}
+
+model DialogueEvaluationResponse {
+  id                    String       @id @default(cuid())
+  sessionId             String       @unique @map("session_id")
+  easyToTalk            Int          @map("easy_to_talk")
+  thoughtsOrganized     Int          @map("thoughts_organized")
+  valuesShared          Int          @map("values_shared")
+  thoughtAboutAcp       Int          @map("thought_about_acp")
+  satisfied             Int
+  trustedAi             Int?         @map("trusted_ai")
+  wantUseAgain          Int?         @map("want_use_again")
+  aiInterventionNatural Int?         @map("ai_intervention_natural")
+  source                String       @default("manual")
+  externalResponseId    String?      @map("external_response_id")
+  rawPayload            Json?        @map("raw_payload")
+  createdAt             DateTime     @default(now()) @map("created_at")
+  session               StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([source])
+  @@map("dialogue_evaluation_responses")
+}
+
+model MinutesEvaluation {
+  id                String       @id @default(cuid())
+  finalMinuteId     String?      @unique @map("final_minute_id")
+  studySessionId    String       @map("study_session_id")
+  completenessScore Float?       @map("completeness_score")
+  evidenceScore     Float?       @map("evidence_score")
+  hallucinationRisk Float?       @map("hallucination_risk")
+  evaluator         String?
+  notes             String?
+  createdAt         DateTime     @default(now()) @map("created_at")
+  finalMinute       FinalMinute? @relation(fields: [finalMinuteId], references: [id], onDelete: SetNull)
+  studySession      StudySession @relation(fields: [studySessionId], references: [id], onDelete: Cascade)
+
+  @@index([studySessionId])
+  @@map("minutes_evaluations")
+}
+
+model SessionAuxiliaryItem {
+  id                String       @id @default(cuid())
+  sessionId         String       @map("session_id")
+  itemName          String       @map("item_name")
+  summary           String
+  evidenceUtterance String?      @map("evidence_utterance")
+  source            String       @default("minutes_generation")
+  createdAt         DateTime     @default(now()) @map("created_at")
+  session           StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([itemName])
+  @@map("session_auxiliary_items")
 }
 
 model playing_with_neon {

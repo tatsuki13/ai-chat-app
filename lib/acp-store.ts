@@ -10,6 +10,10 @@ import {
   type FinalMinutesResult,
   type SuggestionType,
 } from "./acp-mvp";
+import {
+  saveStudyInterventionForAiSuggestion,
+  saveStudySlotStatesForSession,
+} from "./research-store";
 
 export async function getSessionContext(sessionId: string) {
   const session = await prisma.session.findUnique({
@@ -70,6 +74,8 @@ export async function createInitialSlotStates(sessionId: string) {
     ),
   );
 
+  await saveStudySlotStatesForSession(sessionId, slots);
+
   return slots;
 }
 
@@ -98,6 +104,7 @@ export async function saveSlotStates(sessionId: string, slots: AcpSlotState[]) {
       }),
     ),
   );
+  await saveStudySlotStatesForSession(sessionId, slots);
 }
 
 export async function createButtonEvent(sessionId: string, buttonType: ButtonType) {
@@ -136,7 +143,7 @@ export async function saveAiSuggestion(input: {
   reasoning?: string;
   targetSlot?: string;
 }) {
-  return prisma.aiSuggestionLog.create({
+  const suggestion = await prisma.aiSuggestionLog.create({
     data: {
       sessionId: input.sessionId,
       triggerEventId: input.triggerEventId,
@@ -146,6 +153,20 @@ export async function saveAiSuggestion(input: {
       targetSlot: input.targetSlot,
     },
   });
+
+  await saveStudyInterventionForAiSuggestion({
+    id: suggestion.id,
+    sessionId: suggestion.sessionId,
+    triggerEventId: suggestion.triggerEventId,
+    suggestionType: suggestion.suggestionType,
+    content: suggestion.content,
+    reasoning: suggestion.reasoning,
+    targetSlot: suggestion.targetSlot,
+    adopted: suggestion.adopted,
+    createdAt: suggestion.createdAt,
+  });
+
+  return suggestion;
 }
 
 export async function saveFinalMinutes(
