@@ -90,18 +90,22 @@ export default function SessionPage() {
         const savedId = window.localStorage.getItem(STORAGE_KEY);
 
         if (savedId) {
-          const restored = await fetchSessionDetail(savedId);
+          try {
+            const restored = await fetchSessionDetail(savedId);
 
-          if (!ignore) {
-            setSession(restored.session);
-            setUtterances(restored.utterances);
-            setUtteranceTotal(restored.utterance_count);
-            resetTopicTiming();
-            setStatusText("保存中");
-            setBusyAction(null);
+            if (!ignore) {
+              setSession(restored.session);
+              setUtterances(restored.utterances);
+              setUtteranceTotal(restored.utterance_count);
+              resetTopicTiming();
+              setStatusText("保存済み");
+              setBusyAction(null);
+            }
+
+            return;
+          } catch {
+            window.localStorage.removeItem(STORAGE_KEY);
           }
-
-          return;
         }
 
         const created = await startSession();
@@ -120,7 +124,7 @@ export default function SessionPage() {
           setStatusText("接続エラー");
           setPromptPanel({
             title: "セッションを開始できません",
-            body: "DATABASE_URL とデータベース接続を確認してください。",
+            body: "データベース接続または開発サーバーの状態を確認してください。",
             tone: "error",
           });
         }
@@ -879,7 +883,13 @@ async function fetchSessionDetail(sessionId: string): Promise<{
   });
 
   if (!response.ok) {
-    throw new Error("Failed to restore session");
+    const errorBody = await response.json().catch(() => null);
+    const errorText =
+      errorBody && typeof errorBody.error === "string"
+        ? errorBody.error
+        : `Failed to restore session: ${response.status}`;
+
+    throw new Error(errorText);
   }
 
   return response.json();
