@@ -516,19 +516,23 @@ export default function SessionPage() {
               {DISCUSSION_TOPIC.description}
             </div>
           </details>
-          <div className="relative px-4 py-4 sm:pr-[104px]">
-            <PromptPanel
-              prompt={promptPanel}
-              topicTitle={currentTopic.title}
-              topicIndex={currentTopicIndex + 1}
-              topicCount={DISCUSSION_TOPICS.length}
-            />
-            <TopicTimer
-              topicIndex={currentTopicIndex + 1}
-              topicCount={DISCUSSION_TOPICS.length}
-              remainingSeconds={topicRemainingSeconds}
-              progress={topicProgress}
-            />
+          <div className="px-4 py-4 sm:overflow-visible">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-stretch">
+              <div className="min-w-0 flex-1">
+                <PromptPanel
+                  prompt={promptPanel}
+                  topicTitle={currentTopic.title}
+                  topicIndex={currentTopicIndex + 1}
+                  topicCount={DISCUSSION_TOPICS.length}
+                />
+              </div>
+              <TopicTimer
+                topicIndex={currentTopicIndex + 1}
+                topicCount={DISCUSSION_TOPICS.length}
+                remainingSeconds={topicRemainingSeconds}
+                progress={topicProgress}
+              />
+            </div>
           </div>
         </section>
 
@@ -644,7 +648,7 @@ function PromptPanel(props: {
 }) {
   if (!props.prompt) {
     return (
-      <div className="rounded-lg border border-dashed border-stone-300 bg-stone-50 px-4 py-5">
+      <div className="h-full rounded-lg border border-dashed border-stone-300 bg-stone-50 px-4 py-5">
         <div className="text-[13px] font-black text-stone-500">AIからの質問</div>
         <p className="mt-2 text-[20px] font-black leading-relaxed text-stone-500">
           下の「質問する」または「次の話題へ」を押すと、ここに介護者が読み上げられる文が表示されます。
@@ -665,7 +669,7 @@ function PromptPanel(props: {
             : "border-emerald-200 bg-emerald-50";
 
   return (
-    <div className={`rounded-lg border px-4 py-4 ${toneClass}`}>
+    <div className={`h-full rounded-lg border px-4 py-4 ${toneClass}`}>
       <div className="space-y-1.5">
         <div className="w-fit rounded-full border border-white/60 bg-white/70 px-2.5 py-1 text-[12px] font-black text-stone-600">
           話題 {props.topicIndex}/{props.topicCount}: {props.topicTitle}
@@ -693,20 +697,20 @@ function TopicTimer(props: {
   const formattedTime = formatTimerSeconds(Math.abs(props.remainingSeconds));
 
   return (
-    <div className="mt-3 h-24 w-24 rounded-lg border border-stone-200 bg-white p-2 shadow-sm sm:absolute sm:-right-4 sm:top-4 sm:mt-0">
+    <div className="aspect-square h-28 w-28 shrink-0 self-center rounded-lg border border-stone-200 bg-white p-2 shadow-sm sm:h-auto sm:w-auto sm:min-h-[132px] sm:self-stretch sm:translate-x-6">
       <div
         className="grid h-full w-full place-items-center rounded-full"
         style={{
           background: `conic-gradient(${timerColor} ${progressDegrees}deg, #e7e5e4 0deg)`,
         }}
       >
-        <div className="grid h-[72px] w-[72px] place-items-center rounded-full bg-white text-center">
+        <div className="grid h-[76%] w-[76%] place-items-center rounded-full bg-white text-center">
           <div>
             <div className="text-[10px] font-black leading-none text-stone-500">
               {props.topicIndex}/{props.topicCount}
             </div>
             <div
-              className={`mt-1 text-[18px] font-black leading-none ${
+              className={`mt-1 text-[24px] font-black leading-none ${
                 isOvertime ? "text-amber-700" : "text-emerald-800"
               }`}
             >
