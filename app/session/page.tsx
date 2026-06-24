@@ -2,35 +2,15 @@
 
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { DISCUSSION_TOPIC, DISCUSSION_TOPICS } from "../../lib/acp-mvp";
+import {
+  createStereoInputService,
+  type StereoAudioChunk,
+  type StereoInputService,
+} from "./audio-input-service";
 
-type Speaker = "caregiver" | "elder";
+type Speaker = "A" | "B" | "caregiver" | "elder";
 type ButtonType = "next_question" | "switch_topic" | "check_end" | "update_slots";
 type PromptTone = "question" | "switch" | "end" | "status" | "error";
-type AudioCaptureState = "idle" | "starting" | "recording" | "error";
-type AudioLevelMap = Record<Speaker, number>;
-type AudioTestMode = "tx1" | "tx2" | null;
-
-type AudioChannelStats = {
-  rms: number;
-  peak: number;
-};
-
-type AudioDiagnosticStats = {
-  left: AudioChannelStats;
-  right: AudioChannelStats;
-};
-
-type AudioTrackDebugSettings = {
-  label: string;
-  deviceId: string;
-  groupId: string;
-  channelCount: number | null;
-  sampleRate: number | null;
-  trackId: string;
-  enabled: boolean;
-  muted: boolean;
-  readyState: string;
-};
 
 type SessionInfo = {
   id: string;
@@ -61,30 +41,12 @@ type TranscribeUtteranceResponse = {
   speaker?: Speaker;
 };
 
-type AudioCaptureHandle = {
-  stream: MediaStream;
-  context: AudioContext;
-  source: MediaStreamAudioSourceNode;
-  splitter: ChannelSplitterNode;
-  leftDestination: MediaStreamAudioDestinationNode;
-  rightDestination: MediaStreamAudioDestinationNode;
-  leftAnalyser: AnalyserNode;
-  rightAnalyser: AnalyserNode;
-  recorders: MediaRecorder[];
-  levelFrameId: number | null;
-};
-
 const STORAGE_KEY = "acp-hitl-current-session-id";
 const MAX_RENDERED_UTTERANCES = 30;
 const TOPIC_BASE_SECONDS = 5 * 60;
 const TIMER_TICK_MS = 1000;
-const SHOW_AUDIO_DEBUG_PANEL = process.env.NEXT_PUBLIC_AUDIO_DEBUG !== "false";
 const AUDIO_TRANSCRIPTION_ENABLED =
-  process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION === "true";
-const EMPTY_AUDIO_STATS: AudioDiagnosticStats = {
-  left: { rms: 0, peak: 0 },
-  right: { rms: 0, peak: 0 },
-};
+  process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
 
 function createOpeningPrompt(topic = DISCUSSION_TOPICS[0]): PromptPanelState {
   return {
@@ -98,7 +60,7 @@ export default function SessionPage() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [utterances, setUtterances] = useState<Utterance[]>([]);
   const [utteranceTotal, setUtteranceTotal] = useState(0);
-  const [speaker, setSpeaker] = useState<Speaker>("elder");
+  const [speaker, setSpeaker] = useState<Speaker>("A");
   const [draft, setDraft] = useState("");
   const [busyAction, setBusyAction] = useState<ButtonType | "start" | "id" | null>("start");
   const [promptPanel, setPromptPanel] = useState<PromptPanelState | null>(
@@ -112,32 +74,17 @@ export default function SessionPage() {
   const [topicBudgets, setTopicBudgets] = useState(createInitialTopicBudgets);
   const [topicStartedAt, setTopicStartedAt] = useState<number | null>(null);
   const [timerNow, setTimerNow] = useState(() => Date.now());
-  const [audioCaptureState, setAudioCaptureState] =
-    useState<AudioCaptureState>("idle");
-  const [audioCaptureError, setAudioCaptureError] = useState("");
-  const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>(
-    [],
-  );
-  const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState("");
-  const [audioLevels, setAudioLevels] = useState<AudioLevelMap>({
-    elder: 0,
-    caregiver: 0,
-  });
-  const [audioDiagnosticStats, setAudioDiagnosticStats] =
-    useState<AudioDiagnosticStats>(EMPTY_AUDIO_STATS);
-  const [audioTrackSettings, setAudioTrackSettings] =
-    useState<AudioTrackDebugSettings | null>(null);
-  const [audioTestMode, setAudioTestMode] = useState<AudioTestMode>(null);
   const [sttEnabled] = useState(AUDIO_TRANSCRIPTION_ENABLED);
+  const [audioInputRunning, setAudioInputRunning] = useState(false);
+  const [audioInputError, setAudioInputError] = useState("");
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
   const topicStartedAtRef = useRef<number | null>(null);
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
-  const audioCaptureRef = useRef<AudioCaptureHandle | null>(null);
-  const audioAutoStartSessionRef = useRef<string | null>(null);
-  const audioChunkCounterRef = useRef(0);
+  const stereoInputServiceRef = useRef<StereoInputService | null>(null);
+  const stereoInputStartedSessionRef = useRef<string | null>(null);
 
   const participantCode = session?.participant_code || "未設定";
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
@@ -156,7 +103,6 @@ export default function SessionPage() {
     topicBudgetSeconds > 0
       ? Math.min(1, topicElapsedSeconds / topicBudgetSeconds)
       : 1;
-  const audioCaptureActive = audioCaptureState === "recording";
 
   useEffect(() => {
     let ignore = false;
@@ -228,36 +174,30 @@ export default function SessionPage() {
 
   useEffect(() => {
     if (!session || busyAction === "start") return;
-    if (audioCaptureRef.current || audioCaptureState === "starting") return;
-    if (audioAutoStartSessionRef.current === session.id) return;
+    if (audioInputRunning) return;
+    if (stereoInputStartedSessionRef.current === session.id) return;
+    if (!stereoInputServiceRef.current) return;
 
-    audioAutoStartSessionRef.current = session.id;
-    void startStereoCapture();
-  }, [session?.id, busyAction, audioCaptureState]);
-
-  useEffect(() => {
-    void refreshAudioInputDevices();
-
-    if (!navigator.mediaDevices?.addEventListener) return;
-
-    const handleDeviceChange = () => {
-      void refreshAudioInputDevices();
-    };
-
-    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
-
-    return () => {
-      navigator.mediaDevices.removeEventListener(
-        "devicechange",
-        handleDeviceChange,
-      );
-    };
-  }, []);
+    stereoInputStartedSessionRef.current = session.id;
+    void startStereoAudioInput();
+  }, [session?.id, busyAction, audioInputRunning]);
 
   useEffect(() => {
+    const service = createStereoInputService();
+    const unsubscribeA = service.onSpeakerAChunk((chunk) => {
+      void handleStereoAudioChunk(chunk);
+    });
+    const unsubscribeB = service.onSpeakerBChunk((chunk) => {
+      void handleStereoAudioChunk(chunk);
+    });
+
+    stereoInputServiceRef.current = service;
+
     return () => {
-      stopAudioCapture(audioCaptureRef.current);
-      audioCaptureRef.current = null;
+      unsubscribeA();
+      unsubscribeB();
+      service.stopStereoInput();
+      stereoInputServiceRef.current = null;
     };
   }, []);
 
@@ -325,226 +265,59 @@ export default function SessionPage() {
     }
   }
 
-  async function refreshAudioInputDevices() {
-    if (!navigator.mediaDevices?.enumerateDevices) return;
+  async function startStereoAudioInput() {
+    if (!stereoInputServiceRef.current) return;
+
+    setAudioInputError("");
 
     try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const audioInputs = devices.filter((device) => device.kind === "audioinput");
-
-      setAudioInputDevices(audioInputs);
-      setSelectedAudioDeviceId((currentDeviceId) =>
-        currentDeviceId &&
-        !audioInputs.some((device) => device.deviceId === currentDeviceId)
-          ? ""
-          : currentDeviceId,
-      );
-    } catch {
-      setAudioInputDevices([]);
-    }
-  }
-
-  async function handleToggleStereoCapture() {
-    if (audioCaptureRef.current) {
-      stopStereoCapture();
-      return;
-    }
-
-    await startStereoCapture();
-  }
-
-  async function startStereoCapture() {
-    if (!session || audioCaptureState === "starting") return;
-
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      setAudioCaptureState("error");
-      setAudioCaptureError("音声入力を確認してください。");
-      return;
-    }
-
-    const AudioContextClass =
-      window.AudioContext ??
-      (window as Window & { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
-
-    if (!AudioContextClass) {
-      setAudioCaptureState("error");
-      setAudioCaptureError("音声入力を確認してください。");
-      return;
-    }
-
-    setAudioCaptureState("starting");
-    setAudioCaptureError("");
-
-    let captureHandle: AudioCaptureHandle | null = null;
-
-    try {
-      const audioConstraints: MediaTrackConstraints = {
-        channelCount: { ideal: 2 },
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      };
-
-      if (selectedAudioDeviceId) {
-        audioConstraints.deviceId = { exact: selectedAudioDeviceId };
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints,
-      });
-      const nextTrackSettings = getAudioTrackDebugSettings(stream);
-      setAudioTrackSettings(nextTrackSettings);
-      logAudioTrackSettings(nextTrackSettings);
-      const context = new AudioContextClass();
-      const source = context.createMediaStreamSource(stream);
-      const splitter = context.createChannelSplitter(2);
-      const leftDestination = context.createMediaStreamDestination();
-      const rightDestination = context.createMediaStreamDestination();
-      const leftAnalyser = context.createAnalyser();
-      const rightAnalyser = context.createAnalyser();
-      const mimeType = getSupportedAudioMimeType();
-
-      leftAnalyser.fftSize = 256;
-      rightAnalyser.fftSize = 256;
-      source.connect(splitter);
-      splitter.connect(leftDestination, 0);
-      splitter.connect(rightDestination, 1);
-      splitter.connect(leftAnalyser, 0);
-      splitter.connect(rightAnalyser, 1);
-
-      const recorders = [
-        createChannelRecorder(leftDestination.stream, "elder", mimeType),
-        createChannelRecorder(rightDestination.stream, "caregiver", mimeType),
-      ];
-
-      captureHandle = {
-        stream,
-        context,
-        source,
-        splitter,
-        leftDestination,
-        rightDestination,
-        leftAnalyser,
-        rightAnalyser,
-        recorders,
-        levelFrameId: null,
-      };
-      audioCaptureRef.current = captureHandle;
-
-      if (context.state === "suspended") {
-        await context.resume();
-      }
-
-      recorders.forEach((recorder) => recorder.start(4000));
-      startAudioLevelMeters(captureHandle);
-      void refreshAudioInputDevices();
-      setAudioCaptureState("recording");
+      await stereoInputServiceRef.current.startStereoInput();
+      setAudioInputRunning(true);
     } catch (error) {
-      stopAudioCapture(captureHandle ?? audioCaptureRef.current);
-      audioCaptureRef.current = null;
-      setAudioCaptureState("error");
-      console.warn("Audio input failed", getAudioCaptureError(error));
-      setAudioCaptureError("音声入力を確認してください。");
+      console.warn("Stereo audio input failed", error);
+      setAudioInputRunning(false);
+      setAudioInputError("音声入力を確認してください。");
     }
   }
 
-  function stopStereoCapture() {
-    stopAudioCapture(audioCaptureRef.current);
-    audioCaptureRef.current = null;
-    setAudioCaptureState("idle");
-    setAudioCaptureError("");
-    setAudioLevels({ elder: 0, caregiver: 0 });
-    setAudioDiagnosticStats(EMPTY_AUDIO_STATS);
-    setStatusText(sessionRef.current ? "保存済み" : "準備中");
+  function stopStereoAudioInput() {
+    stereoInputServiceRef.current?.stopStereoInput();
+    setAudioInputRunning(false);
   }
 
-  function getAudioAwareSavedStatus() {
-    return "保存済み";
-  }
-
-  function createChannelRecorder(
-    stream: MediaStream,
-    channelSpeaker: Speaker,
-    mimeType: string,
-  ) {
-    const recorder = new MediaRecorder(
-      stream,
-      mimeType ? { mimeType } : undefined,
-    );
-
-    recorder.ondataavailable = (event) => {
-      if (event.data.size === 0) return;
-
-      void handleAudioChunk(event.data, channelSpeaker, mimeType);
-    };
-    recorder.onerror = () => {
-      setAudioCaptureState("error");
-      setAudioCaptureError("音声入力を確認してください。");
-    };
-
-    return recorder;
-  }
-
-  function startAudioLevelMeters(handle: AudioCaptureHandle) {
-    const leftData = new Uint8Array(handle.leftAnalyser.fftSize);
-    const rightData = new Uint8Array(handle.rightAnalyser.fftSize);
-
-    const updateLevels = () => {
-      handle.leftAnalyser.getByteTimeDomainData(leftData);
-      handle.rightAnalyser.getByteTimeDomainData(rightData);
-      const leftStats = readAudioStats(leftData);
-      const rightStats = readAudioStats(rightData);
-
-      setAudioDiagnosticStats({
-        left: leftStats,
-        right: rightStats,
-      });
-      setAudioLevels({
-        elder: leftStats.rms,
-        caregiver: rightStats.rms,
-      });
-      handle.levelFrameId = window.requestAnimationFrame(updateLevels);
-    };
-
-    updateLevels();
-  }
-
-  async function handleAudioChunk(
-    blob: Blob,
-    chunkSpeaker: Speaker,
-    mimeType: string,
-  ) {
+  async function handleStereoAudioChunk(chunk: StereoAudioChunk) {
     const currentSession = sessionRef.current;
-    if (!currentSession || blob.size < 512 || !sttEnabledRef.current) return;
-
-    const chunkNumber = audioChunkCounterRef.current + 1;
-    audioChunkCounterRef.current = chunkNumber;
+    if (!currentSession || chunk.blob.size < 512 || !sttEnabledRef.current) return;
 
     try {
       const data = await sendAudioChunkToStt(
         currentSession.id,
-        chunkSpeaker,
-        blob,
-        mimeType,
-        chunkNumber,
+        chunk.speaker,
+        chunk.blob,
+        chunk.mimeType,
+        chunk.sequence,
+        chunk.startedAt,
+        chunk.endedAt,
       );
 
       if (!data.utterance) return;
 
       startTopicTimerIfNeeded();
       setUtterances((current) =>
-        [...current, data.utterance as Utterance].slice(
-          -MAX_RENDERED_UTTERANCES,
-        ),
+        [...current, data.utterance as Utterance]
+          .sort(compareUtterancesByTime)
+          .slice(-MAX_RENDERED_UTTERANCES),
       );
       setUtteranceTotal((current) => current + 1);
       setStatusText("保存済み");
     } catch (error) {
-      setAudioCaptureState("error");
-      console.warn("Audio transcription failed", getAudioCaptureError(error));
-      setAudioCaptureError("音声入力を確認してください。");
+      console.warn("Stereo audio transcription failed", error);
+      setAudioInputError("音声入力を確認してください。");
     }
+  }
+
+  function getAudioAwareSavedStatus() {
+    return "保存済み";
   }
 
   async function handleUpdateUtterance(
@@ -693,7 +466,8 @@ export default function SessionPage() {
     const confirmed = window.confirm("新しいセッションを開始しますか？");
     if (!confirmed) return;
 
-    stopStereoCapture();
+    stopStereoAudioInput();
+    stereoInputStartedSessionRef.current = null;
     setBusyAction("start");
     setPromptPanel(createOpeningPrompt());
     setIsEditingId(false);
@@ -977,41 +751,37 @@ export default function SessionPage() {
             </section>
 
             <form onSubmit={handleSubmit}>
-              {audioCaptureError ? (
+              {audioInputError ? (
                 <p className="mb-2 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[12px] font-bold text-red-700">
-                  音声入力を確認してください
+                  {audioInputError}
                 </p>
               ) : null}
-              {SHOW_AUDIO_DEBUG_PANEL ? (
-                <AudioDebugPanel
-                  audioCaptureActive={audioCaptureActive}
-                  audioCaptureState={audioCaptureState}
-                  audioDiagnosticStats={audioDiagnosticStats}
-                  audioInputDevices={audioInputDevices}
-                  audioTestMode={audioTestMode}
-                  audioTrackSettings={audioTrackSettings}
-                  busyAction={busyAction}
-                  selectedAudioDeviceId={selectedAudioDeviceId}
-                  onDeviceChange={setSelectedAudioDeviceId}
-                  onRefreshDevices={refreshAudioInputDevices}
-                  onTestModeChange={setAudioTestMode}
-                  onToggleCapture={handleToggleStereoCapture}
-                />
-              ) : null}
+              <div className="mb-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={
+                    audioInputRunning
+                      ? stopStereoAudioInput
+                      : () => void startStereoAudioInput()
+                  }
+                  disabled={!session || busyAction === "start"}
+                  className={`min-h-9 rounded-md px-3 text-[12px] font-black text-white shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400 ${
+                    audioInputRunning ? "bg-red-700" : "bg-stone-950"
+                  }`}
+                >
+                  {audioInputRunning ? "停止" : "開始"}
+                </button>
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <SpeakerButton
-                  active={speaker === "elder"}
-                  label="本人"
-                  level={audioLevels.elder}
-                  tone="elder"
-                  onClick={() => setSpeaker("elder")}
+                  active={speaker === "A"}
+                  label="人物A"
+                  onClick={() => setSpeaker("A")}
                 />
                 <SpeakerButton
-                  active={speaker === "caregiver"}
-                  label="介護者"
-                  level={audioLevels.caregiver}
-                  tone="caregiver"
-                  onClick={() => setSpeaker("caregiver")}
+                  active={speaker === "B"}
+                  label="人物B"
+                  onClick={() => setSpeaker("B")}
                 />
               </div>
               <div className="mt-2 flex gap-2">
@@ -1212,360 +982,20 @@ function EmptyState(props: { text: string }) {
 function SpeakerButton(props: {
   active: boolean;
   label: string;
-  level: number;
-  tone: Speaker;
   onClick: () => void;
 }) {
-  const percentage = Math.round(Math.min(1, Math.max(0, props.level)) * 100);
-  const barClass =
-    props.tone === "caregiver" ? "bg-sky-500" : "bg-emerald-500";
-
   return (
     <button
       type="button"
       onClick={props.onClick}
-      className={`min-h-14 rounded-md border px-3 py-2 text-[13px] font-black active:scale-[0.99] ${
+      className={`min-h-10 rounded-md border px-3 text-[13px] font-black active:scale-[0.99] ${
         props.active
           ? "border-emerald-700 bg-emerald-700 text-white"
           : "border-stone-300 bg-white text-stone-700"
       }`}
     >
-      <span className="block">{props.label}</span>
-      <span className="mt-1 flex items-center gap-2">
-        <span
-          className={`text-[10px] font-black ${
-            props.active ? "text-white/80" : "text-stone-400"
-          }`}
-        >
-          音声
-        </span>
-        <span
-          className={`block h-1.5 flex-1 overflow-hidden rounded-full ${
-            props.active ? "bg-white/35" : "bg-stone-200"
-          }`}
-        >
-          <span
-            className={`block h-full rounded-full transition-[width] duration-75 ${barClass}`}
-            style={{ width: `${percentage}%` }}
-          />
-        </span>
-      </span>
+      {props.label}
     </button>
-  );
-}
-
-function AudioDebugPanel(props: {
-  audioCaptureActive: boolean;
-  audioCaptureState: AudioCaptureState;
-  audioDiagnosticStats: AudioDiagnosticStats;
-  audioInputDevices: MediaDeviceInfo[];
-  audioTestMode: AudioTestMode;
-  audioTrackSettings: AudioTrackDebugSettings | null;
-  busyAction: ButtonType | "start" | "id" | null;
-  selectedAudioDeviceId: string;
-  onDeviceChange: (deviceId: string) => void;
-  onRefreshDevices: () => Promise<void>;
-  onTestModeChange: (mode: AudioTestMode) => void;
-  onToggleCapture: () => Promise<void>;
-}) {
-  const settings = props.audioTrackSettings;
-  const channelMessage =
-    settings?.channelCount === 1
-      ? "ブラウザでモノラル取得されています"
-      : settings?.channelCount && settings.channelCount >= 2
-        ? "ステレオ取得中"
-        : "音声入力の取得待ち";
-  const channelTone =
-    settings?.channelCount === 1
-      ? "border-amber-300 bg-amber-100 text-amber-800"
-      : settings?.channelCount && settings.channelCount >= 2
-        ? "border-emerald-200 bg-emerald-100 text-emerald-800"
-        : "border-stone-200 bg-white text-stone-500";
-  const testResult = getAudioTestResult(
-    props.audioTestMode,
-    props.audioDiagnosticStats,
-  );
-  const separationResult = getStereoSeparationResult(props.audioDiagnosticStats);
-  const activeDeviceLabel = settings?.label ?? "";
-  const isRodeInput = isRodeAudioDeviceLabel(activeDeviceLabel);
-
-  return (
-    <div className="mb-2 rounded-md border border-emerald-200 bg-white px-3 py-3 shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-[13px] font-black text-stone-800">
-            音声診断
-          </div>
-          <div className="mt-0.5 text-[11px] font-bold text-stone-500">
-            RODE Wireless PRO Split mode
-          </div>
-        </div>
-        <span
-          className={`rounded-full border px-2 py-0.5 text-[11px] font-black ${channelTone}`}
-        >
-          {channelMessage}
-        </span>
-        <button
-          type="button"
-          onClick={() => void props.onToggleCapture()}
-          disabled={
-            props.busyAction === "start" ||
-            props.audioCaptureState === "starting"
-          }
-          className={`min-h-9 rounded-md px-3 text-[12px] font-black text-white shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400 ${
-            props.audioCaptureActive ? "bg-red-700" : "bg-stone-950"
-          }`}
-        >
-          {props.audioCaptureActive
-            ? "停止"
-            : props.audioCaptureState === "starting"
-              ? "開始中"
-              : "開始"}
-        </button>
-      </div>
-      {settings && !isRodeInput ? (
-        <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-bold leading-relaxed text-amber-900">
-          現在ブラウザが使用している入力はRODE Wireless PROではありません。
-          Windowsの入力デバイス、または下の選択欄でRODE Wireless PROを選んでください。
-        </div>
-      ) : null}
-      <div className="mt-2 grid gap-2 text-[11px] font-bold text-stone-600 sm:grid-cols-3">
-        <DebugSetting
-          label="使用中デバイス名"
-          value={settings?.label || "取得待ち"}
-        />
-        <DebugSetting
-          label="channelCount"
-          value={formatDebugSetting(settings?.channelCount ?? null)}
-        />
-        <DebugSetting
-          label="sampleRate"
-          value={formatDebugSetting(settings?.sampleRate ?? null)}
-        />
-        <DebugSetting
-          label="track"
-          value={
-            settings
-              ? `${settings.readyState} / enabled:${settings.enabled} / muted:${settings.muted}`
-              : "取得待ち"
-          }
-        />
-      </div>
-      <div className="mt-2 grid grid-cols-2 gap-2">
-        <AudioDiagnosticMeter
-          label="Lチャンネル"
-          peak={props.audioDiagnosticStats.left.peak}
-          rms={props.audioDiagnosticStats.left.rms}
-          tone="elder"
-        />
-        <AudioDiagnosticMeter
-          label="Rチャンネル"
-          peak={props.audioDiagnosticStats.right.peak}
-          rms={props.audioDiagnosticStats.right.rms}
-          tone="caregiver"
-        />
-      </div>
-      <div
-        className={`mt-2 rounded-md border px-3 py-2 text-[12px] font-black ${separationResult.className}`}
-      >
-        {separationResult.message}
-      </div>
-      <div className="mt-2 rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="text-[12px] font-black text-stone-700">
-            簡易テストモード
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() =>
-                props.onTestModeChange(
-                  props.audioTestMode === "tx1" ? null : "tx1",
-                )
-              }
-              className={`min-h-8 rounded-md border px-3 text-[11px] font-black ${
-                props.audioTestMode === "tx1"
-                  ? "border-emerald-700 bg-emerald-700 text-white"
-                  : "border-stone-300 bg-white text-stone-700"
-              }`}
-            >
-              TX1のみ発話
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                props.onTestModeChange(
-                  props.audioTestMode === "tx2" ? null : "tx2",
-                )
-              }
-              className={`min-h-8 rounded-md border px-3 text-[11px] font-black ${
-                props.audioTestMode === "tx2"
-                  ? "border-sky-700 bg-sky-700 text-white"
-                  : "border-stone-300 bg-white text-stone-700"
-              }`}
-            >
-              TX2のみ発話
-            </button>
-          </div>
-        </div>
-        <p className={`mt-2 text-[12px] font-black ${testResult.toneClass}`}>
-          {testResult.message}
-        </p>
-      </div>
-      <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-        <select
-          value={props.selectedAudioDeviceId}
-          onChange={(event) => props.onDeviceChange(event.target.value)}
-          disabled={props.audioCaptureActive}
-          className="min-h-9 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-bold text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100 disabled:text-stone-400"
-        >
-          <option value="">既定のマイク</option>
-          {props.audioInputDevices.map((device, index) => (
-            <option key={device.deviceId} value={device.deviceId}>
-              {device.label || `音声入力 ${index + 1}`}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          onClick={() => void props.onRefreshDevices()}
-          disabled={props.audioCaptureActive}
-          className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 shadow-sm active:scale-[0.99] disabled:bg-stone-100 disabled:text-stone-400"
-        >
-          更新
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function AudioDiagnosticMeter(props: {
-  label: string;
-  peak: number;
-  rms: number;
-  tone: Speaker;
-}) {
-  const rmsPercentage = Math.round(props.rms * 100);
-  const peakPercentage = Math.round(props.peak * 100);
-  const barClass =
-    props.tone === "caregiver" ? "bg-sky-600" : "bg-emerald-700";
-
-  return (
-    <div className="rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[12px] font-black text-stone-700">
-          {props.label}
-        </span>
-        <span className="text-[11px] font-black tabular-nums text-stone-500">
-          RMS {rmsPercentage}% / Peak {peakPercentage}%
-        </span>
-      </div>
-      <div className="mt-2 h-2 overflow-hidden rounded-full bg-stone-200">
-        <div
-          className={`h-full rounded-full transition-[width] duration-75 ${barClass}`}
-          style={{ width: `${rmsPercentage}%` }}
-        />
-      </div>
-      <div className="mt-1 h-1 overflow-hidden rounded-full bg-stone-200">
-        <div
-          className="h-full rounded-full bg-stone-500 transition-[width] duration-75"
-          style={{ width: `${peakPercentage}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function AudioLevelMeter(props: {
-  label: string;
-  level: number;
-  tone: Speaker;
-}) {
-  const percentage = Math.round(Math.min(1, Math.max(0, props.level)) * 100);
-  const barClass =
-    props.tone === "caregiver" ? "bg-sky-600" : "bg-emerald-700";
-
-  return (
-    <div className="rounded-md border border-stone-200 bg-white px-2 py-2">
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="truncate text-[11px] font-black text-stone-700">
-          {props.label}
-        </span>
-        <span className="text-[10px] font-black tabular-nums text-stone-500">
-          {percentage}%
-        </span>
-      </div>
-      <div className="h-2 overflow-hidden rounded-full bg-stone-200">
-        <div
-          className={`h-full rounded-full transition-[width] duration-75 ${barClass}`}
-          style={{ width: `${percentage}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function AudioTrackSettingsPanel(props: {
-  settings: AudioTrackDebugSettings | null;
-}) {
-  const settings = props.settings;
-
-  return (
-    <div className="mt-2 rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-[12px] font-black text-stone-700">
-          getSettings()
-        </div>
-        {settings?.channelCount === 1 ? (
-          <span className="rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-[11px] font-black text-amber-800">
-            この入力はモノラルとして取得されています
-          </span>
-        ) : settings?.channelCount && settings.channelCount >= 2 ? (
-          <span className="rounded-full border border-emerald-200 bg-emerald-100 px-2 py-0.5 text-[11px] font-black text-emerald-800">
-            ステレオ取得
-          </span>
-        ) : null}
-      </div>
-      {settings ? (
-        <dl className="mt-2 grid gap-1 text-[11px] font-bold text-stone-600 sm:grid-cols-2">
-          <DebugSetting label="label" value={settings.label || "未取得"} />
-          <DebugSetting
-            label="channelCount"
-            value={formatDebugSetting(settings.channelCount)}
-          />
-          <DebugSetting
-            label="sampleRate"
-            value={formatDebugSetting(settings.sampleRate)}
-          />
-          <DebugSetting
-            label="deviceId"
-            value={settings.deviceId || "未取得"}
-          />
-          <DebugSetting
-            label="groupId"
-            value={settings.groupId || "未取得"}
-          />
-        </dl>
-      ) : (
-        <p className="mt-2 text-[11px] font-bold text-stone-500">
-          音声入力開始後に表示されます。
-        </p>
-      )}
-      <p className="mt-2 text-[11px] font-bold leading-relaxed text-stone-500">
-        TX1だけ話すとelder/L、TX2だけ話すとcaregiver/Rのメーターが動くか確認してください。
-      </p>
-    </div>
-  );
-}
-
-function DebugSetting(props: { label: string; value: string }) {
-  return (
-    <div className="min-w-0 rounded-md bg-white px-2 py-1">
-      <dt className="text-[10px] font-black text-stone-400">{props.label}</dt>
-      <dd className="mt-0.5 break-all text-[11px] font-bold text-stone-700">
-        {props.value}
-      </dd>
-    </div>
   );
 }
 
@@ -1575,7 +1005,7 @@ function SpeechBubble(props: {
   onDelete: (utteranceId: string) => Promise<void>;
 }) {
   const normalizedSpeaker = normalizeSpeaker(props.utterance.speaker);
-  const isCaregiver = normalizedSpeaker === "caregiver";
+  const isSpeakerB = normalizedSpeaker === "B";
   const [isEditing, setIsEditing] = useState(false);
   const [editSpeaker, setEditSpeaker] = useState<Speaker>(normalizedSpeaker);
   const [editText, setEditText] = useState(props.utterance.text);
@@ -1633,7 +1063,7 @@ function SpeechBubble(props: {
 
   if (isEditing) {
     return (
-      <div className={`flex ${isCaregiver ? "justify-end" : "justify-start"}`}>
+      <div className={`flex ${isSpeakerB ? "justify-end" : "justify-start"}`}>
         <article className="max-w-[92%] rounded-md border border-emerald-300 bg-white px-3 py-2 shadow-sm">
           <div className="grid gap-2 sm:grid-cols-[140px_minmax(0,1fr)]">
             <select
@@ -1642,8 +1072,8 @@ function SpeechBubble(props: {
               disabled={isSaving}
               className="min-h-9 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-black text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100"
             >
-              <option value="elder">本人</option>
-              <option value="caregiver">介護者</option>
+              <option value="A">人物A</option>
+              <option value="B">人物B</option>
             </select>
             <textarea
               value={editText}
@@ -1694,10 +1124,10 @@ function SpeechBubble(props: {
   }
 
   return (
-    <div className={`flex ${isCaregiver ? "justify-end" : "justify-start"}`}>
+    <div className={`flex ${isSpeakerB ? "justify-end" : "justify-start"}`}>
       <article
         className={`max-w-[88%] rounded-md border px-3 py-1.5 shadow-sm ${
-          isCaregiver
+          isSpeakerB
             ? "border-sky-700 bg-sky-700 text-white"
             : "border-stone-200 bg-[#fffdf7] text-stone-950"
         }`}
@@ -1705,16 +1135,16 @@ function SpeechBubble(props: {
         <div className="mb-0.5 flex items-center justify-between gap-3">
           <div
             className={`text-[10px] font-black ${
-              isCaregiver ? "text-sky-100" : "text-emerald-700"
+              isSpeakerB ? "text-sky-100" : "text-emerald-700"
             }`}
           >
-            {isCaregiver ? "介護者" : "本人"}
+            {isSpeakerB ? "人物B" : "人物A"}
           </div>
           <button
             type="button"
             onClick={() => setIsEditing(true)}
             className={`rounded-md px-2 py-0.5 text-[10px] font-black ${
-              isCaregiver
+              isSpeakerB
                 ? "bg-sky-100 text-sky-800"
                 : "bg-stone-100 text-stone-600"
             }`}
@@ -1727,7 +1157,7 @@ function SpeechBubble(props: {
         </p>
         <time
           className={`mt-1 block text-[10px] font-bold ${
-            isCaregiver ? "text-sky-100" : "text-stone-400"
+            isSpeakerB ? "text-sky-100" : "text-stone-400"
           }`}
         >
           {formatDateTime(props.utterance.created_at)}
@@ -1850,6 +1280,8 @@ async function sendAudioChunkToStt(
   blob: Blob,
   mimeType: string,
   chunkNumber: number,
+  startedAt?: number,
+  endedAt?: number,
 ): Promise<TranscribeUtteranceResponse> {
   const formData = new FormData();
   const extension = getAudioFileExtension(mimeType);
@@ -1861,6 +1293,8 @@ async function sendAudioChunkToStt(
     blob,
     `${speaker}-${Date.now()}-${chunkNumber}.${extension}`,
   );
+  if (startedAt) formData.append("started_at", String(startedAt));
+  if (endedAt) formData.append("ended_at", String(endedAt));
 
   const response = await fetch("/api/transcribe-utterance", {
     method: "POST",
@@ -1880,247 +1314,14 @@ async function sendAudioChunkToStt(
   return response.json() as Promise<TranscribeUtteranceResponse>;
 }
 
-function getSupportedAudioMimeType() {
-  if (typeof MediaRecorder === "undefined") return "";
-
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/ogg;codecs=opus",
-    "audio/mp4",
-  ];
-
-  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
-}
-
 function getAudioFileExtension(mimeType: string) {
   if (mimeType.includes("mp4")) return "mp4";
   if (mimeType.includes("ogg")) return "ogg";
   return "webm";
 }
 
-function getAudioTrackDebugSettings(
-  stream: MediaStream,
-): AudioTrackDebugSettings | null {
-  const [track] = stream.getAudioTracks();
-  if (!track) {
-    return null;
-  }
-
-  const settings = track.getSettings();
-
-  return {
-    label: track.label,
-    deviceId: settings.deviceId ?? "",
-    groupId: settings.groupId ?? "",
-    channelCount: settings.channelCount ?? null,
-    sampleRate: settings.sampleRate ?? null,
-    trackId: track.id,
-    enabled: track.enabled,
-    muted: track.muted,
-    readyState: track.readyState,
-  };
-}
-
-function logAudioTrackSettings(settings: AudioTrackDebugSettings | null) {
-  if (!settings) {
-    console.log("[RODE debug] no audio track");
-    return;
-  }
-
-  console.log("[RODE debug] getUserMedia audio track settings", settings);
-}
-
-function formatDebugSetting(value: number | null) {
-  return typeof value === "number" ? String(value) : "未取得";
-}
-
-function readAudioStats(data: Uint8Array): AudioChannelStats {
-  if (data.length === 0) return { rms: 0, peak: 0 };
-
-  let total = 0;
-  let peak = 0;
-
-  for (const value of data) {
-    const amplitude = Math.abs((value - 128) / 128);
-    peak = Math.max(peak, amplitude);
-    total += amplitude * amplitude;
-  }
-
-  return {
-    rms: Math.min(1, Math.sqrt(total / data.length) * 3),
-    peak: Math.min(1, peak),
-  };
-}
-
-function getAudioTestResult(
-  mode: AudioTestMode,
-  stats: AudioDiagnosticStats,
-) {
-  if (!mode) {
-    return {
-      message: "TX1のみ発話、またはTX2のみ発話を選んでテストしてください。",
-      toneClass: "text-stone-500",
-    };
-  }
-
-  const leftActive = isAudioChannelActive(stats.left);
-  const rightActive = isAudioChannelActive(stats.right);
-  const leftDominant = isChannelDominant(stats.left, stats.right);
-  const rightDominant = isChannelDominant(stats.right, stats.left);
-
-  if (!leftActive && !rightActive) {
-    return {
-      message: "発話待ちです。選んだTXだけに向かって話してください。",
-      toneClass: "text-stone-500",
-    };
-  }
-
-  if (mode === "tx1") {
-    if (leftDominant) {
-      return {
-        message: "TX1のみ発話: Lチャンネルが主に反応しています。",
-        toneClass: "text-emerald-700",
-      };
-    }
-
-    if (rightDominant) {
-      return {
-        message: "TX1のみ発話: Rチャンネルが強く反応しています。左右が逆かもしれません。",
-        toneClass: "text-red-700",
-      };
-    }
-  }
-
-  if (mode === "tx2") {
-    if (rightDominant) {
-      return {
-        message: "TX2のみ発話: Rチャンネルが主に反応しています。",
-        toneClass: "text-emerald-700",
-      };
-    }
-
-    if (leftDominant) {
-      return {
-        message: "TX2のみ発話: Lチャンネルが強く反応しています。左右が逆かもしれません。",
-        toneClass: "text-red-700",
-      };
-    }
-  }
-
-  return {
-    message: "L/R両方が反応しています。入力がモノラル化、または回り込みしている可能性があります。",
-    toneClass: "text-amber-700",
-  };
-}
-
-function getStereoSeparationResult(stats: AudioDiagnosticStats) {
-  const leftActive = isAudioChannelActive(stats.left);
-  const rightActive = isAudioChannelActive(stats.right);
-
-  if (!leftActive && !rightActive) {
-    return {
-      message: "入力音声が検出されていません。RODE RXのUSB接続、TXのミュート、入力ゲインを確認してください。",
-      className: "border-stone-200 bg-stone-50 text-stone-600",
-    };
-  }
-
-  if (isChannelDominant(stats.left, stats.right)) {
-    return {
-      message: "Lチャンネルが優勢です。TX1側だけの入力として分離できている可能性があります。",
-      className: "border-emerald-200 bg-emerald-50 text-emerald-800",
-    };
-  }
-
-  if (isChannelDominant(stats.right, stats.left)) {
-    return {
-      message: "Rチャンネルが優勢です。TX2側だけの入力として分離できている可能性があります。",
-      className: "border-sky-200 bg-sky-50 text-sky-800",
-    };
-  }
-
-  return {
-    message: "L/Rがほぼ同じ強さで反応しています。RODEまたはOS側でミックス/複製されている可能性があります。",
-    className: "border-amber-200 bg-amber-50 text-amber-800",
-  };
-}
-
-function isAudioChannelActive(stats: AudioChannelStats) {
-  return stats.rms > 0.05 || stats.peak > 0.15;
-}
-
-function isChannelDominant(target: AudioChannelStats, other: AudioChannelStats) {
-  return (
-    isAudioChannelActive(target) &&
-    target.rms > other.rms * 1.8 &&
-    target.rms - other.rms > 0.03
-  );
-}
-
-function isRodeAudioDeviceLabel(label: string) {
-  return /rode|wireless pro/i.test(label);
-}
-
-function stopAudioCapture(handle: AudioCaptureHandle | null) {
-  if (!handle) return;
-
-  if (handle.levelFrameId !== null) {
-    window.cancelAnimationFrame(handle.levelFrameId);
-    handle.levelFrameId = null;
-  }
-
-  for (const recorder of handle.recorders) {
-    if (recorder.state !== "inactive") {
-      try {
-        recorder.stop();
-      } catch {
-        // Recorder may already be stopping after a device disconnect.
-      }
-    }
-  }
-
-  for (const track of handle.stream.getTracks()) {
-    track.stop();
-  }
-
-  for (const node of [
-    handle.source,
-    handle.splitter,
-    handle.leftDestination,
-    handle.rightDestination,
-    handle.leftAnalyser,
-    handle.rightAnalyser,
-  ]) {
-    try {
-      node.disconnect();
-    } catch {
-      // Some browsers throw if a node was already disconnected.
-    }
-  }
-
-  void handle.context.close().catch(() => {});
-}
-
 function normalizeSpeaker(value: string): Speaker {
-  return value === "caregiver" ? "caregiver" : "elder";
-}
-
-function getAudioCaptureError(error: unknown) {
-  if (error instanceof DOMException) {
-    if (error.name === "NotAllowedError") {
-      return "マイク使用が許可されていません。ブラウザの権限を確認してください。";
-    }
-
-    if (error.name === "NotFoundError") {
-      return "音声入力デバイスが見つかりません。RODE Wireless PROの接続を確認してください。";
-    }
-  }
-
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-
-  return "音声入力の処理に失敗しました。";
+  return value === "B" || value === "caregiver" ? "B" : "A";
 }
 
 async function updateSessionDisplayId(
@@ -2234,6 +1435,12 @@ function formatDateTime(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function compareUtterancesByTime(left: Utterance, right: Utterance) {
+  return (
+    new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+  );
 }
 
 function createInitialTopicBudgets() {

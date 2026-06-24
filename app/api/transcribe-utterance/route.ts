@@ -22,6 +22,7 @@ export async function POST(request: Request) {
     const sessionId = requiredString(formData.get("session_id"));
     const speaker = requiredString(formData.get("speaker"));
     const audio = formData.get("audio");
+    const startedAt = optionalDate(formData.get("started_at"));
 
     if (!sessionId || !isSpeaker(speaker) || !(audio instanceof File)) {
       return NextResponse.json(
@@ -55,6 +56,7 @@ export async function POST(request: Request) {
         sessionId,
         speaker,
         text: transcript,
+        createdAt: startedAt ?? undefined,
       },
     });
     await saveStudyUtteranceForAppUtterance({
@@ -118,6 +120,22 @@ function requiredString(value: FormDataEntryValue | null) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function isSpeaker(value: string): value is "elder" | "caregiver" {
-  return value === "elder" || value === "caregiver";
+function optionalDate(value: FormDataEntryValue | null) {
+  if (typeof value !== "string") return null;
+
+  const numericValue = Number(value);
+  const date = Number.isFinite(numericValue)
+    ? new Date(numericValue)
+    : new Date(value);
+
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isSpeaker(value: string): value is "A" | "B" | "elder" | "caregiver" {
+  return (
+    value === "A" ||
+    value === "B" ||
+    value === "elder" ||
+    value === "caregiver"
+  );
 }

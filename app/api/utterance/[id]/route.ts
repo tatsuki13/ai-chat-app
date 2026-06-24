@@ -96,6 +96,11 @@ function requiredString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function isSpeaker(value: string): value is "elder" | "caregiver" {
-  return value === "elder" || value === "caregiver";
+function isSpeaker(value: string): value is "A" | "B" | "elder" | "caregiver" {
+  return (
+    value === "A" ||
+    value === "B" ||
+    value === "elder" ||
+    value === "caregiver"
+  );
 }
