@@ -871,14 +871,14 @@ export default function SessionPage() {
                   {audioInputError}
                 </p>
               ) : null}
-              <div className="mb-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+              <div className="mb-2">
                 <select
                   value={selectedAudioDeviceId}
                   onChange={(event) => {
                     void handleAudioDeviceChange(event.target.value);
                   }}
                   disabled={audioInputLoading}
-                  className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-bold text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100 disabled:text-stone-400"
+                  className="min-h-9 w-full rounded-md border border-stone-300 bg-white px-3 text-[12px] font-bold text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100 disabled:text-stone-400"
                 >
                   <option value="">既定のマイク</option>
                   {audioInputDevices.map((device, index) => (
@@ -887,28 +887,6 @@ export default function SessionPage() {
                     </option>
                   ))}
                 </select>
-                <button
-                  type="button"
-                  onClick={() => void refreshAudioInputDevices()}
-                  disabled={audioInputRunning || audioInputLoading}
-                  className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 disabled:text-stone-400"
-                >
-                  {audioInputLoading ? "取得中" : "更新"}
-                </button>
-                <button
-                  type="button"
-                  onClick={
-                    audioInputRunning
-                      ? stopVoiceAudioInput
-                      : () => void startVoiceAudioInput()
-                  }
-                  disabled={!session || busyAction === "start"}
-                  className={`min-h-9 rounded-md px-3 text-[12px] font-black text-white shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400 ${
-                    audioInputRunning ? "bg-red-700" : "bg-stone-950"
-                  }`}
-                >
-                  {audioInputRunning ? "マイク停止" : "マイク準備"}
-                </button>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <SpeakerButton
