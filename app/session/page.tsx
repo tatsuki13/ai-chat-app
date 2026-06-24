@@ -3,11 +3,11 @@
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { DISCUSSION_TOPIC, DISCUSSION_TOPICS } from "../../lib/acp-mvp";
 import {
-  createStereoInputService,
-  readSavedAudioInputConfig,
-  type AudioInputLevel,
-  type StereoAudioChunk,
-  type StereoInputService,
+  createSingleMicInputService,
+  loadAudioInputs,
+  type SingleMicAudioChunk,
+  type SingleMicInputLevel,
+  type SingleMicInputService,
 } from "./audio-input-service";
 
 type Speaker = "A" | "B" | "caregiver" | "elder";
@@ -80,14 +80,21 @@ export default function SessionPage() {
   const [audioInputRunning, setAudioInputRunning] = useState(false);
   const [audioInputError, setAudioInputError] = useState("");
   const [audioInputLevels, setAudioInputLevels] = useState({ A: 0, B: 0 });
+  const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState("");
+  const [audioInputLoading, setAudioInputLoading] = useState(false);
+  const [pushToTalkActive, setPushToTalkActive] = useState(false);
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
+  const speakerRef = useRef<Speaker>("A");
+  const pushToTalkPressedRef = useRef(false);
+  const pushToTalkStartingRef = useRef(false);
+  const pushToTalkActiveRef = useRef(false);
   const topicStartedAtRef = useRef<number | null>(null);
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
-  const stereoInputServiceRef = useRef<StereoInputService | null>(null);
-  const stereoInputStartedSessionRef = useRef<string | null>(null);
+  const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
 
   const participantCode = session?.participant_code || "未設定";
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
@@ -168,6 +175,11 @@ export default function SessionPage() {
   }, [session]);
 
   useEffect(() => {
+    speakerRef.current = normalizeSpeaker(speaker);
+    setAudioInputLevels({ A: 0, B: 0 });
+  }, [speaker]);
+
+  useEffect(() => {
     topicStartedAtRef.current = topicStartedAt;
   }, [topicStartedAt]);
 
@@ -176,39 +188,25 @@ export default function SessionPage() {
   }, [sttEnabled]);
 
   useEffect(() => {
-    if (!session || busyAction === "start") return;
-    if (audioInputRunning) return;
-    if (stereoInputStartedSessionRef.current === session.id) return;
-    if (!stereoInputServiceRef.current) return;
-
-    stereoInputStartedSessionRef.current = session.id;
-    void startStereoAudioInput();
-  }, [session?.id, busyAction, audioInputRunning]);
+    void refreshAudioInputDevices();
+  }, []);
 
   useEffect(() => {
-    const service = createStereoInputService();
-    const unsubscribeA = service.onSpeakerAChunk((chunk) => {
-      void handleStereoAudioChunk(chunk);
+    const service = createSingleMicInputService();
+    const unsubscribeChunk = service.onChunk((chunk) => {
+      void handleVoiceAudioChunk(chunk);
     });
-    const unsubscribeB = service.onSpeakerBChunk((chunk) => {
-      void handleStereoAudioChunk(chunk);
-    });
-    const unsubscribeLevelA = service.onSpeakerALevel((level) => {
-      updateAudioInputLevel(level);
-    });
-    const unsubscribeLevelB = service.onSpeakerBLevel((level) => {
-      updateAudioInputLevel(level);
+    const unsubscribeLevel = service.onLevel((level) => {
+      updateVoiceInputLevel(level);
     });
 
-    stereoInputServiceRef.current = service;
+    voiceInputServiceRef.current = service;
 
     return () => {
-      unsubscribeA();
-      unsubscribeB();
-      unsubscribeLevelA();
-      unsubscribeLevelB();
-      service.stopStereoInput();
-      stereoInputServiceRef.current = null;
+      unsubscribeChunk();
+      unsubscribeLevel();
+      service.stopVoiceInput();
+      voiceInputServiceRef.current = null;
     };
   }, []);
 
@@ -248,6 +246,38 @@ export default function SessionPage() {
     }
   }, [isEditingId]);
 
+  useEffect(() => {
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.code !== "Space" || event.repeat) return;
+      if (shouldIgnorePushToTalkShortcut(event.target)) return;
+
+      event.preventDefault();
+      pushToTalkPressedRef.current = true;
+      void beginPushToTalk();
+    }
+
+    function handleKeyUp(event: globalThis.KeyboardEvent) {
+      if (event.code !== "Space") return;
+      if (
+        !pushToTalkPressedRef.current &&
+        shouldIgnorePushToTalkShortcut(event.target)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      endPushToTalk();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [session?.id, busyAction, selectedAudioDeviceId]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -276,47 +306,102 @@ export default function SessionPage() {
     }
   }
 
-  async function startStereoAudioInput() {
-    if (!stereoInputServiceRef.current) return;
+  async function refreshAudioInputDevices() {
+    setAudioInputLoading(true);
+    setAudioInputError("");
+
+    try {
+      const devices = await loadAudioInputs();
+
+      setAudioInputDevices(devices);
+      setSelectedAudioDeviceId((current) => current || devices[0]?.deviceId || "");
+    } catch (error) {
+      console.warn("Failed to load audio inputs", error);
+      setAudioInputError("音声入力デバイスを確認してください。");
+    } finally {
+      setAudioInputLoading(false);
+    }
+  }
+
+  async function handleAudioDeviceChange(deviceId: string) {
+    setSelectedAudioDeviceId(deviceId);
+
+    if (!audioInputRunning) return;
+
+    stopVoiceAudioInput();
+    await startVoiceAudioInput(deviceId);
+  }
+
+  async function startVoiceAudioInput(deviceId = selectedAudioDeviceId) {
+    if (!voiceInputServiceRef.current) return;
 
     setAudioInputError("");
 
     try {
-      const savedConfig = readSavedAudioInputConfig();
-
-      try {
-        await stereoInputServiceRef.current.startStereoInput(savedConfig);
-      } catch (error) {
-        if (!savedConfig) throw error;
-
-        console.warn(
-          "Saved dual microphone input failed, falling back to stereo input",
-          error,
-        );
-        await stereoInputServiceRef.current.startStereoInput();
-      }
+      await voiceInputServiceRef.current.startVoiceInput({
+        deviceId,
+      });
       setAudioInputRunning(true);
     } catch (error) {
-      console.warn("Stereo audio input failed", error);
+      console.warn("Voice audio input failed", error);
       setAudioInputRunning(false);
       setAudioInputError("音声入力を確認してください。");
     }
   }
 
-  function stopStereoAudioInput() {
-    stereoInputServiceRef.current?.stopStereoInput();
+  async function beginPushToTalk() {
+    if (!sessionRef.current || busyAction === "start") return;
+    if (!voiceInputServiceRef.current || pushToTalkStartingRef.current) return;
+    if (pushToTalkActiveRef.current) return;
+
+    pushToTalkStartingRef.current = true;
+
+    try {
+      if (!voiceInputServiceRef.current.isRunning()) {
+        await startVoiceAudioInput();
+      }
+
+      if (!voiceInputServiceRef.current.isRunning()) return;
+      if (!pushToTalkPressedRef.current) return;
+
+      const activeSpeaker = normalizeSpeaker(speakerRef.current) as "A" | "B";
+      startTopicTimerIfNeeded();
+      voiceInputServiceRef.current.startCapture(activeSpeaker);
+      pushToTalkActiveRef.current = true;
+      setPushToTalkActive(true);
+    } finally {
+      pushToTalkStartingRef.current = false;
+    }
+  }
+
+  function endPushToTalk() {
+    pushToTalkPressedRef.current = false;
+    voiceInputServiceRef.current?.stopCapture();
+    pushToTalkActiveRef.current = false;
+    setPushToTalkActive(false);
+    setAudioInputLevels({ A: 0, B: 0 });
+  }
+
+  function stopVoiceAudioInput() {
+    endPushToTalk();
+    voiceInputServiceRef.current?.stopVoiceInput();
     setAudioInputRunning(false);
     setAudioInputLevels({ A: 0, B: 0 });
   }
 
-  function updateAudioInputLevel(level: AudioInputLevel) {
-    setAudioInputLevels((current) => ({
-      ...current,
-      [level.speaker]: Math.min(1, Math.max(level.rms * 8, level.peak)),
-    }));
+  function updateVoiceInputLevel(level: SingleMicInputLevel) {
+    if (!pushToTalkActiveRef.current) return;
+
+    const activeSpeaker = normalizeSpeaker(speakerRef.current);
+    const normalizedLevel = Math.min(1, Math.max(level.rms * 8, level.peak));
+
+    setAudioInputLevels({
+      A: activeSpeaker === "A" ? normalizedLevel : 0,
+      B: activeSpeaker === "B" ? normalizedLevel : 0,
+    });
   }
 
-  async function handleStereoAudioChunk(chunk: StereoAudioChunk) {
+  async function handleVoiceAudioChunk(chunk: SingleMicAudioChunk) {
     const currentSession = sessionRef.current;
     if (!currentSession || chunk.blob.size < 512 || !sttEnabledRef.current) return;
 
@@ -342,7 +427,7 @@ export default function SessionPage() {
       setUtteranceTotal((current) => current + 1);
       setStatusText("保存済み");
     } catch (error) {
-      console.warn("Stereo audio transcription failed", error);
+      console.warn("Voice audio transcription failed", error);
       setAudioInputError("音声入力を確認してください。");
     }
   }
@@ -497,8 +582,7 @@ export default function SessionPage() {
     const confirmed = window.confirm("新しいセッションを開始しますか？");
     if (!confirmed) return;
 
-    stopStereoAudioInput();
-    stereoInputStartedSessionRef.current = null;
+    stopVoiceAudioInput();
     setBusyAction("start");
     setPromptPanel(createOpeningPrompt());
     setIsEditingId(false);
@@ -787,20 +871,43 @@ export default function SessionPage() {
                   {audioInputError}
                 </p>
               ) : null}
-              <div className="mb-2 flex justify-end">
+              <div className="mb-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+                <select
+                  value={selectedAudioDeviceId}
+                  onChange={(event) => {
+                    void handleAudioDeviceChange(event.target.value);
+                  }}
+                  disabled={audioInputLoading}
+                  className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-bold text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100 disabled:text-stone-400"
+                >
+                  <option value="">既定のマイク</option>
+                  {audioInputDevices.map((device, index) => (
+                    <option key={`${device.deviceId}-${index}`} value={device.deviceId}>
+                      {device.label || `音声入力 ${index + 1}`}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => void refreshAudioInputDevices()}
+                  disabled={audioInputRunning || audioInputLoading}
+                  className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 disabled:text-stone-400"
+                >
+                  {audioInputLoading ? "取得中" : "更新"}
+                </button>
                 <button
                   type="button"
                   onClick={
                     audioInputRunning
-                      ? stopStereoAudioInput
-                      : () => void startStereoAudioInput()
+                      ? stopVoiceAudioInput
+                      : () => void startVoiceAudioInput()
                   }
                   disabled={!session || busyAction === "start"}
                   className={`min-h-9 rounded-md px-3 text-[12px] font-black text-white shadow-sm active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400 ${
                     audioInputRunning ? "bg-red-700" : "bg-stone-950"
                   }`}
                 >
-                  {audioInputRunning ? "停止" : "開始"}
+                  {audioInputRunning ? "マイク停止" : "マイク準備"}
                 </button>
               </div>
               <div className="grid grid-cols-2 gap-2">
@@ -817,6 +924,11 @@ export default function SessionPage() {
                   onClick={() => setSpeaker("B")}
                 />
               </div>
+              <p className="mt-1 text-[11px] font-bold text-stone-500">
+                {pushToTalkActive
+                  ? "録音中です。Spaceを離すと自動で追加されます。"
+                  : "Spaceを押している間だけ、選択中の話者として録音します。手入力欄ではSpaceは通常入力・変換に使えます。"}
+              </p>
               <div className="mt-2 flex gap-2">
                 <textarea
                   value={draft}
@@ -1370,6 +1482,20 @@ function getAudioFileExtension(mimeType: string) {
 
 function normalizeSpeaker(value: string): Speaker {
   return value === "B" || value === "caregiver" ? "B" : "A";
+}
+
+function shouldIgnorePushToTalkShortcut(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+
+  const tagName = target.tagName.toLowerCase();
+
+  return (
+    target.isContentEditable ||
+    tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select" ||
+    tagName === "button"
+  );
 }
 
 async function updateSessionDisplayId(

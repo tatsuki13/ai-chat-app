@@ -16,12 +16,26 @@ export type AudioInputLevel = {
   at: number;
 };
 
+export type SingleMicAudioChunk = StereoAudioChunk;
+
+export type SingleMicInputLevel = {
+  rms: number;
+  peak: number;
+  at: number;
+};
+
 type ChunkCallback = (chunk: StereoAudioChunk) => void;
 type LevelCallback = (level: AudioInputLevel) => void;
+type SingleMicChunkCallback = (chunk: SingleMicAudioChunk) => void;
+type SingleMicLevelCallback = (level: SingleMicInputLevel) => void;
 
 export type AudioInputStartOptions = {
   speakerADeviceId?: string;
   speakerBDeviceId?: string;
+};
+
+export type SingleMicInputStartOptions = {
+  deviceId?: string;
 };
 
 const AUDIO_INPUT_CONFIG_STORAGE_KEY = "acp-audio-input-config-v1";
@@ -42,6 +56,25 @@ export type StereoInputService = {
   onSpeakerALevel: (callback: LevelCallback) => () => void;
   onSpeakerBLevel: (callback: LevelCallback) => () => void;
   isRunning: () => boolean;
+};
+
+type SingleMicInputHandle = {
+  stream: MediaStream;
+  context: AudioContext;
+  nodes: AudioNode[];
+  recorder: MediaRecorder;
+  stopLevelMeter: (() => void) | null;
+};
+
+export type SingleMicInputService = {
+  startVoiceInput: (options?: SingleMicInputStartOptions | null) => Promise<void>;
+  stopVoiceInput: () => void;
+  startCapture: (speaker: StereoSpeaker) => void;
+  stopCapture: () => void;
+  onChunk: (callback: SingleMicChunkCallback) => () => void;
+  onLevel: (callback: SingleMicLevelCallback) => () => void;
+  isRunning: () => boolean;
+  isCapturing: () => boolean;
 };
 
 export async function loadAudioInputs() {
@@ -113,6 +146,163 @@ export async function startMic(deviceId: string) {
     },
     video: false,
   });
+}
+
+export function createSingleMicInputService(): SingleMicInputService {
+  let handle: SingleMicInputHandle | null = null;
+  let sequence = 0;
+  let chunks: Blob[] = [];
+  let chunkStartedAt = 0;
+  let activeSpeaker: StereoSpeaker = "A";
+  let activeMimeType = "";
+  const chunkCallbacks = new Set<SingleMicChunkCallback>();
+  const levelCallbacks = new Set<SingleMicLevelCallback>();
+
+  async function startVoiceInput(options?: SingleMicInputStartOptions | null) {
+    if (handle) return;
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      throw new Error("audio input is not available in this browser");
+    }
+
+    const AudioContextClass =
+      window.AudioContext ??
+      (window as Window & { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+
+    if (!AudioContextClass) {
+      throw new Error("Web Audio API is not available in this browser");
+    }
+
+    const stream = await startSingleMicStream(options?.deviceId || "");
+    const track = stream.getAudioTracks()[0];
+    console.log("single mic settings:", track?.getSettings());
+
+    const context = new AudioContextClass();
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    const silentGain = context.createGain();
+    const mimeType = getSupportedAudioMimeType();
+    const recorder = new MediaRecorder(
+      stream,
+      mimeType ? { mimeType } : undefined,
+    );
+    activeMimeType = mimeType;
+
+    analyser.fftSize = 1024;
+    silentGain.gain.value = 0;
+    source.connect(analyser);
+    analyser.connect(silentGain);
+    silentGain.connect(context.destination);
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        chunks.push(event.data);
+      }
+    };
+    recorder.onstop = () => {
+      const endedAt = Date.now();
+      const blob = new Blob(chunks, { type: mimeType || chunks[0]?.type });
+      chunks = [];
+
+      if (blob.size < 512 || !chunkStartedAt) return;
+
+      chunkCallbacks.forEach((callback) =>
+        callback({
+          speaker: activeSpeaker,
+          blob,
+          mimeType: activeMimeType,
+          startedAt: chunkStartedAt,
+          endedAt,
+          sequence: ++sequence,
+        }),
+      );
+      chunkStartedAt = 0;
+    };
+    recorder.onerror = (event) => {
+      console.warn("single mic recorder error", event);
+    };
+
+    handle = {
+      stream,
+      context,
+      nodes: [source, analyser, silentGain],
+      recorder,
+      stopLevelMeter: null,
+    };
+
+    if (context.state === "suspended") {
+      await context.resume();
+    }
+
+    handle.stopLevelMeter = startSingleMicLevelMeter(
+      analyser,
+      (level) => {
+        levelCallbacks.forEach((callback) => callback(level));
+      },
+    );
+  }
+
+  function startCapture(speaker: StereoSpeaker) {
+    if (!handle || handle.recorder.state !== "inactive") return;
+
+    chunks = [];
+    activeSpeaker = speaker;
+    chunkStartedAt = Date.now();
+    handle.recorder.start();
+  }
+
+  function stopCapture() {
+    if (!handle || handle.recorder.state !== "recording") return;
+
+    try {
+      handle.recorder.stop();
+    } catch {
+      // Recorder may already be stopping after a device disconnect.
+    }
+  }
+
+  function stopVoiceInput() {
+    if (!handle) return;
+
+    handle.stopLevelMeter?.();
+
+    stopCapture();
+
+    stopMediaStream(handle.stream);
+
+    for (const node of handle.nodes) {
+      try {
+        node.disconnect();
+      } catch {
+        // Some browsers throw if a node was already disconnected.
+      }
+    }
+
+    void handle.context.close().catch(() => {});
+    handle = null;
+  }
+
+  return {
+    startVoiceInput,
+    stopVoiceInput,
+    startCapture,
+    stopCapture,
+    onChunk(callback) {
+      chunkCallbacks.add(callback);
+      return () => chunkCallbacks.delete(callback);
+    },
+    onLevel(callback) {
+      levelCallbacks.add(callback);
+      return () => levelCallbacks.delete(callback);
+    },
+    isRunning() {
+      return Boolean(handle);
+    },
+    isCapturing() {
+      return handle?.recorder.state === "recording";
+    },
+  };
 }
 
 export function createStereoInputService(chunkMs = 4000): StereoInputService {
@@ -408,6 +598,30 @@ function startLevelMeter(
   };
 }
 
+function startSingleMicLevelMeter(
+  analyser: AnalyserNode,
+  emit: (level: SingleMicInputLevel) => void,
+) {
+  const buffer = new Float32Array(analyser.fftSize);
+  let frameId = 0;
+  let stopped = false;
+
+  const tick = () => {
+    if (stopped) return;
+
+    analyser.getFloatTimeDomainData(buffer);
+    emit({ ...calculateLevel(buffer), at: Date.now() });
+
+    frameId = window.requestAnimationFrame(tick);
+  };
+
+  frameId = window.requestAnimationFrame(tick);
+  return () => {
+    stopped = true;
+    window.cancelAnimationFrame(frameId);
+  };
+}
+
 function calculateLevel(samples: Float32Array) {
   let sumSquares = 0;
   let peak = 0;
@@ -428,6 +642,21 @@ function stopMediaStream(stream: MediaStream) {
   for (const track of stream.getTracks()) {
     track.stop();
   }
+}
+
+function startSingleMicStream(deviceId: string) {
+  if (deviceId) {
+    return startMic(deviceId);
+  }
+
+  return navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    },
+    video: false,
+  });
 }
 
 function createRecorder(
