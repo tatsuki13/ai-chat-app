@@ -4,6 +4,8 @@ import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { DISCUSSION_TOPIC, DISCUSSION_TOPICS } from "../../lib/acp-mvp";
 import {
   createStereoInputService,
+  readSavedAudioInputConfig,
+  type AudioInputLevel,
   type StereoAudioChunk,
   type StereoInputService,
 } from "./audio-input-service";
@@ -77,6 +79,7 @@ export default function SessionPage() {
   const [sttEnabled] = useState(AUDIO_TRANSCRIPTION_ENABLED);
   const [audioInputRunning, setAudioInputRunning] = useState(false);
   const [audioInputError, setAudioInputError] = useState("");
+  const [audioInputLevels, setAudioInputLevels] = useState({ A: 0, B: 0 });
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
@@ -190,12 +193,20 @@ export default function SessionPage() {
     const unsubscribeB = service.onSpeakerBChunk((chunk) => {
       void handleStereoAudioChunk(chunk);
     });
+    const unsubscribeLevelA = service.onSpeakerALevel((level) => {
+      updateAudioInputLevel(level);
+    });
+    const unsubscribeLevelB = service.onSpeakerBLevel((level) => {
+      updateAudioInputLevel(level);
+    });
 
     stereoInputServiceRef.current = service;
 
     return () => {
       unsubscribeA();
       unsubscribeB();
+      unsubscribeLevelA();
+      unsubscribeLevelB();
       service.stopStereoInput();
       stereoInputServiceRef.current = null;
     };
@@ -271,7 +282,19 @@ export default function SessionPage() {
     setAudioInputError("");
 
     try {
-      await stereoInputServiceRef.current.startStereoInput();
+      const savedConfig = readSavedAudioInputConfig();
+
+      try {
+        await stereoInputServiceRef.current.startStereoInput(savedConfig);
+      } catch (error) {
+        if (!savedConfig) throw error;
+
+        console.warn(
+          "Saved dual microphone input failed, falling back to stereo input",
+          error,
+        );
+        await stereoInputServiceRef.current.startStereoInput();
+      }
       setAudioInputRunning(true);
     } catch (error) {
       console.warn("Stereo audio input failed", error);
@@ -283,6 +306,14 @@ export default function SessionPage() {
   function stopStereoAudioInput() {
     stereoInputServiceRef.current?.stopStereoInput();
     setAudioInputRunning(false);
+    setAudioInputLevels({ A: 0, B: 0 });
+  }
+
+  function updateAudioInputLevel(level: AudioInputLevel) {
+    setAudioInputLevels((current) => ({
+      ...current,
+      [level.speaker]: Math.min(1, Math.max(level.rms * 8, level.peak)),
+    }));
   }
 
   async function handleStereoAudioChunk(chunk: StereoAudioChunk) {
@@ -775,12 +806,14 @@ export default function SessionPage() {
               <div className="grid grid-cols-2 gap-2">
                 <SpeakerButton
                   active={speaker === "A"}
-                  label="人物A"
+                  label="本人"
+                  level={audioInputLevels.A}
                   onClick={() => setSpeaker("A")}
                 />
                 <SpeakerButton
                   active={speaker === "B"}
-                  label="人物B"
+                  label="介護者"
+                  level={audioInputLevels.B}
                   onClick={() => setSpeaker("B")}
                 />
               </div>
@@ -982,19 +1015,34 @@ function EmptyState(props: { text: string }) {
 function SpeakerButton(props: {
   active: boolean;
   label: string;
+  level: number;
   onClick: () => void;
 }) {
+  const levelPercent = Math.round(Math.min(1, props.level) * 100);
+
   return (
     <button
       type="button"
       onClick={props.onClick}
-      className={`min-h-10 rounded-md border px-3 text-[13px] font-black active:scale-[0.99] ${
+      className={`min-h-12 rounded-md border px-3 py-2 text-[13px] font-black active:scale-[0.99] ${
         props.active
           ? "border-emerald-700 bg-emerald-700 text-white"
           : "border-stone-300 bg-white text-stone-700"
       }`}
     >
-      {props.label}
+      <span>{props.label}</span>
+      <span
+        className={`mt-1 block h-1.5 overflow-hidden rounded-full ${
+          props.active ? "bg-white/25" : "bg-stone-200"
+        }`}
+      >
+        <span
+          className={`block h-full rounded-full transition-[width] ${
+            props.active ? "bg-white" : "bg-emerald-600"
+          }`}
+          style={{ width: `${levelPercent}%` }}
+        />
+      </span>
     </button>
   );
 }
@@ -1072,8 +1120,8 @@ function SpeechBubble(props: {
               disabled={isSaving}
               className="min-h-9 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-black text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100"
             >
-              <option value="A">人物A</option>
-              <option value="B">人物B</option>
+              <option value="A">本人</option>
+              <option value="B">介護者</option>
             </select>
             <textarea
               value={editText}
@@ -1138,7 +1186,7 @@ function SpeechBubble(props: {
               isSpeakerB ? "text-sky-100" : "text-emerald-700"
             }`}
           >
-            {isSpeakerB ? "人物B" : "人物A"}
+            {isSpeakerB ? "介護者" : "本人"}
           </div>
           <button
             type="button"

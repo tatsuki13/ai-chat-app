@@ -9,33 +9,121 @@ export type StereoAudioChunk = {
   sequence: number;
 };
 
+export type AudioInputLevel = {
+  speaker: StereoSpeaker;
+  rms: number;
+  peak: number;
+  at: number;
+};
+
 type ChunkCallback = (chunk: StereoAudioChunk) => void;
+type LevelCallback = (level: AudioInputLevel) => void;
+
+export type AudioInputStartOptions = {
+  speakerADeviceId?: string;
+  speakerBDeviceId?: string;
+};
+
+const AUDIO_INPUT_CONFIG_STORAGE_KEY = "acp-audio-input-config-v1";
 
 type StereoInputHandle = {
-  stream: MediaStream;
+  streams: MediaStream[];
   context: AudioContext;
-  source: MediaStreamAudioSourceNode;
-  splitter: ChannelSplitterNode;
-  leftDestination: MediaStreamAudioDestinationNode;
-  rightDestination: MediaStreamAudioDestinationNode;
+  nodes: AudioNode[];
   recorders: MediaRecorder[];
+  stopLevelMeter: (() => void) | null;
 };
 
 export type StereoInputService = {
-  startStereoInput: () => Promise<void>;
+  startStereoInput: (options?: AudioInputStartOptions | null) => Promise<void>;
   stopStereoInput: () => void;
   onSpeakerAChunk: (callback: ChunkCallback) => () => void;
   onSpeakerBChunk: (callback: ChunkCallback) => () => void;
+  onSpeakerALevel: (callback: LevelCallback) => () => void;
+  onSpeakerBLevel: (callback: LevelCallback) => () => void;
   isRunning: () => boolean;
 };
+
+export async function loadAudioInputs() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("audio input is not available in this browser");
+  }
+
+  const permissionStream = await navigator.mediaDevices.getUserMedia({
+    audio: true,
+    video: false,
+  });
+
+  for (const track of permissionStream.getTracks()) {
+    track.stop();
+  }
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const audioInputs = devices.filter((device) => device.kind === "audioinput");
+
+  console.log("audioInputs", audioInputs);
+
+  return audioInputs;
+}
+
+export function readSavedAudioInputConfig(): AudioInputStartOptions | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const rawValue = window.localStorage.getItem(AUDIO_INPUT_CONFIG_STORAGE_KEY);
+    if (!rawValue) return null;
+
+    const parsedValue = JSON.parse(rawValue) as AudioInputStartOptions;
+    const speakerADeviceId =
+      typeof parsedValue.speakerADeviceId === "string"
+        ? parsedValue.speakerADeviceId
+        : "";
+    const speakerBDeviceId =
+      typeof parsedValue.speakerBDeviceId === "string"
+        ? parsedValue.speakerBDeviceId
+        : "";
+
+    if (!speakerADeviceId || !speakerBDeviceId) return null;
+
+    return { speakerADeviceId, speakerBDeviceId };
+  } catch {
+    return null;
+  }
+}
+
+export function saveAudioInputConfig(options: AudioInputStartOptions) {
+  if (typeof window === "undefined") return;
+
+  window.localStorage.setItem(
+    AUDIO_INPUT_CONFIG_STORAGE_KEY,
+    JSON.stringify({
+      speakerADeviceId: options.speakerADeviceId || "",
+      speakerBDeviceId: options.speakerBDeviceId || "",
+    }),
+  );
+}
+
+export async function startMic(deviceId: string) {
+  return navigator.mediaDevices.getUserMedia({
+    audio: {
+      deviceId: { exact: deviceId },
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    },
+    video: false,
+  });
+}
 
 export function createStereoInputService(chunkMs = 4000): StereoInputService {
   let handle: StereoInputHandle | null = null;
   let sequence = 0;
   const speakerACallbacks = new Set<ChunkCallback>();
   const speakerBCallbacks = new Set<ChunkCallback>();
+  const speakerALevelCallbacks = new Set<LevelCallback>();
+  const speakerBLevelCallbacks = new Set<LevelCallback>();
 
-  async function startStereoInput() {
+  async function startStereoInput(options?: AudioInputStartOptions | null) {
     if (handle) return;
 
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
@@ -49,6 +137,15 @@ export function createStereoInputService(chunkMs = 4000): StereoInputService {
 
     if (!AudioContextClass) {
       throw new Error("Web Audio API is not available in this browser");
+    }
+
+    if (options?.speakerADeviceId && options.speakerBDeviceId) {
+      await startDualDeviceInput(
+        AudioContextClass,
+        options.speakerADeviceId,
+        options.speakerBDeviceId,
+      );
+      return;
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -73,7 +170,14 @@ export function createStereoInputService(chunkMs = 4000): StereoInputService {
     const splitter = context.createChannelSplitter(2);
     const leftDestination = context.createMediaStreamDestination();
     const rightDestination = context.createMediaStreamDestination();
+    const leftAnalyser = context.createAnalyser();
+    const rightAnalyser = context.createAnalyser();
+    const silentGain = context.createGain();
     const mimeType = getSupportedAudioMimeType();
+
+    leftAnalyser.fftSize = 1024;
+    rightAnalyser.fftSize = 1024;
+    silentGain.gain.value = 0;
 
     source.connect(splitter);
 
@@ -81,6 +185,11 @@ export function createStereoInputService(chunkMs = 4000): StereoInputService {
     // splitter output 1 = Right = speakerB
     splitter.connect(leftDestination, 0);
     splitter.connect(rightDestination, 1);
+    splitter.connect(leftAnalyser, 0);
+    splitter.connect(rightAnalyser, 1);
+    leftAnalyser.connect(silentGain);
+    rightAnalyser.connect(silentGain);
+    silentGain.connect(context.destination);
 
     const leftRecorder = createRecorder(
       leftDestination.stream,
@@ -100,21 +209,117 @@ export function createStereoInputService(chunkMs = 4000): StereoInputService {
     );
 
     handle = {
-      stream,
+      streams: [stream],
       context,
-      source,
-      splitter,
-      leftDestination,
-      rightDestination,
+      nodes: [
+        source,
+        splitter,
+        leftDestination,
+        rightDestination,
+        leftAnalyser,
+        rightAnalyser,
+        silentGain,
+      ],
       recorders: [leftRecorder, rightRecorder],
+      stopLevelMeter: null,
     };
 
     if (context.state === "suspended") {
       await context.resume();
     }
 
+    handle.stopLevelMeter = startLevelMeter(
+      leftAnalyser,
+      rightAnalyser,
+      (level) => speakerALevelCallbacks.forEach((callback) => callback(level)),
+      (level) => speakerBLevelCallbacks.forEach((callback) => callback(level)),
+    );
     leftRecorder.start(chunkMs);
     rightRecorder.start(chunkMs);
+  }
+
+  async function startDualDeviceInput(
+    AudioContextClass: typeof AudioContext,
+    speakerADeviceId: string,
+    speakerBDeviceId: string,
+  ) {
+    const speakerAStream = await startMic(speakerADeviceId);
+    let speakerBStream: MediaStream | null = null;
+
+    try {
+      speakerBStream = await startMic(speakerBDeviceId);
+    } catch (error) {
+      stopMediaStream(speakerAStream);
+      throw error;
+    }
+
+    const speakerATrack = speakerAStream.getAudioTracks()[0];
+    const speakerBTrack = speakerBStream.getAudioTracks()[0];
+
+    console.log("micA settings:", speakerATrack?.getSettings());
+    console.log("micB settings:", speakerBTrack?.getSettings());
+
+    const context = new AudioContextClass();
+    const speakerASource = context.createMediaStreamSource(speakerAStream);
+    const speakerBSource = context.createMediaStreamSource(speakerBStream);
+    const leftAnalyser = context.createAnalyser();
+    const rightAnalyser = context.createAnalyser();
+    const silentGain = context.createGain();
+    const mimeType = getSupportedAudioMimeType();
+
+    leftAnalyser.fftSize = 1024;
+    rightAnalyser.fftSize = 1024;
+    silentGain.gain.value = 0;
+
+    speakerASource.connect(leftAnalyser);
+    speakerBSource.connect(rightAnalyser);
+    leftAnalyser.connect(silentGain);
+    rightAnalyser.connect(silentGain);
+    silentGain.connect(context.destination);
+
+    const speakerARecorder = createRecorder(
+      speakerAStream,
+      "A",
+      mimeType,
+      () => ++sequence,
+      (chunk) => speakerACallbacks.forEach((callback) => callback(chunk)),
+      chunkMs,
+    );
+    const speakerBRecorder = createRecorder(
+      speakerBStream,
+      "B",
+      mimeType,
+      () => ++sequence,
+      (chunk) => speakerBCallbacks.forEach((callback) => callback(chunk)),
+      chunkMs,
+    );
+
+    handle = {
+      streams: [speakerAStream, speakerBStream],
+      context,
+      nodes: [
+        speakerASource,
+        speakerBSource,
+        leftAnalyser,
+        rightAnalyser,
+        silentGain,
+      ],
+      recorders: [speakerARecorder, speakerBRecorder],
+      stopLevelMeter: null,
+    };
+
+    if (context.state === "suspended") {
+      await context.resume();
+    }
+
+    handle.stopLevelMeter = startLevelMeter(
+      leftAnalyser,
+      rightAnalyser,
+      (level) => speakerALevelCallbacks.forEach((callback) => callback(level)),
+      (level) => speakerBLevelCallbacks.forEach((callback) => callback(level)),
+    );
+    speakerARecorder.start(chunkMs);
+    speakerBRecorder.start(chunkMs);
   }
 
   function stopStereoInput() {
@@ -130,16 +335,13 @@ export function createStereoInputService(chunkMs = 4000): StereoInputService {
       }
     }
 
-    for (const track of handle.stream.getTracks()) {
-      track.stop();
+    handle.stopLevelMeter?.();
+
+    for (const stream of handle.streams) {
+      stopMediaStream(stream);
     }
 
-    for (const node of [
-      handle.source,
-      handle.splitter,
-      handle.leftDestination,
-      handle.rightDestination,
-    ]) {
+    for (const node of handle.nodes) {
       try {
         node.disconnect();
       } catch {
@@ -162,10 +364,70 @@ export function createStereoInputService(chunkMs = 4000): StereoInputService {
       speakerBCallbacks.add(callback);
       return () => speakerBCallbacks.delete(callback);
     },
+    onSpeakerALevel(callback) {
+      speakerALevelCallbacks.add(callback);
+      return () => speakerALevelCallbacks.delete(callback);
+    },
+    onSpeakerBLevel(callback) {
+      speakerBLevelCallbacks.add(callback);
+      return () => speakerBLevelCallbacks.delete(callback);
+    },
     isRunning() {
       return Boolean(handle);
     },
   };
+}
+
+function startLevelMeter(
+  leftAnalyser: AnalyserNode,
+  rightAnalyser: AnalyserNode,
+  emitA: (level: AudioInputLevel) => void,
+  emitB: (level: AudioInputLevel) => void,
+) {
+  const leftBuffer = new Float32Array(leftAnalyser.fftSize);
+  const rightBuffer = new Float32Array(rightAnalyser.fftSize);
+  let frameId = 0;
+  let stopped = false;
+
+  const tick = () => {
+    if (stopped) return;
+
+    leftAnalyser.getFloatTimeDomainData(leftBuffer);
+    rightAnalyser.getFloatTimeDomainData(rightBuffer);
+
+    emitA({ speaker: "A", ...calculateLevel(leftBuffer), at: Date.now() });
+    emitB({ speaker: "B", ...calculateLevel(rightBuffer), at: Date.now() });
+
+    frameId = window.requestAnimationFrame(tick);
+  };
+
+  frameId = window.requestAnimationFrame(tick);
+  return () => {
+    stopped = true;
+    window.cancelAnimationFrame(frameId);
+  };
+}
+
+function calculateLevel(samples: Float32Array) {
+  let sumSquares = 0;
+  let peak = 0;
+
+  for (const sample of samples) {
+    const absolute = Math.abs(sample);
+    sumSquares += sample * sample;
+    if (absolute > peak) peak = absolute;
+  }
+
+  return {
+    rms: Math.sqrt(sumSquares / samples.length),
+    peak,
+  };
+}
+
+function stopMediaStream(stream: MediaStream) {
+  for (const track of stream.getTracks()) {
+    track.stop();
+  }
 }
 
 function createRecorder(

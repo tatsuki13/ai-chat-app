@@ -156,8 +156,8 @@ export const BUTTON_LABELS: Record<ButtonType, string> = {
 export const BUTTON_TYPES = Object.keys(BUTTON_LABELS) as ButtonType[];
 
 export const SPEAKER_LABELS: Record<string, string> = {
-  A: "人物A",
-  B: "人物B",
+  A: "本人",
+  B: "介護者",
   caregiver: "介護者",
   elder: "本人",
   family: "家族",
