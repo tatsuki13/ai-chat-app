@@ -26,6 +26,10 @@ type AudioTrackDebugSettings = {
   groupId: string;
   channelCount: number | null;
   sampleRate: number | null;
+  trackId: string;
+  enabled: boolean;
+  muted: boolean;
+  readyState: string;
 };
 
 type SessionInfo = {
@@ -1281,6 +1285,9 @@ function AudioDebugPanel(props: {
     props.audioTestMode,
     props.audioDiagnosticStats,
   );
+  const separationResult = getStereoSeparationResult(props.audioDiagnosticStats);
+  const activeDeviceLabel = settings?.label ?? "";
+  const isRodeInput = isRodeAudioDeviceLabel(activeDeviceLabel);
 
   return (
     <div className="mb-2 rounded-md border border-emerald-200 bg-white px-3 py-3 shadow-sm">
@@ -1316,6 +1323,12 @@ function AudioDebugPanel(props: {
               : "開始"}
         </button>
       </div>
+      {settings && !isRodeInput ? (
+        <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-bold leading-relaxed text-amber-900">
+          現在ブラウザが使用している入力はRODE Wireless PROではありません。
+          Windowsの入力デバイス、または下の選択欄でRODE Wireless PROを選んでください。
+        </div>
+      ) : null}
       <div className="mt-2 grid gap-2 text-[11px] font-bold text-stone-600 sm:grid-cols-3">
         <DebugSetting
           label="使用中デバイス名"
@@ -1328,6 +1341,14 @@ function AudioDebugPanel(props: {
         <DebugSetting
           label="sampleRate"
           value={formatDebugSetting(settings?.sampleRate ?? null)}
+        />
+        <DebugSetting
+          label="track"
+          value={
+            settings
+              ? `${settings.readyState} / enabled:${settings.enabled} / muted:${settings.muted}`
+              : "取得待ち"
+          }
         />
       </div>
       <div className="mt-2 grid grid-cols-2 gap-2">
@@ -1343,6 +1364,11 @@ function AudioDebugPanel(props: {
           rms={props.audioDiagnosticStats.right.rms}
           tone="caregiver"
         />
+      </div>
+      <div
+        className={`mt-2 rounded-md border px-3 py-2 text-[12px] font-black ${separationResult.className}`}
+      >
+        {separationResult.message}
       </div>
       <div className="mt-2 rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1889,6 +1915,10 @@ function getAudioTrackDebugSettings(
     groupId: settings.groupId ?? "",
     channelCount: settings.channelCount ?? null,
     sampleRate: settings.sampleRate ?? null,
+    trackId: track.id,
+    enabled: track.enabled,
+    muted: track.muted,
+    readyState: track.readyState,
   };
 }
 
@@ -1984,6 +2014,37 @@ function getAudioTestResult(
   };
 }
 
+function getStereoSeparationResult(stats: AudioDiagnosticStats) {
+  const leftActive = isAudioChannelActive(stats.left);
+  const rightActive = isAudioChannelActive(stats.right);
+
+  if (!leftActive && !rightActive) {
+    return {
+      message: "入力音声が検出されていません。RODE RXのUSB接続、TXのミュート、入力ゲインを確認してください。",
+      className: "border-stone-200 bg-stone-50 text-stone-600",
+    };
+  }
+
+  if (isChannelDominant(stats.left, stats.right)) {
+    return {
+      message: "Lチャンネルが優勢です。TX1側だけの入力として分離できている可能性があります。",
+      className: "border-emerald-200 bg-emerald-50 text-emerald-800",
+    };
+  }
+
+  if (isChannelDominant(stats.right, stats.left)) {
+    return {
+      message: "Rチャンネルが優勢です。TX2側だけの入力として分離できている可能性があります。",
+      className: "border-sky-200 bg-sky-50 text-sky-800",
+    };
+  }
+
+  return {
+    message: "L/Rがほぼ同じ強さで反応しています。RODEまたはOS側でミックス/複製されている可能性があります。",
+    className: "border-amber-200 bg-amber-50 text-amber-800",
+  };
+}
+
 function isAudioChannelActive(stats: AudioChannelStats) {
   return stats.rms > 0.05 || stats.peak > 0.15;
 }
@@ -1994,6 +2055,10 @@ function isChannelDominant(target: AudioChannelStats, other: AudioChannelStats) 
     target.rms > other.rms * 1.8 &&
     target.rms - other.rms > 0.03
   );
+}
+
+function isRodeAudioDeviceLabel(label: string) {
+  return /rode|wireless pro/i.test(label);
 }
 
 function stopAudioCapture(handle: AudioCaptureHandle | null) {
