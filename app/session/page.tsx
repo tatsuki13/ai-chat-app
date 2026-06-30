@@ -1609,23 +1609,39 @@ function distributeRemainingTopicTime(
   elapsedSeconds: number,
 ) {
   const currentBudget = budgets[completedTopicIndex] ?? TOPIC_BASE_SECONDS;
-  const remainingSeconds = Math.max(0, currentBudget - elapsedSeconds);
+  const timeDeltaSeconds = currentBudget - elapsedSeconds;
   const firstRemainingIndex = completedTopicIndex + 1;
   const remainingTopicCount = Math.max(
     0,
     DISCUSSION_TOPICS.length - firstRemainingIndex,
   );
 
-  if (remainingSeconds === 0 || remainingTopicCount === 0) return budgets;
+  if (timeDeltaSeconds === 0 || remainingTopicCount === 0) return budgets;
 
-  const secondsPerTopic = Math.floor(remainingSeconds / remainingTopicCount);
-  const extraSeconds = remainingSeconds % remainingTopicCount;
+  const adjustments = distributeSignedSeconds(
+    timeDeltaSeconds,
+    remainingTopicCount,
+  );
 
   return budgets.map((budget, index) => {
     if (index < firstRemainingIndex) return budget;
 
-    const remainderBonus = index - firstRemainingIndex < extraSeconds ? 1 : 0;
-    return budget + secondsPerTopic + remainderBonus;
+    const adjustment = adjustments[index - firstRemainingIndex] ?? 0;
+    return Math.max(0, budget + adjustment);
+  });
+}
+
+function distributeSignedSeconds(totalSeconds: number, bucketCount: number) {
+  if (bucketCount <= 0) return [];
+
+  const sign = totalSeconds < 0 ? -1 : 1;
+  const absoluteSeconds = Math.abs(totalSeconds);
+  const secondsPerBucket = Math.floor(absoluteSeconds / bucketCount);
+  const extraSeconds = absoluteSeconds % bucketCount;
+
+  return Array.from({ length: bucketCount }, (_, index) => {
+    const remainderAdjustment = index < extraSeconds ? 1 : 0;
+    return sign * (secondsPerBucket + remainderAdjustment);
   });
 }
 
