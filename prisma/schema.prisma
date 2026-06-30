@@ -6,104 +6,6 @@ datasource db {
   provider = "postgresql"
 }
 
-model ExperimentSession {
-  id                              String     @id
-  condition                       String?
-  startedAt                       DateTime?
-  completedAt                     DateTime?
-  presetTopicDurationMs           Int?
-  silenceSoftThresholdMs          Int?
-  silenceInterventionThresholdMs  Int?
-  maxSilenceInterventionsPerTopic Int?
-  rawLog                          Json?
-  createdAt                       DateTime   @default(now())
-  updatedAt                       DateTime   @updatedAt
-  topicLogs                       TopicLog[]
-
-  @@index([condition])
-  @@index([startedAt])
-}
-
-model TopicLog {
-  id                        String            @id @default(cuid())
-  sessionId                 String
-  topicId                   String
-  topicIndex                Int
-  level                     Int?
-  lead                      String?
-  question                  String
-  acpSlots                  String[]          @default([])
-  expressedPoints           Json?
-  missingOrUnclearSlots     String[]          @default([])
-  slotEvidence              Json?
-  presentedAt               DateTime?
-  startedAt                 DateTime?
-  endedAt                   DateTime?
-  firstUtteranceAt          DateTime?
-  latencyToFirstUtteranceMs Int?
-  endReason                 String?
-  interventionCount         Int               @default(0)
-  silenceInterventionCount  Int               @default(0)
-  utteranceCountUser        Int               @default(0)
-  utteranceCountPartner     Int               @default(0)
-  totalUserCharCount        Int               @default(0)
-  totalPartnerCharCount     Int               @default(0)
-  firstUtteranceDetected    Boolean           @default(false)
-  lastHumanUtteranceEndAt   DateTime?
-  currentState              String?
-  stateHistory              Json?
-  silenceEvents             Json?
-  rawLog                    Json?
-  createdAt                 DateTime          @default(now())
-  updatedAt                 DateTime          @updatedAt
-  interventions             Intervention[]
-  session                   ExperimentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  utterances                Utterance[]
-
-  @@unique([sessionId, topicIndex])
-  @@index([sessionId])
-  @@index([topicId])
-}
-
-model Utterance {
-  id         String   @id @default(cuid())
-  topicLogId String
-  speaker    String
-  text       String
-  eventType  String
-  timestamp  DateTime
-  messageId  Int?
-  charCount  Int?
-  rawEntry   Json?
-  createdAt  DateTime @default(now())
-  topicLog   TopicLog @relation(fields: [topicLogId], references: [id], onDelete: Cascade)
-
-  @@index([topicLogId])
-  @@index([speaker])
-  @@index([timestamp])
-}
-
-model Intervention {
-  id                 String   @id @default(cuid())
-  topicLogId         String
-  reason             String
-  interventionNumber Int?
-  promptedSlot       String?
-  aiReflectionText   String
-  silenceDurationMs  Int?
-  expressedPoints    Json?
-  source             String?
-  messageId          Int?
-  timestamp          DateTime
-  rawEntry           Json?
-  createdAt          DateTime @default(now())
-  topicLog           TopicLog @relation(fields: [topicLogId], references: [id], onDelete: Cascade)
-
-  @@index([topicLogId])
-  @@index([reason])
-  @@index([timestamp])
-}
-
 model Session {
   id              String             @id @default(cuid())
   participantCode String?            @map("participant_code")
@@ -196,10 +98,4 @@ model FinalMinute {
   @@index([sessionId])
   @@index([createdAt])
   @@map("final_minutes")
-}
-
-model playing_with_neon {
-  id    Int    @id @default(autoincrement())
-  name  String
-  value Float? @db.Real
 }
