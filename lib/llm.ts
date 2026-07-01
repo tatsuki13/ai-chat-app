@@ -37,6 +37,21 @@ type ExplicitNoneResponse = {
   index: number;
 };
 
+type UncertainResponseKind =
+  | "unknown"
+  | "not_considered"
+  | "language_gap"
+  | "knowledge_gap"
+  | "emotional_load"
+  | "undecided";
+
+type UncertainResponse = {
+  slotName: AcpSlotName;
+  utterance: ConversationUtterance;
+  index: number;
+  kind: UncertainResponseKind;
+};
+
 const SYSTEM_NEXT_QUESTION = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
@@ -139,6 +154,19 @@ const FALLBACK_QUESTIONS: Record<AcpSlotName, string> = {
   "不安・心配": "これからのことで、不安に感じていることや心配なことはありますか？",
 };
 
+const UNCERTAINTY_SUMMARY_PREFIX =
+  "\u660e\u793a\u7684\u306a\u4fdd\u7559\u56de\u7b54: ";
+const UNCERTAINTY_REASON_PROMPT =
+  "\u4eca\u3059\u3050\u7b54\u3048\u3092\u6c7a\u3081\u306a\u304f\u3066\u5927\u4e08\u592b\u3067\u3059\u3002\u308f\u304b\u3089\u306a\u3044\u611f\u3058\u306f\u3001\u8003\u3048\u305f\u3053\u3068\u304c\u306a\u3044\u304b\u3089\u8fd1\u3044\u3067\u3059\u304b\u3001\u305d\u308c\u3068\u3082\u8a00\u8449\u306b\u3059\u308b\u306e\u304c\u96e3\u3057\u3044\u611f\u3058\u3067\u3059\u304b\uff1f";
+const UNCERTAINTY_MOVE_ON_PROMPT =
+  "\u7b54\u3048\u3092\u6025\u304c\u306a\u304f\u3066\u5927\u4e08\u592b\u3067\u3059\u3002\u4eca\u306f\u8a00\u8449\u306b\u3057\u306b\u304f\u3044\u3053\u3068\u3068\u3057\u3066\u53d7\u3051\u6b62\u3081\u307e\u3059\u3002\u3044\u3063\u305f\u3093\u5225\u306e\u8a71\u984c\u306b\u79fb\u3063\u3066\u3082\u3088\u308d\u3057\u3044\u3067\u3059\u304b\uff1f";
+const UNCERTAINTY_SLOT_SUMMARY =
+  "\u660e\u793a\u7684\u306a\u4fdd\u7559\u56de\u7b54: \u672c\u4eba\u306f\u4eca\u306f\u7b54\u3048\u304c\u5b9a\u307e\u3063\u3066\u3044\u306a\u3044\u3001\u307e\u305f\u306f\u8a00\u8a9e\u5316\u304c\u96e3\u3057\u3044\u3068\u8a71\u3057\u3066\u3044\u308b\u3002";
+const UNCERTAINTY_REASON =
+  "\u4e0d\u660e\u30fb\u4fdd\u7559\u306e\u7406\u7531\u3092\u78ba\u8a8d\u3059\u308b\u305f\u3081";
+const UNCERTAINTY_SWITCH_REASON =
+  "\u540c\u3058\u8cea\u554f\u3092\u91cd\u306d\u305a\u3001\u4fdd\u7559\u3068\u3057\u3066\u6271\u3063\u3066\u6b21\u306e\u8a71\u984c\u3078\u79fb\u308b\u305f\u3081";
+
 let client: OpenAI | null = null;
 
 export async function updateSlotsFromConversation(
@@ -161,7 +189,11 @@ export async function updateSlotsFromConversation(
     Array.isArray(result.slots) ? result.slots : fallback,
   );
 
-  return mergeSlotStates(context.slotStates, updatedSlots);
+  const policySlots = isLegacyDialogueMode()
+    ? updatedSlots
+    : applyUncertainResponses(context, updatedSlots);
+
+  return mergeSlotStates(context.slotStates, policySlots);
 }
 
 export async function generateNextQuestion(
@@ -178,13 +210,17 @@ export async function generateNextQuestion(
     fallback,
   );
 
-  return {
+  const output = {
     question: nonEmpty(result.question, fallback.question),
     transition_phrase: nonEmpty(result.transition_phrase, fallback.transition_phrase),
     target_slot: normalizeAcpTargetSlot(result.target_slot, fallback.target_slot),
     reason: nonEmpty(result.reason, fallback.reason),
     sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
   };
+
+  return isLegacyDialogueMode()
+    ? output
+    : applyUncertaintyNextQuestionPolicy(context, output);
 }
 
 export async function generateTopicSwitch(
@@ -197,7 +233,7 @@ export async function generateTopicSwitch(
     fallback,
   );
 
-  return {
+  const output = {
     message: nonEmpty(result.message, fallback.message),
     target_slot: normalizeAcpTargetSlot(result.target_slot, fallback.target_slot),
     should_switch:
@@ -208,6 +244,10 @@ export async function generateTopicSwitch(
     reason: nonEmpty(result.reason, fallback.reason),
     sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
   };
+
+  return isLegacyDialogueMode()
+    ? output
+    : applyUncertaintyTopicSwitchPolicy(context, output);
 }
 
 export async function checkConversationEnd(
@@ -332,6 +372,24 @@ function buildConversationPayload(context: ConversationContext) {
       slot_name: response.slotName,
       evidence_utterance: formatSpeakerEvidence(response.utterance),
     })),
+    uncertainty_answers: isLegacyDialogueMode()
+      ? []
+      : detectUncertainResponses(context).map((response) => ({
+          slot_name: response.slotName,
+          kind: response.kind,
+          evidence_utterance: formatSpeakerEvidence(response.utterance),
+          policy:
+            "Treat this as meaningful ACP information, not as missing data. Ask one gentle reason-check question at most, then allow moving to another topic.",
+        })),
+    dialogue_policy: isLegacyDialogueMode()
+      ? { mode: "legacy" }
+      : {
+          mode: "uncertainty_aware",
+          unknown_is_valid_answer: true,
+          avoid_repeating_unclear_questions: true,
+          use_partial_status_for_deferral: true,
+          prefer_reason_check_or_topic_switch: true,
+        },
     last_utterance: context.utterances.at(-1) ?? null,
     acp_slots: ACP_SLOT_NAMES,
   };
@@ -500,6 +558,99 @@ function applyExplicitNoneResponses(
   });
 }
 
+function applyUncertainResponses(
+  context: ConversationContext,
+  slots: AcpSlotState[],
+): AcpSlotState[] {
+  const responses = detectUncertainResponses(context);
+  if (responses.length === 0) return slots;
+
+  const byName = new Map(slots.map((slot) => [slot.slot_name, slot]));
+
+  responses.forEach((response) => {
+    const current = byName.get(response.slotName);
+    if (
+      current?.status === "filled" &&
+      !isUncertaintySummary(current.summary) &&
+      !isUncertaintySummary(current.evidence_utterance)
+    ) {
+      return;
+    }
+
+    byName.set(
+      response.slotName,
+      createUncertainSlotState(response.slotName, response.utterance, response.kind),
+    );
+  });
+
+  return ACP_SLOT_NAMES.map((slotName) => {
+    return (
+      byName.get(slotName) ??
+      findSlotState(context.slotStates, slotName) ?? {
+        slot_name: slotName,
+        status: "empty",
+        summary: "Unconfirmed",
+        evidence_utterance: "",
+      }
+    );
+  });
+}
+
+function applyUncertaintyNextQuestionPolicy(
+  context: ConversationContext,
+  result: NextQuestionResult,
+): NextQuestionResult {
+  const response = getLatestUncertainResponse(context);
+  if (!response) return result;
+
+  const promptCount = countPromptsForSlot(context.utterances, response.slotName);
+  const targetSlot = normalizeAcpTargetSlot(response.slotName, result.target_slot);
+
+  if (promptCount <= 1) {
+    return {
+      ...result,
+      question: UNCERTAINTY_REASON_PROMPT,
+      transition_phrase: "",
+      target_slot: targetSlot,
+      reason: UNCERTAINTY_REASON,
+      sensitivity: getSlotSensitivity(targetSlot as AcpSlotName),
+    };
+  }
+
+  return {
+    ...result,
+    question: UNCERTAINTY_MOVE_ON_PROMPT,
+    transition_phrase: "",
+    target_slot: targetSlot,
+    reason: UNCERTAINTY_SWITCH_REASON,
+    sensitivity: getSlotSensitivity(targetSlot as AcpSlotName),
+  };
+}
+
+function applyUncertaintyTopicSwitchPolicy(
+  context: ConversationContext,
+  result: TopicSwitchResult,
+): TopicSwitchResult {
+  const response = getLatestUncertainResponse(context);
+  const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
+  if (!response || !nextTopic) return result;
+
+  const promptCount = countPromptsForSlot(context.utterances, response.slotName);
+  if (promptCount <= 1) return result;
+
+  const nextSlot = nextTopic.slot_name as AcpSlotName;
+
+  return {
+    ...result,
+    should_switch: true,
+    message: `${UNCERTAINTY_MOVE_ON_PROMPT}\n${nextTopic.opening_prompt}`,
+    target_slot: nextSlot,
+    next_topic: nextSlot,
+    reason: UNCERTAINTY_SWITCH_REASON,
+    sensitivity: getSlotSensitivity(nextSlot),
+  };
+}
+
 function fallbackNextQuestion(
   utterances: ConversationUtterance[],
   slotStates: AcpSlotState[],
@@ -648,6 +799,56 @@ function detectExplicitNoneResponses(
   return [...responsesBySlot.values()];
 }
 
+function detectUncertainResponses(
+  context: Pick<ConversationContext, "utterances" | "slotStates" | "currentTopic">,
+): UncertainResponse[] {
+  const currentTopic =
+    context.currentTopic && ACP_SLOT_NAMES.includes(context.currentTopic as AcpSlotName)
+      ? (context.currentTopic as AcpSlotName)
+      : null;
+  const latestIndex = context.utterances.length - 1;
+  const responsesBySlot = new Map<AcpSlotName, UncertainResponse>();
+
+  context.utterances.forEach((utterance, index) => {
+    if (utterance.speaker !== "elder" || isExplicitNoneAnswer(utterance.text)) {
+      return;
+    }
+
+    const kind = classifyUncertainResponse(utterance.text);
+    if (!kind) return;
+
+    const promptedSlot =
+      findPromptedSlotBeforeAnswer(context.utterances, index) ??
+      (index === latestIndex ? currentTopic : null);
+
+    if (!promptedSlot) return;
+
+    responsesBySlot.set(promptedSlot, {
+      slotName: promptedSlot,
+      utterance,
+      index,
+      kind,
+    });
+  });
+
+  return [...responsesBySlot.values()];
+}
+
+function getLatestUncertainResponse(
+  context: Pick<ConversationContext, "utterances" | "slotStates" | "currentTopic">,
+) {
+  const latest = detectUncertainResponses(context).sort(
+    (left, right) => right.index - left.index,
+  )[0];
+  if (!latest) return undefined;
+
+  const hasNewerElderUtterance = context.utterances
+    .slice(latest.index + 1)
+    .some((utterance) => utterance.speaker === "elder");
+
+  return hasNewerElderUtterance ? undefined : latest;
+}
+
 function findExplicitNoneResponseRecordForSlot(
   utterances: ConversationUtterance[],
   slotName: AcpSlotName,
@@ -693,9 +894,61 @@ function getSlotPromptScore(text: string, slotName: AcpSlotName) {
   return keywordScore + questionScore + slotNameScore;
 }
 
+function classifyUncertainResponse(text: string): UncertainResponseKind | null {
+  const normalized = normalizeAnswerText(text);
+  if (!normalized || normalized.length > 80) return null;
+
+  if (
+    /(?:\u8a00\u8449|\u3053\u3068\u3070).*(?:\u96e3\u3057\u3044|\u3067\u304d\u306a\u3044|\u51fa\u306a\u3044)|(?:\u3046\u307e\u304f|\u4e0a\u624b\u304f).*\u8a00\u3048|\u8868\u73fe.*\u96e3\u3057\u3044/.test(
+      normalized,
+    )
+  ) {
+    return "language_gap";
+  }
+
+  if (
+    /\u8003\u3048\u305f\u3053\u3068(?:\u304c|\u306f)?\u306a\u3044|\u8003\u3048\u3066\u306a|\u307e\u3060.*\u8003\u3048/.test(
+      normalized,
+    )
+  ) {
+    return "not_considered";
+  }
+
+  if (
+    /\u77e5\u8b58.*\u306a\u3044|\u77e5\u3089\u306a\u3044|\u8aac\u660e.*(?:\u308f\u304b\u3089|\u5206\u304b\u3089)|\u60c5\u5831.*\u306a\u3044/.test(
+      normalized,
+    )
+  ) {
+    return "knowledge_gap";
+  }
+
+  if (
+    /\u6016\u3044|\u4e0d\u5b89|\u3064\u3089\u3044|\u8f9b\u3044|\u3057\u3093\u3069\u3044|\u8003\u3048\u305f\u304f\u306a\u3044/.test(
+      normalized,
+    )
+  ) {
+    return "emotional_load";
+  }
+
+  if (
+    /\u6c7a\u3081\u3089\u308c\u306a\u3044|\u8ff7\u3063\u3066|\u307e\u3060.*\u6c7a\u3081|\u3069\u3061\u3089\u3068\u3082|\u306a\u3093\u3068\u3082|\u4f55\u3068\u3082/.test(
+      normalized,
+    )
+  ) {
+    return "undecided";
+  }
+
+  if (/(?:\u308f\u304b\u3089|\u5206\u304b\u3089|\u5206\u304b\u3093|\u8a00\u3048\u306a\u3044|\u601d\u3044\u3064\u304b\u306a\u3044|\u6d6e\u304b\u3070\u306a\u3044)/.test(normalized)) {
+    return "unknown";
+  }
+
+  return null;
+}
+
 function isExplicitNoneAnswer(text: string) {
   const normalized = normalizeAnswerText(text);
   if (!normalized || normalized.length > 24) return false;
+  if (!isLegacyDialogueMode() && isUncertaintyOnlyAnswer(normalized)) return false;
 
   return (
     /^(?:今は|今のところ|現時点では)?(?:特に|とくに|別に|あまり)?(?:ない|ありません|ないです|なし|思いつかない|浮かばない|わからない|分からない|言えない|いえない)(?:な|かな|ですね|です|と思う)?$/.test(
@@ -704,6 +957,12 @@ function isExplicitNoneAnswer(text: string) {
     /^(?:今は|今のところ|現時点では)?(?:特に|とくに).*(?:ない|ありません|なし|思いつかない|浮かばない|わからない|分からない|言えない|いえない)$/.test(
       normalized,
     )
+  );
+}
+
+function isUncertaintyOnlyAnswer(normalized: string) {
+  return /わからない|分からない|分かんない|言えない|いえない|思いつかない|浮かばない|決められない|迷って/.test(
+    normalized,
   );
 }
 
@@ -732,6 +991,37 @@ function createExplicitNoneSlotState(
         : `明示回答: 本人は「${slotName}」について、今は特に思い当たることはない／言語化しにくいと話している。`,
     evidence_utterance: formatSpeakerEvidence(utterance),
   };
+}
+
+function createUncertainSlotState(
+  slotName: AcpSlotName,
+  utterance: ConversationUtterance,
+  kind: UncertainResponseKind,
+): AcpSlotState {
+  return {
+    slot_name: slotName,
+    status: "partial",
+    summary: `${UNCERTAINTY_SLOT_SUMMARY} reason_hint=${kind}`,
+    evidence_utterance: formatSpeakerEvidence(utterance),
+  };
+}
+
+function countPromptsForSlot(
+  utterances: ConversationUtterance[],
+  slotName: AcpSlotName,
+) {
+  return utterances.filter((utterance) => {
+    if (utterance.speaker === "elder") return false;
+    return findPromptedSlotFromText(utterance.text) === slotName;
+  }).length;
+}
+
+function isLegacyDialogueMode() {
+  return process.env.ACP_DIALOGUE_MODE === "legacy";
+}
+
+function isUncertaintySummary(text: string) {
+  return text.includes(UNCERTAINTY_SUMMARY_PREFIX) || /reason_hint=/.test(text);
 }
 
 function formatSpeakerEvidence(utterance: ConversationUtterance) {
