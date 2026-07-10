@@ -52,6 +52,20 @@ type UncertainResponse = {
   kind: UncertainResponseKind;
 };
 
+const AI_POLICY_VERSION = "hitl-acp-v1";
+
+const COMMON_AI_POLICY = [
+  "You are a third-party support assistant for a human-led family ACP conversation.",
+  "Do not become a conversation partner for the elder or caregiver.",
+  "Only support: question suggestion, topic transition suggestion, completion check, minutes generation, and slot state updates.",
+  "Do not provide medical, caregiving, legal, moral, or value judgments.",
+  "Do not infer facts that are not present in the saved utterance log.",
+  "Do not invent ACP slots, topics, utterances, speakers, or slot statuses.",
+  "Use only the provided acp_slots and available_topics when choosing target_slot or next_topic.",
+  "A short uncertainty or deferral answer is valid ACP information; do not keep asking the same question mechanically.",
+  "Return only the requested JSON shape.",
+].join("\n");
+
 const SYSTEM_NEXT_QUESTION = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
@@ -186,7 +200,7 @@ export async function updateSlotsFromConversation(
 
   const updatedSlots = applyExplicitNoneResponses(
     context,
-    Array.isArray(result.slots) ? result.slots : fallback,
+    normalizeSlotUpdateResult(result.slots, fallback, context.slotStates),
   );
 
   const policySlots = isLegacyDialogueMode()
@@ -210,13 +224,7 @@ export async function generateNextQuestion(
     fallback,
   );
 
-  const output = {
-    question: nonEmpty(result.question, fallback.question),
-    transition_phrase: nonEmpty(result.transition_phrase, fallback.transition_phrase),
-    target_slot: normalizeAcpTargetSlot(result.target_slot, fallback.target_slot),
-    reason: nonEmpty(result.reason, fallback.reason),
-    sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
-  };
+  const output = normalizeNextQuestionResult(result, fallback, context);
 
   return isLegacyDialogueMode()
     ? output
@@ -233,17 +241,7 @@ export async function generateTopicSwitch(
     fallback,
   );
 
-  const output = {
-    message: nonEmpty(result.message, fallback.message),
-    target_slot: normalizeAcpTargetSlot(result.target_slot, fallback.target_slot),
-    should_switch:
-      typeof result.should_switch === "boolean"
-        ? result.should_switch
-        : fallback.should_switch,
-    next_topic: normalizeAcpTargetSlot(result.next_topic, fallback.next_topic),
-    reason: nonEmpty(result.reason, fallback.reason),
-    sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
-  };
+  const output = normalizeTopicSwitchResult(result, fallback, context);
 
   return isLegacyDialogueMode()
     ? output
@@ -264,9 +262,7 @@ export async function checkConversationEnd(
     can_end: typeof result.can_end === "boolean" ? result.can_end : fallback.can_end,
     message: nonEmpty(result.message, fallback.message),
     reason: nonEmpty(result.reason, fallback.reason),
-    remaining_slots: Array.isArray(result.remaining_slots)
-      ? result.remaining_slots.map(String).filter(Boolean)
-      : fallback.remaining_slots,
+    remaining_slots: normalizeRemainingSlots(result.remaining_slots, fallback.remaining_slots),
   };
 }
 
@@ -313,7 +309,7 @@ async function requestJson<T>(
     const completion = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL || "gpt-4o-mini",
       messages: [
-        { role: "system", content: systemPrompt },
+        { role: "system", content: `${COMMON_AI_POLICY}\n\n${systemPrompt}` },
         { role: "user", content: JSON.stringify(payload, null, 2) },
       ],
       response_format: { type: "json_object" },
@@ -339,6 +335,102 @@ function getClient(apiKey: string) {
   return client;
 }
 
+function normalizeSlotUpdateResult(
+  value: unknown,
+  fallback: AcpSlotState[],
+  currentSlots: AcpSlotState[],
+): AcpSlotState[] {
+  if (!Array.isArray(value)) return fallback;
+
+  const currentByName = new Map(currentSlots.map((slot) => [slot.slot_name, slot]));
+  const fallbackByName = new Map(fallback.map((slot) => [slot.slot_name, slot]));
+  const updatesByName = new Map<string, AcpSlotState>();
+
+  value.forEach((item) => {
+    if (!item || typeof item !== "object") return;
+
+    const raw = item as Record<string, unknown>;
+    const slotName = typeof raw.slot_name === "string" ? raw.slot_name.trim() : "";
+    if (!ACP_SLOT_NAMES.includes(slotName as AcpSlotName)) return;
+    const baseSlot = fallbackByName.get(slotName) ?? currentByName.get(slotName);
+
+    updatesByName.set(slotName, {
+      slot_name: slotName,
+      status: normalizeSlotStatus(raw.status),
+      summary: nonEmpty(raw.summary, baseSlot?.summary ?? ""),
+      evidence_utterance: nonEmpty(
+        raw.evidence_utterance,
+        baseSlot?.evidence_utterance ?? "",
+      ),
+      updated_at:
+        typeof raw.updated_at === "string"
+          ? raw.updated_at
+          : baseSlot?.updated_at,
+    });
+  });
+
+  return ACP_SLOT_NAMES.map((slotName) => {
+    return (
+      updatesByName.get(slotName) ??
+      fallbackByName.get(slotName) ??
+      currentByName.get(slotName) ?? {
+        slot_name: slotName,
+        status: "empty",
+        summary: "",
+        evidence_utterance: "",
+      }
+    );
+  });
+}
+
+function normalizeNextQuestionResult(
+  result: Partial<NextQuestionResult>,
+  fallback: NextQuestionResult,
+  context: ConversationContext,
+): NextQuestionResult {
+  const targetSlot = normalizeAcpTargetSlot(result.target_slot, fallback.target_slot);
+  const question = nonEmpty(result.question, fallback.question);
+  const shouldUseFallbackQuestion =
+    isRepeatedQuestion(context.utterances, question, targetSlot) ||
+    !isQuestionRelevantToCurrentTopic(context, targetSlot);
+
+  return {
+    question: shouldUseFallbackQuestion ? fallback.question : question,
+    transition_phrase: nonEmpty(result.transition_phrase, fallback.transition_phrase),
+    target_slot: shouldUseFallbackQuestion ? fallback.target_slot : targetSlot,
+    reason: nonEmpty(result.reason, fallback.reason),
+    sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
+  };
+}
+
+function normalizeTopicSwitchResult(
+  result: Partial<TopicSwitchResult>,
+  fallback: TopicSwitchResult,
+  context: ConversationContext,
+): TopicSwitchResult {
+  const requestedNextTopic = context.nextTopic
+    ? resolveTopic(context.nextTopic).slot_name
+    : fallback.next_topic;
+  const nextTopic = normalizeTopicName(requestedNextTopic, fallback.next_topic);
+  const targetSlot = normalizeAcpTargetSlot(result.target_slot, nextTopic);
+  const shouldSwitch =
+    typeof result.should_switch === "boolean"
+      ? result.should_switch
+      : fallback.should_switch;
+  const isValidSwitch = !shouldSwitch || Boolean(context.nextTopic);
+
+  if (!isValidSwitch) return fallback;
+
+  return {
+    message: nonEmpty(result.message, fallback.message),
+    target_slot: targetSlot,
+    should_switch: shouldSwitch,
+    next_topic: shouldSwitch ? nextTopic : fallback.next_topic,
+    reason: nonEmpty(result.reason, fallback.reason),
+    sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
+  };
+}
+
 function buildConversationPayload(context: ConversationContext) {
   const currentTopic = resolveTopic(context.currentTopic);
   const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
@@ -359,6 +451,11 @@ function buildConversationPayload(context: ConversationContext) {
           title: context.nextTopicTitle || nextTopic.title,
         }
       : null,
+    available_topics: DISCUSSION_TOPICS.map((topic) => ({
+      slot_name: topic.slot_name,
+      title: topic.title,
+      opening_prompt: topic.opening_prompt,
+    })),
     current_topic_transcript: renderTranscript(getTopicRelatedUtterances(context)),
     all_conversation_log: renderTranscript(context.utterances),
     recent_5_turns: renderTranscript(recentUtterances(context.utterances, 5)),
@@ -384,6 +481,7 @@ function buildConversationPayload(context: ConversationContext) {
     dialogue_policy: isLegacyDialogueMode()
       ? { mode: "legacy" }
       : {
+          policy_version: AI_POLICY_VERSION,
           mode: "uncertainty_aware",
           unknown_is_valid_answer: true,
           avoid_repeating_unclear_questions: true,
@@ -423,12 +521,8 @@ function ensureFinalMinutesIncludeTopic(
           : new Date().toISOString(),
       session: getSessionMetadata(context),
       discussion_topic: DISCUSSION_TOPIC,
-      utterances: Array.isArray(rawJson.utterances)
-        ? (rawJson.utterances as ConversationUtterance[])
-        : context.utterances,
-      slots: Array.isArray(rawJson.slots)
-        ? filterAcpSlotStates(rawJson.slots as AcpSlotState[])
-        : filterAcpSlotStates(context.slotStates),
+      utterances: context.utterances,
+      slots: filterAcpSlotStates(context.slotStates),
       auxiliary_items: Array.isArray(rawJson.auxiliary_items)
         ? (rawJson.auxiliary_items as AuxiliaryMinutesItem[])
         : buildFallbackMinutes(
@@ -766,6 +860,58 @@ function normalizeAcpTargetSlot(value: unknown, fallback: string) {
   if (ACP_SLOT_NAMES.includes(fallback as AcpSlotName)) return fallback;
 
   return ACP_SLOT_NAMES[0];
+}
+
+function normalizeTopicName(value: unknown, fallback: string) {
+  const text = typeof value === "string" ? value.trim() : "";
+
+  if (DISCUSSION_TOPICS.some((topic) => topic.slot_name === text)) return text;
+  if (DISCUSSION_TOPICS.some((topic) => topic.slot_name === fallback)) return fallback;
+
+  return DISCUSSION_TOPICS[0].slot_name;
+}
+
+function normalizeRemainingSlots(value: unknown, fallback: string[]) {
+  if (!Array.isArray(value)) return fallback;
+
+  const slots = value
+    .map(String)
+    .filter((slotName): slotName is AcpSlotName =>
+      ACP_SLOT_NAMES.includes(slotName as AcpSlotName),
+    );
+
+  return slots.length > 0 || fallback.length === 0 ? slots : fallback;
+}
+
+function isRepeatedQuestion(
+  utterances: ConversationUtterance[],
+  question: string,
+  targetSlot: string,
+) {
+  const normalizedQuestion = normalizeAnswerText(question);
+  if (!normalizedQuestion) return true;
+
+  return recentUtterances(utterances, 8).some((utterance) => {
+    if (utterance.speaker === "elder") return false;
+
+    const sameSlot = findPromptedSlotFromText(utterance.text) === targetSlot;
+    const sameText = normalizeAnswerText(utterance.text) === normalizedQuestion;
+
+    return sameSlot && sameText;
+  });
+}
+
+function isQuestionRelevantToCurrentTopic(
+  context: ConversationContext,
+  targetSlot: string,
+) {
+  const currentTopic = resolveTopic(context.currentTopic);
+  if (targetSlot === currentTopic.slot_name) return true;
+
+  const currentState = findSlotState(context.slotStates, currentTopic.slot_name);
+  if (currentState?.status === "filled") return true;
+
+  return false;
 }
 
 function detectExplicitNoneResponses(
