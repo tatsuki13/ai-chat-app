@@ -4,6 +4,12 @@ import {
   DISCUSSION_TOPIC,
   DISCUSSION_TOPICS,
   buildFallbackMinutes,
+  calculateThemeCompletenessMetrics,
+  getSlotResponseState,
+  getTopicAspects,
+  getCoreAspects,
+  getOptionalAspects,
+  getCrossTopicAspects,
   getUnfilledSlots,
   isTerminalSlotStatus,
   mergeSlotStates,
@@ -71,7 +77,8 @@ const SYSTEM_NEXT_QUESTION = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
   "質問選択の主軸は current_topic です。ACP全体の未充足スロットは補助情報として扱ってください。",
-  "current_topic.core_slotsを優先し、optional_slotsを埋めるためだけの質問は生成しないでください。",
+  "current_topic.aspects は記録整理と質問生成の補助であり、質問ノルマではありません。",
+  "current_topic.core_aspectsを優先し、optional_aspectsを埋めるためだけの質問は生成しないでください。",
   "本人が未検討・不明・言語化困難・回答拒否を示した場合は有効な回答状態として扱い、追及しないでください。",
   "同じテーマで追加質問は最大1回までとし、同じ意味の質問を言い換えて繰り返さないでください。",
   "target_slot には acp_slots に含まれるACPスロットだけを指定してください。「未解決課題」は指定してはいけません。",
@@ -89,19 +96,22 @@ const SYSTEM_NEXT_QUESTION = [
 
 const SYSTEM_UPDATE_SLOTS = [
   "あなたはACP対話の研究用記録を整理するAIです。",
-  "会話ログを読み、指定されたACPスロットごとに状態を更新してください。",
-  "statusは empty / partial / filled のいずれかです。",
-  "emptyは情報なし、partialは話題は出たが具体性が足りない、filledは本人の希望・理由・文脈がある程度記録されている状態です。",
-  "本人が質問に対して「特にない」「今はない」「わからない」「言えない」「思いつかない」などと明示した場合、それは無回答ではなく有効回答です。summaryには「明示回答: ...」として、今は言語化しにくい／思い当たらない旨を記録してください。",
+  "会話ログを読み、Theme単位のACPスロット状態を更新してください。",
+  "current_topic.aspects と available_topics[].aspects はEvidence整理の観点です。Aspectが未充足でもスロットをemptyに戻さないでください。",
+  "statusは unanswered / partial / answered / no_preference / not_considered / cannot_verbalize / prefer_not_to_answer のいずれかです。",
+  "answeredは本人の希望・価値観・理由・条件が根拠発話とともに表明された状態です。",
+  "partialは関連発話はあるが、本人の考えとしてはまだ弱い状態です。",
+  "本人が質問に対して「特にない」「今はない」「わからない」「言えない」「思いつかない」「話したくない」などと明示した場合、それは無回答ではなく有効なresponseStateです。summaryには「明示回答: ...」として記録してください。",
+  "わからない・決められないは not_considered か partial、言語化困難は cannot_verbalize、特に希望がない／任せたいは no_preference、答えたくないは prefer_not_to_answer を使ってください。",
   "ただし、その後の別話題で同じスロットに関係する本人発話が出た場合は、明示回答だけで固定せず、後から出た根拠発話でsummaryを更新してください。",
-  "他の話題の発言からスロットを補う場合は、本人発話を根拠にし、summaryまたはevidence_utteranceの先頭に「(AI推測)」を付けてください。",
+  "他のThemeの発言からスロットを補う場合は、本人発話を根拠にし、summaryまたはevidence_utteranceの先頭に「(AI推測)」を付けてください。AI推測だけでansweredにしないでください。",
   "未解決課題・次回確認事項はACPスロットではありません。slotsには絶対に「未解決課題」を出力しないでください。",
   "明示的な「ない」を、AIの推測で別の希望や価値観に置き換えないでください。",
   "本人の発話を根拠として優先し、根拠のない想像では埋めないでください。",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
-  '{"slots":[{"slot_name":"価値観","status":"empty | partial | filled","summary":"...","evidence_utterance":"..."}]}',
+  '{"slots":[{"slot_name":"価値観","status":"unanswered | partial | answered | no_preference | not_considered | cannot_verbalize | prefer_not_to_answer","summary":"...","evidence_utterance":"..."}]}',
 ].join("\n");
 
 const SYSTEM_TOPIC_SWITCH = [
@@ -116,7 +126,7 @@ const SYSTEM_TOPIC_SWITCH = [
   "should_switch=false の場合でも、直前に明示的な「ない」があるなら、同じ「ありますか」形式ではなく、具体的経験・嫌だったこと・避けたいことなど別角度の確認にしてください。",
   "current_topic が filled に近い場合だけ、should_switch=true とし、next_topic へ移る短い前置きと最初の質問を返してください。",
   "ACP全体の未充足スロットは補助情報です。今の話題と無関係な領域へ急に飛ばないでください。",
-  "optional_slotsが未充足でも、core_slotsまたは本人の回答状態が確認できていれば話題転換を妨げないでください。",
+  "Aspectは質問ノルマではありません。optional_aspectsが未充足でも、core_aspectsまたは本人のresponseStateが確認できていれば話題転換を妨げないでください。",
   "高齢者を責めず、介護者がそのまま読み上げられる日本語にしてください。",
   "出力はJSONのみとしてください。",
   "",
@@ -126,7 +136,10 @@ const SYSTEM_TOPIC_SWITCH = [
 
 const SYSTEM_END_CHECK = [
   "あなたはACP対話の終了確認を支援するAIです。",
-  "会話ログとACPスロット状態を見て、今日の対話を終えてよいかを判定してください。",
+  "会話ログとTheme単位のACPスロット状態を見て、今日の対話を終えてよいかを判定してください。",
+  "すべてのAspectがfilledであることを終了条件にしてはいけません。",
+  "未検討・不明・言語化困難・希望なし・回答拒否は有効なresponseStateとして扱い、単純な未回答にしないでください。",
+  "任意Aspectや細かいAspectが未充足であることだけを理由に終了不可にしないでください。",
   "重要な未確認事項がある場合は、介護者が穏やかに確認できる一文を返してください。",
   "出力はJSONのみとしてください。",
   "",
@@ -137,11 +150,12 @@ const SYSTEM_END_CHECK = [
 const SYSTEM_FINAL_MINUTES = [
   "あなたはACP対話の実験用議事録を作成するAIです。",
   "会話ログとACPスロット状態から、研究者が確認しやすいMarkdown議事録とJSON要約を作ってください。",
-  "固定のお題は必ず議事録に含めてください。",
+  "固定のお題とTheme -> Aspect -> Evidenceの対応を意識して議事録に含めてください。",
   "AIが表示した質問や話題転換文は介入ログであり、会話ログや本人の根拠発話として扱わないでください。",
   "本人の希望と根拠発話を区別し、推測で断定しないでください。",
   "本人が「ない」「わからない」「言えない」と答えた項目は、欠落ではなく明示回答として記録してください。",
   "他の話題の発言から補った内容は「(AI推測)」を付け、根拠発話を併記してください。",
+  "本人発話にない内容を補完せず、関連発話はあるが明示確認されていない内容は本人の意思として断定しないでください。",
   "未解決課題・次回確認事項はACPスロットに含めず、json.auxiliary_items とMarkdownの補助項目に分けて記録してください。",
   "出力はJSONのみとしてください。",
   "",
@@ -464,47 +478,79 @@ function buildConversationPayload(context: ConversationContext) {
   const currentTopic = resolveTopic(context.currentTopic);
   const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
   const acpSlotStates = filterAcpSlotStates(context.slotStates);
+  const currentSlotState = findSlotState(acpSlotStates, currentTopic.slot_name);
 
   return {
     discussion_topic: DISCUSSION_TOPIC,
     session: getSessionMetadata(context),
     current_topic: {
+      id: currentTopic.id,
+      level: currentTopic.level,
       slot_name: currentTopic.slot_name,
       title: context.currentTopicTitle || currentTopic.title,
+      opening_question: currentTopic.openingQuestion,
       core_slots: currentTopic.coreSlots,
       optional_slots: currentTopic.optionalSlots,
       cross_topic_slots: currentTopic.crossTopicSlots,
+      aspects: getTopicAspects(currentTopic),
+      core_aspects: getCoreAspects(currentTopic),
+      optional_aspects: getOptionalAspects(currentTopic),
+      cross_topic_aspects: getCrossTopicAspects(currentTopic),
       max_follow_up_questions: currentTopic.maxFollowUpQuestions,
-      status:
-        findSlotState(acpSlotStates, currentTopic.slot_name)?.status ??
-        "unanswered",
-      summary: findSlotState(acpSlotStates, currentTopic.slot_name)?.summary ?? "",
+      status: currentSlotState?.status ?? "unanswered",
+      response_state: getSlotResponseState(currentSlotState),
+      summary: currentSlotState?.summary ?? "",
+      evidence_utterance: currentSlotState?.evidence_utterance ?? "",
     },
     next_topic: nextTopic
       ? {
+          id: nextTopic.id,
+          level: nextTopic.level,
           slot_name: nextTopic.slot_name,
           title: context.nextTopicTitle || nextTopic.title,
+          opening_question: nextTopic.openingQuestion,
         }
       : null,
     available_topics: DISCUSSION_TOPICS.map((topic) => ({
       id: topic.id,
+      level: topic.level,
       slot_name: topic.slot_name,
       title: topic.title,
+      opening_question: topic.openingQuestion,
       opening_prompt: topic.opening_prompt,
       core_slots: topic.coreSlots,
       optional_slots: topic.optionalSlots,
       cross_topic_slots: topic.crossTopicSlots,
+      aspects: getTopicAspects(topic),
+      core_aspects: getCoreAspects(topic),
+      optional_aspects: getOptionalAspects(topic),
+      cross_topic_aspects: getCrossTopicAspects(topic),
       max_follow_up_questions: topic.maxFollowUpQuestions,
     })),
     current_topic_transcript: renderTranscript(getTopicRelatedUtterances(context)),
     all_conversation_log: renderTranscript(context.utterances),
     recent_5_turns: renderTranscript(recentUtterances(context.utterances, 5)),
     slot_states: acpSlotStates,
+    theme_metrics: calculateThemeCompletenessMetrics(acpSlotStates),
     unfilled_slots: getUnfilledSlots(acpSlotStates).map((slot) => ({
       slot_name: slot.slot_name,
       status: slot.status,
+      response_state: getSlotResponseState(slot),
       summary: slot.summary,
     })),
+    theme_states: DISCUSSION_TOPICS.map((topic) => {
+      const slot = findSlotState(acpSlotStates, topic.slot_name);
+
+      return {
+        theme_id: topic.id,
+        slot_name: topic.slot_name,
+        level: topic.level,
+        status: slot?.status ?? "unanswered",
+        response_state: getSlotResponseState(slot),
+        summary: slot?.summary ?? "",
+        evidence_utterance: slot?.evidence_utterance ?? "",
+      };
+    }),
     explicit_none_answers: detectExplicitNoneResponses(context).map((response) => ({
       slot_name: response.slotName,
       evidence_utterance: formatSpeakerEvidence(response.utterance),
@@ -796,6 +842,24 @@ function fallbackNextQuestion(
   const preferredTopic = resolveTopic(currentTopic);
   const preferredSlot = preferredTopic.slot_name as AcpSlotName;
   const preferredState = findSlotState(slotStates, preferredSlot);
+  const followUpCount = countPromptsForSlot(utterances, preferredSlot);
+  const canCompletePreferredTheme =
+    Boolean(getSlotResponseState(preferredState)) ||
+    followUpCount >= preferredTopic.maxFollowUpQuestions;
+
+  if (canCompletePreferredTheme) {
+    return {
+      question:
+        "この話題については、今の時点のお考えを確認できたようです。必要であれば、次の話題へ移ってもよさそうです。",
+      transition_phrase: "",
+      target_slot: preferredSlot,
+      reason:
+        followUpCount >= preferredTopic.maxFollowUpQuestions
+          ? "この話題の追加質問上限に達したため、追加質問を停止しました。"
+          : "本人の回答状態が確認できているため、追加質問を停止しました。",
+      sensitivity: getSlotSensitivity(preferredSlot),
+    };
+  }
   const contextualSlot = ACP_SLOT_NAMES.find((slotName) =>
     hasKeyword(recentText, SLOT_KEYWORDS[slotName]),
   );
@@ -824,7 +888,11 @@ function fallbackTopicSwitch(context: ConversationContext): TopicSwitchResult {
   const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
   const currentSlot = currentTopic.slot_name as AcpSlotName;
   const currentState = findSlotState(context.slotStates, currentSlot);
-  const canSwitch = isTerminalSlotStatus(currentState?.status) && Boolean(nextTopic);
+  const followUpCount = countPromptsForSlot(context.utterances, currentSlot);
+  const canSwitch =
+    Boolean(nextTopic) &&
+    (Boolean(getSlotResponseState(currentState)) ||
+      followUpCount >= currentTopic.maxFollowUpQuestions);
 
   if (canSwitch && nextTopic) {
     const nextSlot = nextTopic.slot_name as AcpSlotName;
@@ -852,21 +920,13 @@ function fallbackTopicSwitch(context: ConversationContext): TopicSwitchResult {
 }
 
 function fallbackEndCheck(slotStates: AcpSlotState[]): EndCheckResult {
-  const importantSlots = [
-    "価値観",
-    "今後の生活希望",
-    "介護希望",
-    "医療処置への希望",
-    "代理意思決定者",
-  ];
-  const remaining = slotStates
-    .filter(
-      (slot) =>
-        importantSlots.includes(slot.slot_name) &&
-        !isTerminalSlotStatus(slot.status),
-    )
-    .map((slot) => slot.slot_name);
-  const canEnd = remaining.length <= 1;
+  const slotsByName = new Map(slotStates.map((slot) => [slot.slot_name, slot]));
+  const remaining = DISCUSSION_TOPICS.filter((topic) => {
+    const slot = slotsByName.get(topic.slot_name);
+    return !getSlotResponseState(slot);
+  }).map((topic) => topic.slot_name);
+  const metrics = calculateThemeCompletenessMetrics(slotStates);
+  const canEnd = remaining.length <= 1 || metrics.responseStateCoverage >= 0.8;
 
   return {
     can_end: canEnd,
@@ -874,8 +934,8 @@ function fallbackEndCheck(slotStates: AcpSlotState[]): EndCheckResult {
       ? "今日のところは大切なお話がかなり確認できています。最後に、言い残したことがないかだけ確認して終えてもよさそうです。"
       : "まだ大切な確認が少し残っています。無理のない範囲で、もう一つだけ確認してから終えると安心です。",
     reason: canEnd
-      ? "主要スロットの多くがfilledまたはpartialになっています。"
-      : "主要スロットに未確認または部分確認の項目が残っています。",
+      ? "Theme単位で本人の回答状態または根拠発話が概ね確認できています。Aspect未充足は終了不可の理由にしていません。"
+      : "Theme単位で本人の回答状態が未確認の項目が残っています。",
     remaining_slots: remaining,
   };
 }

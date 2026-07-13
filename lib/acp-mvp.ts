@@ -19,10 +19,21 @@ export const DISCUSSION_TOPIC = {
 export const DISCUSSION_TOPICS = [
   {
     id: "daily_continuity",
+    level: 1,
     slot_name: "今後の生活希望",
     title: "最近の生活と、これからも続けたいこと",
+    openingQuestion:
+      "今の暮らしの中で、大切にしていることや、これから先もできるだけ続けていきたいことはありますか。",
     opening_prompt:
       "最近の生活で、これからも続けたいことは何ですか。\nお二人で、話しやすいところから話してみてください。",
+    aspects: [
+      { id: "valued_routine", label: "大切にしている日課", priority: "core" },
+      { id: "continued_activity", label: "続けたい活動", priority: "core" },
+      { id: "reason", label: "なぜ大切なのか", priority: "core" },
+      { id: "relationships", label: "続けたい人間関係", priority: "optional" },
+      { id: "environment", label: "維持したい生活環境", priority: "optional" },
+      { id: "support", label: "支援を受けても続けたいこと", priority: "cross_topic" },
+    ],
     coreSlots: ["続けたいこと", "大切にしている理由"],
     optionalSlots: ["一緒に続けたい人", "続けたい場所", "必要な支援"],
     crossTopicSlots: ["希望する暮らし方", "自分らしさ", "大切な人間関係"],
@@ -30,10 +41,21 @@ export const DISCUSSION_TOPICS = [
   },
   {
     id: "values",
+    level: 2,
     slot_name: "価値観",
     title: "大切にしたいこと",
+    openingQuestion:
+      "これからも自分らしく暮らすために、大切にしたいことは何ですか。",
     opening_prompt:
       "普段の暮らしの中で、これだけは大切にしたいと思うことはありますか。",
+    aspects: [
+      { id: "values", label: "大切にしたい価値観", priority: "core" },
+      { id: "self_determination", label: "自分で決めたいこと", priority: "core" },
+      { id: "respect", label: "尊重してほしいこと", priority: "core" },
+      { id: "privacy", label: "プライバシー", priority: "optional" },
+      { id: "comfort", label: "心身の快適さ", priority: "optional" },
+      { id: "role", label: "生きがいや役割", priority: "cross_topic" },
+    ],
     coreSlots: ["大切にしたい価値観", "その理由"],
     optionalSlots: ["守りたい習慣", "避けたいこと"],
     crossTopicSlots: ["自分らしさ", "安心できる過ごし方"],
@@ -41,10 +63,21 @@ export const DISCUSSION_TOPICS = [
   },
   {
     id: "care_preference",
+    level: 3,
     slot_name: "介護希望",
     title: "手助けが必要になった時の希望",
+    openingQuestion:
+      "将来、生活の中で手助けが必要になったとしたら、どのような助け方なら受け入れやすいと思いますか。",
     opening_prompt:
       "もし暮らしの中で手助けが必要になった場合、どのような支援なら受け入れやすいですか。",
+    aspects: [
+      { id: "acceptable_support", label: "受け入れられる支援", priority: "core" },
+      { id: "unacceptable_support", label: "受け入れにくい支援", priority: "core" },
+      { id: "support_person", label: "誰に頼みたいか", priority: "optional" },
+      { id: "timing", label: "いつ頃から支援してほしいか", priority: "optional" },
+      { id: "decision_process", label: "支援内容をどう決めたいか", priority: "cross_topic" },
+      { id: "anxiety", label: "支援への不安", priority: "cross_topic" },
+    ],
     coreSlots: ["受け入れやすい支援", "避けたい支援"],
     optionalSlots: ["支援してほしい人", "自分で続けたいこと"],
     crossTopicSlots: ["支援への不安", "希望する暮らし方"],
@@ -52,10 +85,20 @@ export const DISCUSSION_TOPICS = [
   },
   {
     id: "medical_preference",
+    level: 4,
     slot_name: "医療処置への希望",
     title: "医療や治療について大切にしたいこと",
+    openingQuestion:
+      "もし体調が大きく変わったとき、医療や治療について大切にしたいことはありますか。",
     opening_prompt:
       "治療や医療を受ける場面で、大切にしたいことや避けたいことはありますか。",
+    aspects: [
+      { id: "medical_values", label: "医療で大切にしたいこと", priority: "core" },
+      { id: "avoid_treatment", label: "避けたい医療", priority: "core" },
+      { id: "comfort", label: "安心や苦痛軽減など大切なこと", priority: "core" },
+      { id: "consultation", label: "相談したい相手", priority: "optional" },
+      { id: "conditions", label: "状況によって変わる条件", priority: "cross_topic" },
+    ],
     coreSlots: ["医療で大切にしたいこと", "避けたい医療"],
     optionalSlots: ["相談したい相手", "判断時に重視する条件"],
     crossTopicSlots: ["支援への不安", "家族への希望"],
@@ -63,10 +106,21 @@ export const DISCUSSION_TOPICS = [
   },
   {
     id: "proxy_decision_maker",
+    level: 4,
     slot_name: "代理意思決定者",
     title: "相談して決めてほしい人",
+    openingQuestion:
+      "もし自分で医療や介護について決めることが難しくなったとき、誰に相談してほしいと思いますか。",
     opening_prompt:
       "ご自身で判断しにくい時、医療や介護のことを誰に相談して決めてほしいですか。",
+    aspects: [
+      { id: "trusted_person", label: "信頼できる人", priority: "core" },
+      { id: "trust_reason", label: "信頼する理由", priority: "core" },
+      { id: "values_to_share", label: "その人に知っておいてほしい価値観", priority: "core" },
+      { id: "involvement", label: "どのように関わってほしいか", priority: "optional" },
+      { id: "multiple_people", label: "複数人で相談してほしいか", priority: "optional" },
+      { id: "hard_to_decide", label: "決めにくい理由", priority: "cross_topic" },
+    ],
     coreSlots: ["相談して決めてほしい人"],
     optionalSlots: ["その人に伝えたい判断基準", "避けてほしい決め方"],
     crossTopicSlots: ["家族への希望", "大切な人間関係"],
@@ -74,10 +128,21 @@ export const DISCUSSION_TOPICS = [
   },
   {
     id: "family_message",
+    level: 3,
     slot_name: "家族に伝えたいこと",
     title: "家族に伝えておきたいこと",
+    openingQuestion:
+      "将来の暮らしや支援について、家族に伝えておきたいことはありますか。",
     opening_prompt:
       "ご家族に、今のうちに伝えておきたいことやお願いしておきたいことはありますか。",
+    aspects: [
+      { id: "request", label: "家族にお願いしたいこと", priority: "core" },
+      { id: "burden_concern", label: "家族への負担の懸念", priority: "core" },
+      { id: "feelings", label: "家族への気持ち", priority: "core" },
+      { id: "expected_judgement", label: "家族に期待する判断", priority: "optional" },
+      { id: "avoidance", label: "家族にしてほしくないこと", priority: "optional" },
+      { id: "unspoken", label: "まだ話せていないこと", priority: "cross_topic" },
+    ],
     coreSlots: ["家族に伝えたいこと"],
     optionalSlots: ["お願いしたいこと", "感謝や気がかり"],
     crossTopicSlots: ["家族への希望", "大切な人間関係"],
@@ -85,10 +150,20 @@ export const DISCUSSION_TOPICS = [
   },
   {
     id: "worries",
+    level: 3,
     slot_name: "不安・心配",
     title: "不安や心配",
+    openingQuestion:
+      "これからのことで、不安に感じていることや、まだ話せていないことはありますか。",
     opening_prompt:
       "これからのことで、不安に感じていることや心配なことはありますか。",
+    aspects: [
+      { id: "concern", label: "不安や心配の内容", priority: "core" },
+      { id: "burden", label: "負担の懸念", priority: "core" },
+      { id: "relief_support", label: "不安を軽くする支援", priority: "optional" },
+      { id: "consultation", label: "相談したい相手", priority: "optional" },
+      { id: "unspoken", label: "まだ話せていないこと", priority: "cross_topic" },
+    ],
     coreSlots: ["不安や心配の内容"],
     optionalSlots: ["不安を軽くする支援", "相談したい相手"],
     crossTopicSlots: ["支援への不安", "安心できる過ごし方"],
@@ -96,10 +171,20 @@ export const DISCUSSION_TOPICS = [
   },
   {
     id: "life_sustaining_treatment",
+    level: 4,
     slot_name: "延命治療への考え",
     title: "命に関わる治療についての考え",
+    openingQuestion:
+      "もし命に関わる状態になった時、医療や過ごし方について今の時点で考えていることはありますか。",
     opening_prompt:
       "もし命に関わる状態になった時、延命治療について今の時点で考えていることはありますか。",
+    aspects: [
+      { id: "current_thought", label: "延命治療への現在の考え", priority: "core" },
+      { id: "condition", label: "重視する状態や条件", priority: "core" },
+      { id: "avoid_state", label: "避けたい状態", priority: "core" },
+      { id: "consult_person", label: "判断を相談したい人", priority: "optional" },
+      { id: "not_ready", label: "まだ考えられないこと", priority: "cross_topic" },
+    ],
     coreSlots: ["延命治療への現在の考え"],
     optionalSlots: ["判断を相談したい人", "重視する状態や条件"],
     crossTopicSlots: ["医療への希望", "家族への希望"],
@@ -107,10 +192,21 @@ export const DISCUSSION_TOPICS = [
   },
   {
     id: "preferred_final_place",
+    level: 4,
     slot_name: "最期を迎えたい場所",
     title: "最期の時期を過ごしたい場所",
+    openingQuestion:
+      "もし体調が大きく変わったとき、どこで、誰と、どのように過ごせると安心だと思いますか。",
     opening_prompt:
       "もし最期の時期を考えるとしたら、どこで誰と過ごせると安心だと思いますか。",
+    aspects: [
+      { id: "place", label: "過ごしたい場所", priority: "core" },
+      { id: "person", label: "一緒にいてほしい人", priority: "core" },
+      { id: "environment", label: "望む環境や雰囲気", priority: "core" },
+      { id: "comfort", label: "安心や苦痛軽減など大切なこと", priority: "optional" },
+      { id: "avoid_state", label: "避けたい状態", priority: "optional" },
+      { id: "conditional", label: "状況によって変わる条件", priority: "cross_topic" },
+    ],
     coreSlots: ["最期を過ごしたい場所", "一緒にいたい人"],
     optionalSlots: ["安心できる環境", "避けたい場所"],
     crossTopicSlots: ["安心できる過ごし方", "大切な人間関係"],
@@ -129,6 +225,38 @@ export type SlotStatus =
   | "prefer_not_to_answer"
   | "not_asked";
 export type SlotImportance = "core" | "optional";
+export type ThemeLevel = 1 | 2 | 3 | 4;
+export type AspectPriority = "core" | "optional" | "cross_topic";
+export type AspectStatus = "empty" | "partial" | "filled";
+export type ResponseState =
+  | "expressed"
+  | "not_considered"
+  | "no_preference"
+  | "uncertain"
+  | "difficulty_verbalizing"
+  | "declined"
+  | null;
+export type AspectDefinition = {
+  id: string;
+  label: string;
+  priority: AspectPriority;
+};
+export type EvidenceReference = {
+  themeId: string;
+  aspectId: string;
+  evidenceUtteranceId?: string;
+  evidenceText: string;
+  speaker?: string;
+  sourceTopicId?: string;
+  inferred: boolean;
+  confidence?: number;
+};
+export type ThemeCompletenessMetrics = {
+  themeReachRate: number;
+  responseStateCoverage: number;
+  valueExpressionRate: number;
+  evidenceCoverage: number;
+};
 export type Speaker = "caregiver" | "elder" | "family";
 export type ButtonType =
   | "next_question"
@@ -302,6 +430,69 @@ export function canCompleteTopicSlot(slot: AcpSlotState | undefined) {
   return slot ? isTerminalSlotStatus(slot.status) : false;
 }
 
+export function getSlotResponseState(slot: AcpSlotState | undefined): ResponseState {
+  switch (slot?.status) {
+    case "answered":
+      return "expressed";
+    case "no_preference":
+      return "no_preference";
+    case "not_considered":
+      return "not_considered";
+    case "cannot_verbalize":
+      return "difficulty_verbalizing";
+    case "prefer_not_to_answer":
+      return "declined";
+    case "partial":
+      return "uncertain";
+    default:
+      return null;
+  }
+}
+
+export function getTopicAspects(topic: (typeof DISCUSSION_TOPICS)[number]) {
+  return topic.aspects;
+}
+
+export function getCoreAspects(topic: (typeof DISCUSSION_TOPICS)[number]) {
+  return topic.aspects.filter((aspect) => aspect.priority === "core");
+}
+
+export function getOptionalAspects(topic: (typeof DISCUSSION_TOPICS)[number]) {
+  return topic.aspects.filter((aspect) => aspect.priority === "optional");
+}
+
+export function getCrossTopicAspects(topic: (typeof DISCUSSION_TOPICS)[number]) {
+  return topic.aspects.filter((aspect) => aspect.priority === "cross_topic");
+}
+
+export function calculateThemeCompletenessMetrics(
+  slots: AcpSlotState[],
+): ThemeCompletenessMetrics {
+  const themeCount = DISCUSSION_TOPICS.length;
+  const slotsByName = new Map(slots.map((slot) => [slot.slot_name, slot]));
+  const reachedThemes = DISCUSSION_TOPICS.filter((topic) => {
+    const slot = slotsByName.get(topic.slot_name);
+    return Boolean(slot && slot.status !== "unanswered" && slot.status !== "not_asked");
+  });
+  const responseStateThemes = DISCUSSION_TOPICS.filter((topic) =>
+    Boolean(getSlotResponseState(slotsByName.get(topic.slot_name))),
+  );
+  const valueExpressionThemes = DISCUSSION_TOPICS.filter(
+    (topic) => getSlotResponseState(slotsByName.get(topic.slot_name)) === "expressed",
+  );
+  const evidenceThemes = DISCUSSION_TOPICS.filter((topic) => {
+    const slot = slotsByName.get(topic.slot_name);
+    return Boolean(slot?.evidence_utterance?.trim());
+  });
+
+  return {
+    themeReachRate: ratio(reachedThemes.length, themeCount),
+    responseStateCoverage: ratio(responseStateThemes.length, themeCount),
+    valueExpressionRate: ratio(valueExpressionThemes.length, themeCount),
+    evidenceCoverage: ratio(evidenceThemes.length, themeCount),
+  };
+}
+
 export function resolveDiscussionTopic(slotName: string | undefined) {
   return (
     DISCUSSION_TOPICS.find((topic) => topic.slot_name === slotName) ??
@@ -423,6 +614,10 @@ function truncate(text: string, maxLength: number) {
 
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
+function ratio(value: number, total: number) {
+  return total > 0 ? value / total : 0;
 }
 
 export function toJsonValue<T>(value: T): T {
