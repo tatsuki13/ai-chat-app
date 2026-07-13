@@ -22,6 +22,7 @@ import {
   getUnfilledSlots,
   isTerminalSlotStatus,
   mergeSlotStates,
+  normalizeSlotName,
   normalizeSlotStatus,
   recentUtterances,
   renderTranscript,
@@ -123,7 +124,7 @@ const SYSTEM_UPDATE_SLOTS = [
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
-  '{"slots":[{"slot_name":"価値観","status":"unanswered | partial | answered | no_preference | not_considered | cannot_verbalize | prefer_not_to_answer","summary":"...","evidence_utterance":"..."}]}',
+  '{"slots":[{"slot_name":"今の生活で大切にしていること","status":"unanswered | partial | answered | no_preference | not_considered | cannot_verbalize | prefer_not_to_answer","summary":"...","evidence_utterance":"..."}]}',
 ].join("\n");
 
 const SYSTEM_TOPIC_SWITCH = [
@@ -174,31 +175,31 @@ const SYSTEM_FINAL_MINUTES = [
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
-  '{"markdown":"# ACP対話 議事録\\n...","json":{"generated_at":"...","session":{"id":"...","participant_code":"..."},"summary":"...","slots":[...],"auxiliary_items":[{"item_name":"未解決課題・次回確認事項","summary":"...","evidence_utterance":"..."}],"utterances":[...]}}',
+  '{"markdown":"# ACP対話 議事録\\n...","json":{"generated_at":"...","session":{"id":"...","participant_code":"..."},"summary":"...","themes":[{"theme_id":"future_life_continuity","title":"...","level":2,"response_state":"expressed","summary":"...","evidence_utterance":"...","aspects":[{"aspect_id":"continued_activity","label":"...","status":"partial | filled | empty","evidence":[...]}]}],"theme_metrics":{"themeReachRate":0,"responseStateCoverage":0,"valueExpressionRate":0,"evidenceCoverage":0},"slots":[...],"auxiliary_items":[{"item_name":"未解決課題・次回確認事項","summary":"...","evidence_utterance":"..."}],"utterances":[...]}}',
 ].join("\n");
 
 const SLOT_KEYWORDS: Record<AcpSlotName, string[]> = {
-  価値観: ["大事", "大切", "好き", "楽しみ", "安心", "自分らし", "家族", "友人"],
-  今後の生活希望: ["暮らし", "生活", "家", "自宅", "施設", "今後", "これから", "続けたい"],
-  介護希望: ["介護", "手伝", "支援", "世話", "訪問", "ヘルパー", "負担", "助け"],
-  医療処置への希望: ["治療", "医療", "入院", "手術", "薬", "痛み", "病院", "処置"],
-  延命治療への考え: ["延命", "人工呼吸", "心臓マッサージ", "蘇生", "胃ろう", "管", "長く"],
-  最期を迎えたい場所: ["最期", "最後", "看取り", "亡く", "逝く", "家で", "病院で", "ホスピス"],
-  代理意思決定者: ["決めて", "判断", "相談", "任せ", "代理", "娘", "息子", "配偶者", "妻", "夫"],
-  家族に伝えたいこと: ["伝えたい", "言っておきたい", "ありがとう", "お願い", "家族", "迷惑"],
-  "不安・心配": ["不安", "心配", "怖い", "困る", "迷う", "負担", "一人", "孤独"],
+  今の生活で大切にしていること: ["大事", "大切", "好き", "楽しみ", "日課", "趣味", "役割", "地域"],
+  これからも続けたいこと: ["続けたい", "これから", "今後", "暮らし", "生活", "自宅", "環境", "失いたくない"],
+  自分らしく暮らすために大切なこと: ["自分らし", "決めたい", "尊重", "プライバシー", "生きがい", "役割"],
+  手助けが必要になったときの希望: ["介護", "手伝", "支援", "世話", "訪問", "ヘルパー", "助け", "不安"],
+  家族に伝えておきたいこと: ["家族", "伝えたい", "言っておきたい", "ありがとう", "お願い", "負担", "迷惑"],
+  自分で決められないときに相談してほしい人: ["決めて", "判断", "相談", "任せ", "代理", "信頼", "娘", "息子", "妻", "夫"],
 };
 
 const FALLBACK_QUESTIONS: Record<AcpSlotName, string> = {
-  価値観: "普段の暮らしの中で、これだけは大切にしたいと思うことはありますか？",
-  今後の生活希望: "これからの生活で、できるだけ続けたい暮らし方はありますか？",
-  介護希望: "もし手助けが必要になった場合、どのような支援なら受け入れやすいですか？",
-  医療処置への希望: "治療や医療を受ける場面で、大切にしたいことや避けたいことはありますか？",
-  延命治療への考え: "もし命に関わる状態になった時、延命治療について今の時点で考えていることはありますか？",
-  最期を迎えたい場所: "もし最期の時期を考えるとしたら、どこで誰と過ごせると安心だと思いますか？",
-  代理意思決定者: "ご自身で判断しにくい時、医療や介護のことを誰に相談して決めてほしいですか？",
-  家族に伝えたいこと: "ご家族に、今のうちに伝えておきたいことやお願いしておきたいことはありますか？",
-  "不安・心配": "これからのことで、不安に感じていることや心配なことはありますか？",
+  今の生活で大切にしていること:
+    "今の暮らしの中で、大切にしていることや楽しみにしていることはありますか？",
+  これからも続けたいこと:
+    "これから先も、できるだけ続けていきたいことはありますか？",
+  自分らしく暮らすために大切なこと:
+    "これからも自分らしく暮らすために、大切にしたいことは何ですか？",
+  手助けが必要になったときの希望:
+    "将来、生活の中で手助けが必要になったとしたら、どのような助け方なら受け入れやすいと思いますか？",
+  家族に伝えておきたいこと:
+    "将来の暮らしや支援について、家族に伝えておきたいことはありますか？",
+  自分で決められないときに相談してほしい人:
+    "もし自分で医療や介護について決めることが難しくなったとき、誰に相談してほしいと思いますか？",
 };
 
 const UNCERTAINTY_SUMMARY_PREFIX =
@@ -383,8 +384,8 @@ function normalizeSlotUpdateResult(
     if (!item || typeof item !== "object") return;
 
     const raw = item as Record<string, unknown>;
-    const slotName = typeof raw.slot_name === "string" ? raw.slot_name.trim() : "";
-    if (!ACP_SLOT_NAMES.includes(slotName as AcpSlotName)) return;
+    const rawSlotName = typeof raw.slot_name === "string" ? raw.slot_name.trim() : "";
+    const slotName = normalizeSlotName(rawSlotName);
     const baseSlot = fallbackByName.get(slotName) ?? currentByName.get(slotName);
 
     updatesByName.set(slotName, {
@@ -641,6 +642,11 @@ function ensureFinalMinutesIncludeTopic(
   minutes: FinalMinutesResult,
   context: ConversationContext,
 ): FinalMinutesResult {
+  const fallback = buildFallbackMinutes(
+    context.utterances,
+    context.slotStates,
+    getSessionMetadata(context),
+  );
   const topicBlock = [
     "## 話し合ったお題",
     "",
@@ -667,13 +673,19 @@ function ensureFinalMinutesIncludeTopic(
       discussion_topic: DISCUSSION_TOPIC,
       utterances: context.utterances,
       slots: filterAcpSlotStates(context.slotStates),
+      themes: Array.isArray(rawJson.themes)
+        ? (rawJson.themes as FinalMinutesResult["json"]["themes"])
+        : fallback.json.themes,
+      optional_themes: Array.isArray(rawJson.optional_themes)
+        ? (rawJson.optional_themes as FinalMinutesResult["json"]["optional_themes"])
+        : fallback.json.optional_themes,
+      theme_metrics:
+        rawJson.theme_metrics && typeof rawJson.theme_metrics === "object"
+          ? (rawJson.theme_metrics as FinalMinutesResult["json"]["theme_metrics"])
+          : fallback.json.theme_metrics,
       auxiliary_items: Array.isArray(rawJson.auxiliary_items)
         ? (rawJson.auxiliary_items as AuxiliaryMinutesItem[])
-        : buildFallbackMinutes(
-            context.utterances,
-            context.slotStates,
-            getSessionMetadata(context),
-          ).json.auxiliary_items,
+        : fallback.json.auxiliary_items,
       summary:
         typeof rawJson.summary === "string"
           ? rawJson.summary
@@ -965,7 +977,9 @@ function fallbackTopicSwitch(context: ConversationContext): TopicSwitchResult {
     };
   }
 
-  const question = FALLBACK_QUESTIONS[currentSlot] ?? FALLBACK_QUESTIONS.価値観;
+  const question =
+    FALLBACK_QUESTIONS[currentSlot] ??
+    FALLBACK_QUESTIONS["今の生活で大切にしていること"];
 
   return {
     should_switch: false,
@@ -1016,8 +1030,8 @@ function filterAcpSlotStates(slots: AcpSlotState[]) {
 function normalizeAcpTargetSlot(value: unknown, fallback: string) {
   const text = typeof value === "string" ? value.trim() : "";
 
-  if (ACP_SLOT_NAMES.includes(text as AcpSlotName)) return text;
-  if (ACP_SLOT_NAMES.includes(fallback as AcpSlotName)) return fallback;
+  if (text) return normalizeSlotName(text);
+  if (fallback) return normalizeSlotName(fallback);
 
   return ACP_SLOT_NAMES[0];
 }
@@ -1036,9 +1050,7 @@ function normalizeRemainingSlots(value: unknown, fallback: string[]) {
 
   const slots = value
     .map(String)
-    .filter((slotName): slotName is AcpSlotName =>
-      ACP_SLOT_NAMES.includes(slotName as AcpSlotName),
-    );
+    .map((slotName) => normalizeSlotName(slotName));
 
   return slots.length > 0 || fallback.length === 0 ? slots : fallback;
 }
@@ -1077,10 +1089,9 @@ function isQuestionRelevantToCurrentTopic(
 function detectExplicitNoneResponses(
   context: Pick<ConversationContext, "utterances" | "slotStates" | "currentTopic">,
 ): ExplicitNoneResponse[] {
-  const currentTopic =
-    context.currentTopic && ACP_SLOT_NAMES.includes(context.currentTopic as AcpSlotName)
-      ? (context.currentTopic as AcpSlotName)
-      : null;
+  const currentTopic = context.currentTopic
+    ? normalizeSlotName(context.currentTopic)
+    : null;
   const latestIndex = context.utterances.length - 1;
   const responsesBySlot = new Map<AcpSlotName, ExplicitNoneResponse>();
 
@@ -1108,10 +1119,9 @@ function detectExplicitNoneResponses(
 function detectUncertainResponses(
   context: Pick<ConversationContext, "utterances" | "slotStates" | "currentTopic">,
 ): UncertainResponse[] {
-  const currentTopic =
-    context.currentTopic && ACP_SLOT_NAMES.includes(context.currentTopic as AcpSlotName)
-      ? (context.currentTopic as AcpSlotName)
-      : null;
+  const currentTopic = context.currentTopic
+    ? normalizeSlotName(context.currentTopic)
+    : null;
   const latestIndex = context.utterances.length - 1;
   const responsesBySlot = new Map<AcpSlotName, UncertainResponse>();
 
@@ -1292,7 +1302,7 @@ function createExplicitNoneSlotState(
     slot_name: slotName,
     status: "no_preference",
     summary:
-      slotName === "価値観"
+      slotName === "今の生活で大切にしていること"
         ? "明示回答: 本人は、今は特に大切にしていることとして思い当たるものはない／言語化しにくいと話している。"
         : `明示回答: 本人は「${slotName}」について、今は特に思い当たることはない／言語化しにくいと話している。`,
     evidence_utterance: formatSpeakerEvidence(utterance),
@@ -1366,11 +1376,14 @@ function getTopicRelatedUtterances(context: ConversationContext) {
 }
 
 function getSlotSensitivity(slotName: AcpSlotName): Sensitivity {
-  if (slotName === "延命治療への考え" || slotName === "最期を迎えたい場所") {
+  if (slotName === "自分で決められないときに相談してほしい人") {
     return "high";
   }
 
-  if (slotName === "医療処置への希望" || slotName === "代理意思決定者") {
+  if (
+    slotName === "手助けが必要になったときの希望" ||
+    slotName === "家族に伝えておきたいこと"
+  ) {
     return "medium";
   }
 
