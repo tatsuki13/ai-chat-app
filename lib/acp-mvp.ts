@@ -214,6 +214,146 @@ export const DISCUSSION_TOPICS = [
   },
 ] as const;
 
+export const RESEARCH_THEMES = [
+  {
+    id: "current_life_values",
+    level: 1,
+    title: "今の生活で大切にしていること",
+    openingQuestion:
+      "今の暮らしの中で、大切にしていることや楽しみにしていることはありますか。",
+    sourceSlotNames: ["価値観", "今後の生活希望"],
+    aspects: [
+      { id: "valued_routine", label: "大切にしている日課", priority: "core" },
+      { id: "hobby_or_joy", label: "趣味や楽しみ", priority: "core" },
+      { id: "relationships", label: "大切な人間関係", priority: "optional" },
+      { id: "role", label: "家族や地域での役割", priority: "optional" },
+      { id: "attachment", label: "自宅や地域への愛着", priority: "optional" },
+      { id: "reason", label: "なぜ大切なのか", priority: "core" },
+    ],
+    maxFollowUpQuestions: 1,
+  },
+  {
+    id: "future_life_continuity",
+    level: 2,
+    title: "これからも続けたいこと",
+    openingQuestion:
+      "これから先も、できるだけ続けていきたいことはありますか。",
+    sourceSlotNames: ["今後の生活希望"],
+    aspects: [
+      { id: "continued_activity", label: "続けたい活動", priority: "core" },
+      { id: "continued_relationship", label: "続けたい人間関係", priority: "optional" },
+      { id: "self_continuation", label: "自分で続けたいこと", priority: "core" },
+      { id: "preferred_environment", label: "維持したい生活環境", priority: "optional" },
+      { id: "acceptable_change", label: "変わっても受け入れられること", priority: "optional" },
+      { id: "not_want_to_lose", label: "失いたくないこと", priority: "core" },
+      { id: "reason", label: "続けたい理由", priority: "core" },
+    ],
+    maxFollowUpQuestions: 1,
+  },
+  {
+    id: "selfhood",
+    level: 2,
+    title: "自分らしく暮らすために大切なこと",
+    openingQuestion:
+      "これからも自分らしく暮らすために、大切にしたいことは何ですか。",
+    sourceSlotNames: ["価値観"],
+    aspects: [
+      { id: "self_determination", label: "自分で決めたいこと", priority: "core" },
+      { id: "privacy", label: "プライバシー", priority: "optional" },
+      { id: "respect", label: "尊重してほしいこと", priority: "core" },
+      { id: "connection", label: "人とのつながり", priority: "optional" },
+      { id: "comfort", label: "心身の快適さ", priority: "optional" },
+      { id: "purpose_or_role", label: "生きがいや役割", priority: "core" },
+      { id: "lifestyle", label: "自分らしい生活様式", priority: "core" },
+    ],
+    maxFollowUpQuestions: 1,
+  },
+  {
+    id: "care_support",
+    level: 3,
+    title: "手助けが必要になったときの希望",
+    openingQuestion:
+      "将来、生活の中で手助けが必要になったとしたら、どのような助け方なら受け入れやすいと思いますか。",
+    sourceSlotNames: ["介護希望", "不安・心配"],
+    aspects: [
+      { id: "acceptable_support", label: "受け入れられる支援", priority: "core" },
+      { id: "unacceptable_support", label: "受け入れにくい支援", priority: "core" },
+      { id: "support_person", label: "誰に頼みたいか", priority: "optional" },
+      { id: "timing", label: "いつ頃から支援してほしいか", priority: "optional" },
+      { id: "decision_process", label: "支援内容をどう決めたいか", priority: "cross_topic" },
+      { id: "self_scope", label: "自分で続けたい範囲", priority: "core" },
+      { id: "anxiety", label: "支援への不安", priority: "cross_topic" },
+    ],
+    maxFollowUpQuestions: 1,
+  },
+  {
+    id: "family_communication",
+    level: 3,
+    title: "家族に伝えておきたいこと",
+    openingQuestion:
+      "将来の暮らしや支援について、家族に伝えておきたいことはありますか。",
+    sourceSlotNames: ["家族に伝えたいこと", "不安・心配"],
+    aspects: [
+      { id: "request", label: "家族にお願いしたいこと", priority: "core" },
+      { id: "burden_concern", label: "家族への負担の懸念", priority: "core" },
+      { id: "feelings", label: "家族への気持ち", priority: "core" },
+      { id: "expected_judgement", label: "家族に期待する判断", priority: "optional" },
+      { id: "avoidance", label: "家族にしてほしくないこと", priority: "optional" },
+      { id: "non_family_support", label: "家族以外に頼れる人", priority: "optional" },
+      { id: "unspoken", label: "まだ話せていないこと", priority: "cross_topic" },
+    ],
+    maxFollowUpQuestions: 1,
+  },
+  {
+    id: "proxy_decision_support",
+    level: 4,
+    title: "自分で決められないときに相談してほしい人",
+    openingQuestion:
+      "もし自分で医療や介護について決めることが難しくなったとき、誰に相談してほしいと思いますか。",
+    sourceSlotNames: ["代理意思決定者"],
+    aspects: [
+      { id: "trusted_person", label: "信頼できる人", priority: "core" },
+      { id: "trust_reason", label: "信頼する理由", priority: "core" },
+      { id: "values_to_share", label: "その人に知っておいてほしい価値観", priority: "core" },
+      { id: "involvement", label: "どのように関わってほしいか", priority: "optional" },
+      { id: "multiple_people", label: "複数人で相談してほしいか", priority: "optional" },
+      { id: "not_decided", label: "特定の人を決めていない", priority: "cross_topic" },
+      { id: "hard_to_decide", label: "決めにくい理由", priority: "cross_topic" },
+    ],
+    maxFollowUpQuestions: 1,
+  },
+] as const;
+
+export const OPTIONAL_RESEARCH_THEMES = [
+  {
+    id: "changed_health_comfort",
+    level: 4,
+    title: "体調が大きく変わったときの安心できる過ごし方",
+    openingQuestion:
+      "もし体調が大きく変わったとき、どこで、誰と、どのように過ごせると安心だと思いますか。",
+    sourceSlotNames: [
+      "医療処置への希望",
+      "延命治療への考え",
+      "最期を迎えたい場所",
+    ],
+    aspects: [
+      { id: "place", label: "過ごしたい場所", priority: "core" },
+      { id: "person", label: "一緒にいてほしい人", priority: "core" },
+      { id: "environment", label: "望む環境や雰囲気", priority: "core" },
+      { id: "comfort", label: "安心や苦痛軽減など大切なこと", priority: "core" },
+      { id: "avoid_state", label: "避けたい状態", priority: "optional" },
+      { id: "not_ready", label: "まだ考えられないこと", priority: "cross_topic" },
+      { id: "conditional", label: "状況によって変わる条件", priority: "cross_topic" },
+    ],
+    maxFollowUpQuestions: 1,
+  },
+] as const;
+
+export const ALL_RESEARCH_THEMES = [
+  ...RESEARCH_THEMES,
+  ...OPTIONAL_RESEARCH_THEMES,
+] as const;
+
 export type AcpSlotName = (typeof ACP_SLOT_NAMES)[number];
 export type SlotStatus =
   | "unanswered"
@@ -465,25 +605,104 @@ export function getCrossTopicAspects(topic: (typeof DISCUSSION_TOPICS)[number]) 
   return topic.aspects.filter((aspect) => aspect.priority === "cross_topic");
 }
 
+export function getResearchThemeAspects(
+  theme: (typeof ALL_RESEARCH_THEMES)[number],
+) {
+  return theme.aspects;
+}
+
+export function getCoreResearchThemeAspects(
+  theme: (typeof ALL_RESEARCH_THEMES)[number],
+) {
+  return theme.aspects.filter((aspect) => aspect.priority === "core");
+}
+
+export function getOptionalResearchThemeAspects(
+  theme: (typeof ALL_RESEARCH_THEMES)[number],
+) {
+  return theme.aspects.filter((aspect) => aspect.priority === "optional");
+}
+
+export function getCrossTopicResearchThemeAspects(
+  theme: (typeof ALL_RESEARCH_THEMES)[number],
+) {
+  return theme.aspects.filter((aspect) => aspect.priority === "cross_topic");
+}
+
+export function resolveResearchThemeForSlot(slotName: string | undefined) {
+  return (
+    ALL_RESEARCH_THEMES.find((theme) =>
+      theme.sourceSlotNames.some((sourceSlotName) => sourceSlotName === slotName),
+    ) ?? RESEARCH_THEMES[0]
+  );
+}
+
+export function getResearchThemeSourceSlots(
+  theme: (typeof ALL_RESEARCH_THEMES)[number],
+  slots: AcpSlotState[],
+) {
+  return slots.filter((slot) =>
+    theme.sourceSlotNames.some((sourceSlotName) => sourceSlotName === slot.slot_name),
+  );
+}
+
+export function getResearchThemeResponseState(
+  theme: (typeof ALL_RESEARCH_THEMES)[number],
+  slots: AcpSlotState[],
+): ResponseState {
+  const states = getResearchThemeSourceSlots(theme, slots)
+    .map((slot) => getSlotResponseState(slot))
+    .filter((state): state is Exclude<ResponseState, null> => state !== null);
+
+  return (
+    states.find((state) => state === "expressed") ??
+    states.find((state) => state === "no_preference") ??
+    states.find((state) => state === "not_considered") ??
+    states.find((state) => state === "difficulty_verbalizing") ??
+    states.find((state) => state === "declined") ??
+    states[0] ??
+    null
+  );
+}
+
+export function getResearchThemeEvidence(
+  theme: (typeof ALL_RESEARCH_THEMES)[number],
+  slots: AcpSlotState[],
+) {
+  return getResearchThemeSourceSlots(theme, slots)
+    .map((slot) => slot.evidence_utterance.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function getResearchThemeSummary(
+  theme: (typeof ALL_RESEARCH_THEMES)[number],
+  slots: AcpSlotState[],
+) {
+  return getResearchThemeSourceSlots(theme, slots)
+    .map((slot) => slot.summary.trim())
+    .filter((summary) => summary && summary !== "未確認")
+    .join("\n");
+}
+
 export function calculateThemeCompletenessMetrics(
   slots: AcpSlotState[],
 ): ThemeCompletenessMetrics {
-  const themeCount = DISCUSSION_TOPICS.length;
-  const slotsByName = new Map(slots.map((slot) => [slot.slot_name, slot]));
-  const reachedThemes = DISCUSSION_TOPICS.filter((topic) => {
-    const slot = slotsByName.get(topic.slot_name);
-    return Boolean(slot && slot.status !== "unanswered" && slot.status !== "not_asked");
+  const themeCount = RESEARCH_THEMES.length;
+  const reachedThemes = RESEARCH_THEMES.filter((theme) => {
+    return getResearchThemeSourceSlots(theme, slots).some(
+      (slot) => slot.status !== "unanswered" && slot.status !== "not_asked",
+    );
   });
-  const responseStateThemes = DISCUSSION_TOPICS.filter((topic) =>
-    Boolean(getSlotResponseState(slotsByName.get(topic.slot_name))),
+  const responseStateThemes = RESEARCH_THEMES.filter((theme) =>
+    Boolean(getResearchThemeResponseState(theme, slots)),
   );
-  const valueExpressionThemes = DISCUSSION_TOPICS.filter(
-    (topic) => getSlotResponseState(slotsByName.get(topic.slot_name)) === "expressed",
+  const valueExpressionThemes = RESEARCH_THEMES.filter(
+    (theme) => getResearchThemeResponseState(theme, slots) === "expressed",
   );
-  const evidenceThemes = DISCUSSION_TOPICS.filter((topic) => {
-    const slot = slotsByName.get(topic.slot_name);
-    return Boolean(slot?.evidence_utterance?.trim());
-  });
+  const evidenceThemes = RESEARCH_THEMES.filter((theme) =>
+    Boolean(getResearchThemeEvidence(theme, slots)),
+  );
 
   return {
     themeReachRate: ratio(reachedThemes.length, themeCount),

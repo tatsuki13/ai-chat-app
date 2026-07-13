@@ -3,8 +3,17 @@ import {
   ACP_SLOT_NAMES,
   DISCUSSION_TOPIC,
   DISCUSSION_TOPICS,
+  OPTIONAL_RESEARCH_THEMES,
+  RESEARCH_THEMES,
   buildFallbackMinutes,
   calculateThemeCompletenessMetrics,
+  getCoreResearchThemeAspects,
+  getCrossTopicResearchThemeAspects,
+  getOptionalResearchThemeAspects,
+  getResearchThemeAspects,
+  getResearchThemeEvidence,
+  getResearchThemeResponseState,
+  getResearchThemeSummary,
   getSlotResponseState,
   getTopicAspects,
   getCoreAspects,
@@ -16,6 +25,7 @@ import {
   normalizeSlotStatus,
   recentUtterances,
   renderTranscript,
+  resolveResearchThemeForSlot,
   type AcpSlotName,
   type AuxiliaryMinutesItem,
   type AcpSlotState,
@@ -77,6 +87,7 @@ const SYSTEM_NEXT_QUESTION = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
   "質問選択の主軸は current_topic です。ACP全体の未充足スロットは補助情報として扱ってください。",
+  "研究上の評価単位は research_themes の6Themeです。available_topics は画面遷移用の話題であり、研究Themeそのものではありません。",
   "current_topic.aspects は記録整理と質問生成の補助であり、質問ノルマではありません。",
   "current_topic.core_aspectsを優先し、optional_aspectsを埋めるためだけの質問は生成しないでください。",
   "本人が未検討・不明・言語化困難・回答拒否を示した場合は有効な回答状態として扱い、追及しないでください。",
@@ -97,6 +108,7 @@ const SYSTEM_NEXT_QUESTION = [
 const SYSTEM_UPDATE_SLOTS = [
   "あなたはACP対話の研究用記録を整理するAIです。",
   "会話ログを読み、Theme単位のACPスロット状態を更新してください。",
+  "研究上の評価単位は research_themes の6Themeです。optional_research_themes は必要時だけ扱い、6Themeの網羅率分母には含めません。",
   "current_topic.aspects と available_topics[].aspects はEvidence整理の観点です。Aspectが未充足でもスロットをemptyに戻さないでください。",
   "statusは unanswered / partial / answered / no_preference / not_considered / cannot_verbalize / prefer_not_to_answer のいずれかです。",
   "answeredは本人の希望・価値観・理由・条件が根拠発話とともに表明された状態です。",
@@ -119,6 +131,7 @@ const SYSTEM_TOPIC_SWITCH = [
   "あなたの役割は、今の話題を終えて次へ進んでよいかを判定し、介護者が自然に話題を運べる一文を1つだけ生成することです。",
   "target_slot と next_topic には、acp_slots に含まれるACPスロットだけを指定してください。「未解決課題」は指定してはいけません。",
   "まず current_topic が十分に話されたかを、current_topic に関係する発話とスロット状態から判断してください。",
+  "研究上の評価単位は research_themes の6Themeですが、話題転換の出力では画面遷移用の available_topics に含まれるACPスロットを使ってください。",
   "本人が current_topic について「特にない」「今はない」「わからない」「言えない」「思いつかない」などと答えている場合、それを有効な回答として扱い、同じ直接質問を繰り返さないでください。",
   "明示的に言語化できない回答が出ており、まだ一度も別角度で確認していない場合だけ、should_switch=false として、具体的経験・嫌だったこと・避けたいこと・最近の過ごし方などから1つだけ別角度で確認してください。",
   "すでに別角度でも確認した、または本人がこれ以上話しにくそうな場合は、その明示回答を尊重して should_switch=true とし、次の話題へ進んでください。",
@@ -137,6 +150,7 @@ const SYSTEM_TOPIC_SWITCH = [
 const SYSTEM_END_CHECK = [
   "あなたはACP対話の終了確認を支援するAIです。",
   "会話ログとTheme単位のACPスロット状態を見て、今日の対話を終えてよいかを判定してください。",
+  "終了判断の主対象は research_themes の6Themeです。optional_research_themes の未充足だけで終了不可にしないでください。",
   "すべてのAspectがfilledであることを終了条件にしてはいけません。",
   "未検討・不明・言語化困難・希望なし・回答拒否は有効なresponseStateとして扱い、単純な未回答にしないでください。",
   "任意Aspectや細かいAspectが未充足であることだけを理由に終了不可にしないでください。",
@@ -479,10 +493,32 @@ function buildConversationPayload(context: ConversationContext) {
   const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
   const acpSlotStates = filterAcpSlotStates(context.slotStates);
   const currentSlotState = findSlotState(acpSlotStates, currentTopic.slot_name);
+  const currentResearchTheme = resolveResearchThemeForSlot(currentTopic.slot_name);
 
   return {
     discussion_topic: DISCUSSION_TOPIC,
     session: getSessionMetadata(context),
+    current_research_theme: {
+      id: currentResearchTheme.id,
+      level: currentResearchTheme.level,
+      title: currentResearchTheme.title,
+      opening_question: currentResearchTheme.openingQuestion,
+      source_slot_names: currentResearchTheme.sourceSlotNames,
+      aspects: getResearchThemeAspects(currentResearchTheme),
+      core_aspects: getCoreResearchThemeAspects(currentResearchTheme),
+      optional_aspects: getOptionalResearchThemeAspects(currentResearchTheme),
+      cross_topic_aspects: getCrossTopicResearchThemeAspects(currentResearchTheme),
+      max_follow_up_questions: currentResearchTheme.maxFollowUpQuestions,
+      response_state: getResearchThemeResponseState(
+        currentResearchTheme,
+        acpSlotStates,
+      ),
+      summary: getResearchThemeSummary(currentResearchTheme, acpSlotStates),
+      evidence_utterance: getResearchThemeEvidence(
+        currentResearchTheme,
+        acpSlotStates,
+      ),
+    },
     current_topic: {
       id: currentTopic.id,
       level: currentTopic.level,
@@ -527,6 +563,32 @@ function buildConversationPayload(context: ConversationContext) {
       cross_topic_aspects: getCrossTopicAspects(topic),
       max_follow_up_questions: topic.maxFollowUpQuestions,
     })),
+    research_themes: RESEARCH_THEMES.map((theme) => ({
+      id: theme.id,
+      level: theme.level,
+      title: theme.title,
+      opening_question: theme.openingQuestion,
+      source_slot_names: theme.sourceSlotNames,
+      aspects: getResearchThemeAspects(theme),
+      core_aspects: getCoreResearchThemeAspects(theme),
+      optional_aspects: getOptionalResearchThemeAspects(theme),
+      cross_topic_aspects: getCrossTopicResearchThemeAspects(theme),
+      max_follow_up_questions: theme.maxFollowUpQuestions,
+      response_state: getResearchThemeResponseState(theme, acpSlotStates),
+      summary: getResearchThemeSummary(theme, acpSlotStates),
+      evidence_utterance: getResearchThemeEvidence(theme, acpSlotStates),
+    })),
+    optional_research_themes: OPTIONAL_RESEARCH_THEMES.map((theme) => ({
+      id: theme.id,
+      level: theme.level,
+      title: theme.title,
+      opening_question: theme.openingQuestion,
+      source_slot_names: theme.sourceSlotNames,
+      aspects: getResearchThemeAspects(theme),
+      response_state: getResearchThemeResponseState(theme, acpSlotStates),
+      summary: getResearchThemeSummary(theme, acpSlotStates),
+      evidence_utterance: getResearchThemeEvidence(theme, acpSlotStates),
+    })),
     current_topic_transcript: renderTranscript(getTopicRelatedUtterances(context)),
     all_conversation_log: renderTranscript(context.utterances),
     recent_5_turns: renderTranscript(recentUtterances(context.utterances, 5)),
@@ -538,19 +600,15 @@ function buildConversationPayload(context: ConversationContext) {
       response_state: getSlotResponseState(slot),
       summary: slot.summary,
     })),
-    theme_states: DISCUSSION_TOPICS.map((topic) => {
-      const slot = findSlotState(acpSlotStates, topic.slot_name);
-
-      return {
-        theme_id: topic.id,
-        slot_name: topic.slot_name,
-        level: topic.level,
-        status: slot?.status ?? "unanswered",
-        response_state: getSlotResponseState(slot),
-        summary: slot?.summary ?? "",
-        evidence_utterance: slot?.evidence_utterance ?? "",
-      };
-    }),
+    theme_states: RESEARCH_THEMES.map((theme) => ({
+      theme_id: theme.id,
+      title: theme.title,
+      level: theme.level,
+      source_slot_names: theme.sourceSlotNames,
+      response_state: getResearchThemeResponseState(theme, acpSlotStates),
+      summary: getResearchThemeSummary(theme, acpSlotStates),
+      evidence_utterance: getResearchThemeEvidence(theme, acpSlotStates),
+    })),
     explicit_none_answers: detectExplicitNoneResponses(context).map((response) => ({
       slot_name: response.slotName,
       evidence_utterance: formatSpeakerEvidence(response.utterance),
@@ -920,11 +978,9 @@ function fallbackTopicSwitch(context: ConversationContext): TopicSwitchResult {
 }
 
 function fallbackEndCheck(slotStates: AcpSlotState[]): EndCheckResult {
-  const slotsByName = new Map(slotStates.map((slot) => [slot.slot_name, slot]));
-  const remaining = DISCUSSION_TOPICS.filter((topic) => {
-    const slot = slotsByName.get(topic.slot_name);
-    return !getSlotResponseState(slot);
-  }).map((topic) => topic.slot_name);
+  const remaining = RESEARCH_THEMES.filter(
+    (theme) => !getResearchThemeResponseState(theme, slotStates),
+  ).map((theme) => theme.title);
   const metrics = calculateThemeCompletenessMetrics(slotStates);
   const canEnd = remaining.length <= 1 || metrics.responseStateCoverage >= 0.8;
 
