@@ -1200,7 +1200,19 @@ export default function SessionPage() {
               </div>
             </form>
 
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          </div>
+
+          <div className="space-y-3">
+            <DeveloperUndiscussedWords
+              slotStates={developerSlotStates}
+              loading={developerSlotLoading}
+              error={developerSlotError}
+              onRefresh={() => {
+                if (session?.id) void refreshDeveloperSlotStates(session.id);
+              }}
+            />
+
+            <div className="grid grid-cols-2 gap-2">
               <ActionButton
                 label="質問する"
                 tone="emerald"
@@ -1231,15 +1243,6 @@ export default function SessionPage() {
               />
             </div>
           </div>
-
-          <DeveloperUndiscussedWords
-            slotStates={developerSlotStates}
-            loading={developerSlotLoading}
-            error={developerSlotError}
-            onRefresh={() => {
-              if (session?.id) void refreshDeveloperSlotStates(session.id);
-            }}
-          />
         </div>
       </section>
     </main>

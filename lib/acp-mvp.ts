@@ -18,58 +18,103 @@ export const DISCUSSION_TOPIC = {
 
 export const DISCUSSION_TOPICS = [
   {
+    id: "daily_continuity",
     slot_name: "今後の生活希望",
     title: "最近の生活と、これからも続けたいこと",
     opening_prompt:
       "最近の生活で、これからも続けたいことは何ですか。\nお二人で、話しやすいところから話してみてください。",
+    coreSlots: ["続けたいこと", "大切にしている理由"],
+    optionalSlots: ["一緒に続けたい人", "続けたい場所", "必要な支援"],
+    crossTopicSlots: ["希望する暮らし方", "自分らしさ", "大切な人間関係"],
+    maxFollowUpQuestions: 1,
   },
   {
+    id: "values",
     slot_name: "価値観",
     title: "大切にしたいこと",
     opening_prompt:
       "普段の暮らしの中で、これだけは大切にしたいと思うことはありますか。",
+    coreSlots: ["大切にしたい価値観", "その理由"],
+    optionalSlots: ["守りたい習慣", "避けたいこと"],
+    crossTopicSlots: ["自分らしさ", "安心できる過ごし方"],
+    maxFollowUpQuestions: 1,
   },
   {
+    id: "care_preference",
     slot_name: "介護希望",
     title: "手助けが必要になった時の希望",
     opening_prompt:
       "もし暮らしの中で手助けが必要になった場合、どのような支援なら受け入れやすいですか。",
+    coreSlots: ["受け入れやすい支援", "避けたい支援"],
+    optionalSlots: ["支援してほしい人", "自分で続けたいこと"],
+    crossTopicSlots: ["支援への不安", "希望する暮らし方"],
+    maxFollowUpQuestions: 1,
   },
   {
+    id: "medical_preference",
     slot_name: "医療処置への希望",
     title: "医療や治療について大切にしたいこと",
     opening_prompt:
       "治療や医療を受ける場面で、大切にしたいことや避けたいことはありますか。",
+    coreSlots: ["医療で大切にしたいこと", "避けたい医療"],
+    optionalSlots: ["相談したい相手", "判断時に重視する条件"],
+    crossTopicSlots: ["支援への不安", "家族への希望"],
+    maxFollowUpQuestions: 1,
   },
   {
+    id: "proxy_decision_maker",
     slot_name: "代理意思決定者",
     title: "相談して決めてほしい人",
     opening_prompt:
       "ご自身で判断しにくい時、医療や介護のことを誰に相談して決めてほしいですか。",
+    coreSlots: ["相談して決めてほしい人"],
+    optionalSlots: ["その人に伝えたい判断基準", "避けてほしい決め方"],
+    crossTopicSlots: ["家族への希望", "大切な人間関係"],
+    maxFollowUpQuestions: 1,
   },
   {
+    id: "family_message",
     slot_name: "家族に伝えたいこと",
     title: "家族に伝えておきたいこと",
     opening_prompt:
       "ご家族に、今のうちに伝えておきたいことやお願いしておきたいことはありますか。",
+    coreSlots: ["家族に伝えたいこと"],
+    optionalSlots: ["お願いしたいこと", "感謝や気がかり"],
+    crossTopicSlots: ["家族への希望", "大切な人間関係"],
+    maxFollowUpQuestions: 1,
   },
   {
+    id: "worries",
     slot_name: "不安・心配",
     title: "不安や心配",
     opening_prompt:
       "これからのことで、不安に感じていることや心配なことはありますか。",
+    coreSlots: ["不安や心配の内容"],
+    optionalSlots: ["不安を軽くする支援", "相談したい相手"],
+    crossTopicSlots: ["支援への不安", "安心できる過ごし方"],
+    maxFollowUpQuestions: 1,
   },
   {
+    id: "life_sustaining_treatment",
     slot_name: "延命治療への考え",
     title: "命に関わる治療についての考え",
     opening_prompt:
       "もし命に関わる状態になった時、延命治療について今の時点で考えていることはありますか。",
+    coreSlots: ["延命治療への現在の考え"],
+    optionalSlots: ["判断を相談したい人", "重視する状態や条件"],
+    crossTopicSlots: ["医療への希望", "家族への希望"],
+    maxFollowUpQuestions: 1,
   },
   {
+    id: "preferred_final_place",
     slot_name: "最期を迎えたい場所",
     title: "最期の時期を過ごしたい場所",
     opening_prompt:
       "もし最期の時期を考えるとしたら、どこで誰と過ごせると安心だと思いますか。",
+    coreSlots: ["最期を過ごしたい場所", "一緒にいたい人"],
+    optionalSlots: ["安心できる環境", "避けたい場所"],
+    crossTopicSlots: ["安心できる過ごし方", "大切な人間関係"],
+    maxFollowUpQuestions: 1,
   },
 ] as const;
 
@@ -255,6 +300,13 @@ export function getTopicSlotImportance(slotName: string): SlotImportance {
 
 export function canCompleteTopicSlot(slot: AcpSlotState | undefined) {
   return slot ? isTerminalSlotStatus(slot.status) : false;
+}
+
+export function resolveDiscussionTopic(slotName: string | undefined) {
+  return (
+    DISCUSSION_TOPICS.find((topic) => topic.slot_name === slotName) ??
+    DISCUSSION_TOPICS[0]
+  );
 }
 
 export function recentUtterances(utterances: ConversationUtterance[], count = 5) {

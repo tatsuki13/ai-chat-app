@@ -71,6 +71,9 @@ const SYSTEM_NEXT_QUESTION = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
   "質問選択の主軸は current_topic です。ACP全体の未充足スロットは補助情報として扱ってください。",
+  "current_topic.core_slotsを優先し、optional_slotsを埋めるためだけの質問は生成しないでください。",
+  "本人が未検討・不明・言語化困難・回答拒否を示した場合は有効な回答状態として扱い、追及しないでください。",
+  "同じテーマで追加質問は最大1回までとし、同じ意味の質問を言い換えて繰り返さないでください。",
   "target_slot には acp_slots に含まれるACPスロットだけを指定してください。「未解決課題」は指定してはいけません。",
   "current_topic と無関係な未充足スロットへ急に移らないでください。",
   "未充足スロットを機械的に埋めるのではなく、直前の会話から自然につながる質問を選んでください。",
@@ -113,6 +116,7 @@ const SYSTEM_TOPIC_SWITCH = [
   "should_switch=false の場合でも、直前に明示的な「ない」があるなら、同じ「ありますか」形式ではなく、具体的経験・嫌だったこと・避けたいことなど別角度の確認にしてください。",
   "current_topic が filled に近い場合だけ、should_switch=true とし、next_topic へ移る短い前置きと最初の質問を返してください。",
   "ACP全体の未充足スロットは補助情報です。今の話題と無関係な領域へ急に飛ばないでください。",
+  "optional_slotsが未充足でも、core_slotsまたは本人の回答状態が確認できていれば話題転換を妨げないでください。",
   "高齢者を責めず、介護者がそのまま読み上げられる日本語にしてください。",
   "出力はJSONのみとしてください。",
   "",
@@ -389,6 +393,30 @@ function normalizeNextQuestionResult(
   fallback: NextQuestionResult,
   context: ConversationContext,
 ): NextQuestionResult {
+  const currentTopic = resolveTopic(context.currentTopic);
+  const currentSlot = findSlotState(context.slotStates, currentTopic.slot_name);
+  const followUpCount = countPromptsForSlot(
+    context.utterances,
+    currentTopic.slot_name as AcpSlotName,
+  );
+
+  if (
+    isTerminalSlotStatus(currentSlot?.status) ||
+    followUpCount >= currentTopic.maxFollowUpQuestions
+  ) {
+    return {
+      question:
+        "この話題については、今の時点のお考えを確認できたようです。必要であれば、次の話題へ移ってもよさそうです。",
+      transition_phrase: "",
+      target_slot: currentTopic.slot_name,
+      reason:
+        isTerminalSlotStatus(currentSlot?.status)
+          ? "本人の回答状態が確認できているため、追加質問を停止しました。"
+          : "この話題の追加質問上限に達したため、追加質問を停止しました。",
+      sensitivity: getSlotSensitivity(currentTopic.slot_name as AcpSlotName),
+    };
+  }
+
   const targetSlot = normalizeAcpTargetSlot(result.target_slot, fallback.target_slot);
   const question = nonEmpty(result.question, fallback.question);
   const shouldUseFallbackQuestion =
@@ -443,6 +471,10 @@ function buildConversationPayload(context: ConversationContext) {
     current_topic: {
       slot_name: currentTopic.slot_name,
       title: context.currentTopicTitle || currentTopic.title,
+      core_slots: currentTopic.coreSlots,
+      optional_slots: currentTopic.optionalSlots,
+      cross_topic_slots: currentTopic.crossTopicSlots,
+      max_follow_up_questions: currentTopic.maxFollowUpQuestions,
       status:
         findSlotState(acpSlotStates, currentTopic.slot_name)?.status ??
         "unanswered",
@@ -455,9 +487,14 @@ function buildConversationPayload(context: ConversationContext) {
         }
       : null,
     available_topics: DISCUSSION_TOPICS.map((topic) => ({
+      id: topic.id,
       slot_name: topic.slot_name,
       title: topic.title,
       opening_prompt: topic.opening_prompt,
+      core_slots: topic.coreSlots,
+      optional_slots: topic.optionalSlots,
+      cross_topic_slots: topic.crossTopicSlots,
+      max_follow_up_questions: topic.maxFollowUpQuestions,
     })),
     current_topic_transcript: renderTranscript(getTopicRelatedUtterances(context)),
     all_conversation_log: renderTranscript(context.utterances),
