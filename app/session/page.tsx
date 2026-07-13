@@ -129,6 +129,7 @@ export default function SessionPage() {
   const [idError, setIdError] = useState("");
   const [topicBudgets, setTopicBudgets] = useState(createInitialTopicBudgets);
   const [topicStartedAt, setTopicStartedAt] = useState<number | null>(null);
+  const [topicPausedMs, setTopicPausedMs] = useState(0);
   const [topicExtensionMs, setTopicExtensionMs] = useState(0);
   const [timerNow, setTimerNow] = useState(() => Date.now());
   const [transitionProposal, setTransitionProposal] =
@@ -162,6 +163,8 @@ export default function SessionPage() {
   const pushToTalkStartingRef = useRef(false);
   const pushToTalkActiveRef = useRef(false);
   const topicStartedAtRef = useRef<number | null>(null);
+  const timerPausedStartedAtRef = useRef<number | null>(null);
+  const timerRunningRef = useRef(false);
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
 
@@ -181,7 +184,9 @@ export default function SessionPage() {
         topicExtensionMs,
     );
   const topicElapsedMs =
-    topicStartedAt === null ? 0 : Math.max(0, timerNow - topicStartedAt);
+    topicStartedAt === null
+      ? 0
+      : Math.max(0, timerNow - topicStartedAt - topicPausedMs);
   const topicRemainingSeconds = Math.ceil((topicBudgetMs - topicElapsedMs) / 1000);
   const baseTimeElapsed = topicElapsedMs >= BASE_TOPIC_DURATION_MS;
   const maxTimeElapsed = topicElapsedMs >= MAX_TOPIC_DURATION_MS;
@@ -189,6 +194,12 @@ export default function SessionPage() {
     topicBudgetMs > 0
       ? Math.min(1, topicElapsedMs / topicBudgetMs)
       : 1;
+  const isConversationTimerRunning =
+    Boolean(session) &&
+    topicStartedAt !== null &&
+    completionState === "active" &&
+    !busyAction &&
+    !transitionProposal;
 
   useEffect(() => {
     let ignore = false;
@@ -313,14 +324,43 @@ export default function SessionPage() {
   }, [utteranceTotal]);
 
   useEffect(() => {
-    if (!session || topicStartedAt === null) return;
+    const now = Date.now();
+
+    if (!topicStartedAt || !session) {
+      timerRunningRef.current = false;
+      timerPausedStartedAtRef.current = null;
+      return;
+    }
+
+    if (isConversationTimerRunning) {
+      if (!timerRunningRef.current && timerPausedStartedAtRef.current !== null) {
+        const pausedForMs = now - timerPausedStartedAtRef.current;
+        setTopicPausedMs((current) => current + Math.max(0, pausedForMs));
+        timerPausedStartedAtRef.current = null;
+      }
+
+      timerRunningRef.current = true;
+      setTimerNow(now);
+      return;
+    }
+
+    if (timerRunningRef.current || timerPausedStartedAtRef.current === null) {
+      timerPausedStartedAtRef.current = now;
+      setTimerNow(now);
+    }
+
+    timerRunningRef.current = false;
+  }, [isConversationTimerRunning, session, topicStartedAt]);
+
+  useEffect(() => {
+    if (!isConversationTimerRunning) return;
 
     const timerId = window.setInterval(() => {
       setTimerNow(Date.now());
     }, TIMER_TICK_MS);
 
     return () => window.clearInterval(timerId);
-  }, [session?.id, topicStartedAt]);
+  }, [isConversationTimerRunning]);
 
   useEffect(() => {
     if (!session || topicStartedAt === null) return;
@@ -918,6 +958,9 @@ export default function SessionPage() {
     setCurrentTopicIndex(0);
     setTopicBudgets(createInitialTopicBudgets());
     topicStartedAtRef.current = null;
+    timerPausedStartedAtRef.current = null;
+    timerRunningRef.current = false;
+    setTopicPausedMs(0);
     setTopicExtensionMs(0);
     setTransitionProposal(null);
     setProposalCooldownUntil(0);
@@ -933,6 +976,9 @@ export default function SessionPage() {
 
     const now = Date.now();
     topicStartedAtRef.current = now;
+    timerPausedStartedAtRef.current = null;
+    timerRunningRef.current = true;
+    setTopicPausedMs(0);
     setTopicStartedAt(now);
     setTimerNow(now);
   }
@@ -946,6 +992,9 @@ export default function SessionPage() {
       Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
     );
     topicStartedAtRef.current = now;
+    timerPausedStartedAtRef.current = null;
+    timerRunningRef.current = true;
+    setTopicPausedMs(0);
     setTopicStartedAt(now);
     setTopicExtensionMs(0);
     setTransitionProposal(null);
