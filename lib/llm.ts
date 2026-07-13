@@ -5,6 +5,7 @@ import {
   DISCUSSION_TOPICS,
   buildFallbackMinutes,
   getUnfilledSlots,
+  isTerminalSlotStatus,
   mergeSlotStates,
   normalizeSlotStatus,
   recentUtterances,
@@ -375,7 +376,7 @@ function normalizeSlotUpdateResult(
       fallbackByName.get(slotName) ??
       currentByName.get(slotName) ?? {
         slot_name: slotName,
-        status: "empty",
+        status: "unanswered",
         summary: "",
         evidence_utterance: "",
       }
@@ -442,7 +443,9 @@ function buildConversationPayload(context: ConversationContext) {
     current_topic: {
       slot_name: currentTopic.slot_name,
       title: context.currentTopicTitle || currentTopic.title,
-      status: findSlotState(acpSlotStates, currentTopic.slot_name)?.status ?? "empty",
+      status:
+        findSlotState(acpSlotStates, currentTopic.slot_name)?.status ??
+        "unanswered",
       summary: findSlotState(acpSlotStates, currentTopic.slot_name)?.summary ?? "",
     },
     next_topic: nextTopic
@@ -587,7 +590,7 @@ function fallbackUpdateSlots(
       return (
         current ?? {
           slot_name: slotName,
-          status: "empty",
+          status: "unanswered",
           summary: "未確認",
           evidence_utterance: "",
         }
@@ -597,7 +600,7 @@ function fallbackUpdateSlots(
     const status =
       evidence.utterance.speaker === "elder" &&
       evidence.utterance.text.replace(/\s/g, "").length >= 18
-        ? "filled"
+        ? "answered"
         : "partial";
     const speaker = evidence.utterance.speaker === "elder" ? "本人" : "介護者";
     const inferredPrefix =
@@ -607,7 +610,7 @@ function fallbackUpdateSlots(
       slot_name: slotName,
       status,
       summary:
-        status === "filled"
+        status === "answered"
           ? `${inferredPrefix}${truncate(evidence.utterance.text, 120)}`
           : "話題は出ているが、本人の希望・理由・条件の確認がまだ十分ではありません。",
       evidence_utterance: `${inferredPrefix}${speaker}: ${truncate(evidence.utterance.text, 160)}`,
@@ -644,7 +647,7 @@ function applyExplicitNoneResponses(
       byName.get(slotName) ??
       findSlotState(context.slotStates, slotName) ?? {
         slot_name: slotName,
-        status: "empty",
+        status: "unanswered",
         summary: "未確認",
         evidence_utterance: "",
       }
@@ -664,7 +667,7 @@ function applyUncertainResponses(
   responses.forEach((response) => {
     const current = byName.get(response.slotName);
     if (
-      current?.status === "filled" &&
+      isTerminalSlotStatus(current?.status) &&
       !isUncertaintySummary(current.summary) &&
       !isUncertaintySummary(current.evidence_utterance)
     ) {
@@ -682,7 +685,7 @@ function applyUncertainResponses(
       byName.get(slotName) ??
       findSlotState(context.slotStates, slotName) ?? {
         slot_name: slotName,
-        status: "empty",
+        status: "unanswered",
         summary: "Unconfirmed",
         evidence_utterance: "",
       }
@@ -761,7 +764,7 @@ function fallbackNextQuestion(
   );
   const unfilled = getUnfilledSlots(slotStates);
   const selected =
-    preferredState?.status !== "filled" ? preferredSlot :
+    !isTerminalSlotStatus(preferredState?.status) ? preferredSlot :
     unfilled.find((slot) => slot.slot_name === contextualSlot)?.slot_name ??
     unfilled.find((slot) => slot.status === "partial")?.slot_name ??
     unfilled[0]?.slot_name ??
@@ -784,7 +787,7 @@ function fallbackTopicSwitch(context: ConversationContext): TopicSwitchResult {
   const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
   const currentSlot = currentTopic.slot_name as AcpSlotName;
   const currentState = findSlotState(context.slotStates, currentSlot);
-  const canSwitch = currentState?.status === "filled" && Boolean(nextTopic);
+  const canSwitch = isTerminalSlotStatus(currentState?.status) && Boolean(nextTopic);
 
   if (canSwitch && nextTopic) {
     const nextSlot = nextTopic.slot_name as AcpSlotName;
@@ -820,7 +823,11 @@ function fallbackEndCheck(slotStates: AcpSlotState[]): EndCheckResult {
     "代理意思決定者",
   ];
   const remaining = slotStates
-    .filter((slot) => importantSlots.includes(slot.slot_name) && slot.status !== "filled")
+    .filter(
+      (slot) =>
+        importantSlots.includes(slot.slot_name) &&
+        !isTerminalSlotStatus(slot.status),
+    )
     .map((slot) => slot.slot_name);
   const canEnd = remaining.length <= 1;
 
@@ -909,7 +916,7 @@ function isQuestionRelevantToCurrentTopic(
   if (targetSlot === currentTopic.slot_name) return true;
 
   const currentState = findSlotState(context.slotStates, currentTopic.slot_name);
-  if (currentState?.status === "filled") return true;
+  if (isTerminalSlotStatus(currentState?.status)) return true;
 
   return false;
 }
@@ -1130,7 +1137,7 @@ function createExplicitNoneSlotState(
 ): AcpSlotState {
   return {
     slot_name: slotName,
-    status: "filled",
+    status: "no_preference",
     summary:
       slotName === "価値観"
         ? "明示回答: 本人は、今は特に大切にしていることとして思い当たるものはない／言語化しにくいと話している。"
@@ -1146,10 +1153,22 @@ function createUncertainSlotState(
 ): AcpSlotState {
   return {
     slot_name: slotName,
-    status: "partial",
+    status: getUncertainSlotStatus(kind),
     summary: `${UNCERTAINTY_SLOT_SUMMARY} reason_hint=${kind}`,
     evidence_utterance: formatSpeakerEvidence(utterance),
   };
+}
+
+function getUncertainSlotStatus(kind: UncertainResponseKind): AcpSlotState["status"] {
+  if (kind === "language_gap" || kind === "emotional_load") {
+    return "cannot_verbalize";
+  }
+
+  if (kind === "not_considered" || kind === "knowledge_gap") {
+    return "not_considered";
+  }
+
+  return "not_considered";
 }
 
 function countPromptsForSlot(

@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { mergeSlotStates, createEmptySlotStates } from "../../../../../lib/acp-mvp";
+import {
+  createEmptySlotStates,
+  mergeSlotStates,
+  normalizeSlotStatus,
+} from "../../../../../lib/acp-mvp";
 import { prisma } from "../../../../../lib/prisma";
 
 export const runtime = "nodejs";
@@ -41,7 +45,7 @@ export async function GET(_request: Request, context: RouteContext) {
       createEmptySlotStates(),
       session.slotStates.map((slot) => ({
         slot_name: slot.slotName,
-        status: slot.status as "empty" | "partial" | "filled",
+        status: normalizeSlotStatus(slot.status),
         summary: slot.summary,
         evidence_utterance: slot.evidenceUtterance ?? "",
         updated_at: slot.updatedAt.toISOString(),

@@ -2,13 +2,9 @@ import { NextResponse } from "next/server";
 import {
   ensureButtonEvent,
   getSessionContext,
-  saveFinalMinutes,
   saveSlotStates,
 } from "../../../../lib/acp-store";
-import {
-  generateFinalMinutes,
-  updateSlotsFromConversation,
-} from "../../../../lib/llm";
+import { updateSlotsFromConversation } from "../../../../lib/llm";
 
 export const runtime = "nodejs";
 
@@ -38,25 +34,10 @@ export async function POST(request: Request) {
     });
     await saveSlotStates(sessionId, slotStates);
 
-    const minutes = await generateFinalMinutes({
-      utterances: context.utterances,
-      slotStates,
-      sessionId: context.session.id,
-      participantCode: context.session.participantCode,
-      currentTopic,
-      currentTopicTitle,
-    });
-    const savedMinutes = await saveFinalMinutes(sessionId, minutes);
-
     return NextResponse.json({
       trigger_event_id: trigger.id,
       slot_states: slotStates,
-      final_minutes: {
-        id: savedMinutes.id,
-        markdown: savedMinutes.markdown,
-        json: savedMinutes.json,
-        created_at: savedMinutes.createdAt.toISOString(),
-      },
+      final_minutes: null,
     });
   } catch (error) {
     console.error(error);

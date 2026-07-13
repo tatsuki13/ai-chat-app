@@ -46,7 +46,7 @@ type AdminDetail = {
   }>;
   slot_states: Array<{
     slot_name: string;
-    status: "empty" | "partial" | "filled";
+    status: string;
     summary: string;
     evidence_utterance: string;
     updated_at?: string;
@@ -349,9 +349,9 @@ function Badge(props: { children: ReactNode }) {
   );
 }
 
-function StatusBadge(props: { status: "empty" | "partial" | "filled" }) {
+function StatusBadge(props: { status: string }) {
   const className =
-    props.status === "filled"
+    isTerminalSlotStatus(props.status)
       ? "border-emerald-200 bg-emerald-50 text-emerald-800"
       : props.status === "partial"
         ? "border-amber-200 bg-amber-50 text-amber-800"
@@ -362,6 +362,17 @@ function StatusBadge(props: { status: "empty" | "partial" | "filled" }) {
       {props.status}
     </span>
   );
+}
+
+function isTerminalSlotStatus(status: string) {
+  return [
+    "answered",
+    "filled",
+    "no_preference",
+    "not_considered",
+    "cannot_verbalize",
+    "prefer_not_to_answer",
+  ].includes(status);
 }
 
 function OutputBlock(props: { title: string; value: string }) {

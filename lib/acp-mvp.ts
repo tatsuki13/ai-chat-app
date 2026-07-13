@@ -74,7 +74,16 @@ export const DISCUSSION_TOPICS = [
 ] as const;
 
 export type AcpSlotName = (typeof ACP_SLOT_NAMES)[number];
-export type SlotStatus = "empty" | "partial" | "filled";
+export type SlotStatus =
+  | "unanswered"
+  | "partial"
+  | "answered"
+  | "no_preference"
+  | "not_considered"
+  | "cannot_verbalize"
+  | "prefer_not_to_answer"
+  | "not_asked";
+export type SlotImportance = "core" | "optional";
 export type Speaker = "caregiver" | "elder" | "family";
 export type ButtonType =
   | "next_question"
@@ -166,7 +175,7 @@ export const SPEAKER_LABELS: Record<string, string> = {
 export function createEmptySlotStates(): AcpSlotState[] {
   return ACP_SLOT_NAMES.map((slotName) => ({
     slot_name: slotName,
-    status: "empty",
+    status: "unanswered",
     summary: "未確認",
     evidence_utterance: "",
   }));
@@ -192,7 +201,7 @@ export function mergeSlotStates(
     return (
       byName.get(slotName) ?? {
         slot_name: slotName,
-        status: "empty",
+        status: "unanswered",
         summary: "未確認",
         evidence_utterance: "",
       }
@@ -201,7 +210,22 @@ export function mergeSlotStates(
 }
 
 export function normalizeSlotStatus(value: unknown): SlotStatus {
-  return value === "partial" || value === "filled" ? value : "empty";
+  if (value === "filled") return "answered";
+  if (value === "empty") return "unanswered";
+  if (
+    value === "partial" ||
+    value === "answered" ||
+    value === "no_preference" ||
+    value === "not_considered" ||
+    value === "cannot_verbalize" ||
+    value === "prefer_not_to_answer" ||
+    value === "not_asked" ||
+    value === "unanswered"
+  ) {
+    return value;
+  }
+
+  return "unanswered";
 }
 
 export function isButtonType(value: unknown): value is ButtonType {
@@ -209,7 +233,28 @@ export function isButtonType(value: unknown): value is ButtonType {
 }
 
 export function getUnfilledSlots(slots: AcpSlotState[]) {
-  return slots.filter((slot) => slot.status === "empty" || slot.status === "partial");
+  return slots.filter((slot) => !isTerminalSlotStatus(slot.status));
+}
+
+export function isTerminalSlotStatus(status: unknown) {
+  return (
+    status === "answered" ||
+    status === "no_preference" ||
+    status === "not_considered" ||
+    status === "cannot_verbalize" ||
+    status === "prefer_not_to_answer" ||
+    status === "filled"
+  );
+}
+
+export function getTopicSlotImportance(slotName: string): SlotImportance {
+  return DISCUSSION_TOPICS.some((topic) => topic.slot_name === slotName)
+    ? "core"
+    : "optional";
+}
+
+export function canCompleteTopicSlot(slot: AcpSlotState | undefined) {
+  return slot ? isTerminalSlotStatus(slot.status) : false;
 }
 
 export function recentUtterances(utterances: ConversationUtterance[], count = 5) {

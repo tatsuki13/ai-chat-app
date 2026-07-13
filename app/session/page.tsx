@@ -29,6 +29,45 @@ type Utterance = {
   created_at: string;
 };
 
+type SlotState = {
+  slot_name: string;
+  status:
+    | "unanswered"
+    | "partial"
+    | "answered"
+    | "no_preference"
+    | "not_considered"
+    | "cannot_verbalize"
+    | "prefer_not_to_answer"
+    | "not_asked"
+    | "empty"
+    | "filled";
+  summary: string;
+  evidence_utterance: string;
+  updated_at?: string;
+};
+
+type ProposalReason =
+  | "base_time_elapsed"
+  | "max_time_elapsed"
+  | "core_slots_completed"
+  | "no_more_to_add"
+  | "not_considered"
+  | "prefer_not_to_answer";
+
+type TopicTransitionProposal = {
+  reason: ProposalReason;
+  suggestedAt: number;
+  topicIndex: number;
+};
+
+type SessionCompletionState =
+  | "active"
+  | "completing"
+  | "generating_minutes"
+  | "completed"
+  | "failed";
+
 type PromptPanelState = {
   title: string;
   body: string;
@@ -43,9 +82,24 @@ type TranscribeUtteranceResponse = {
   speaker?: Speaker;
 };
 
+type FinalMinutesResponse = {
+  session: SessionInfo;
+  slot_states: SlotState[];
+  final_minutes: {
+    id: string;
+    markdown: string;
+    json: unknown;
+    created_at: string;
+  };
+};
+
 const STORAGE_KEY = "acp-hitl-current-session-id";
 const MAX_RENDERED_UTTERANCES = 30;
-const TOPIC_BASE_SECONDS = 5 * 60;
+const BASE_TOPIC_DURATION_MS = 5 * 60 * 1000;
+const MAX_EXTENSION_DURATION_MS = 2 * 60 * 1000;
+const MAX_TOPIC_DURATION_MS = BASE_TOPIC_DURATION_MS + MAX_EXTENSION_DURATION_MS;
+const PROPOSAL_COOLDOWN_MS = 100 * 1000;
+const EXTENSION_STEP_MS = 2 * 60 * 1000;
 const TIMER_TICK_MS = 1000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
@@ -75,7 +129,19 @@ export default function SessionPage() {
   const [idError, setIdError] = useState("");
   const [topicBudgets, setTopicBudgets] = useState(createInitialTopicBudgets);
   const [topicStartedAt, setTopicStartedAt] = useState<number | null>(null);
+  const [topicExtensionMs, setTopicExtensionMs] = useState(0);
   const [timerNow, setTimerNow] = useState(() => Date.now());
+  const [transitionProposal, setTransitionProposal] =
+    useState<TopicTransitionProposal | null>(null);
+  const [proposalCooldownUntil, setProposalCooldownUntil] = useState(0);
+  const [completionState, setCompletionState] =
+    useState<SessionCompletionState>("active");
+  const [finalMinutes, setFinalMinutes] = useState<{
+    id: string;
+    markdown: string;
+    created_at: string;
+  } | null>(null);
+  const [completionError, setCompletionError] = useState("");
   const [sttEnabled] = useState(AUDIO_TRANSCRIPTION_ENABLED);
   const [audioInputRunning, setAudioInputRunning] = useState(false);
   const [audioInputError, setAudioInputError] = useState("");
@@ -84,6 +150,9 @@ export default function SessionPage() {
   const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState("");
   const [audioInputLoading, setAudioInputLoading] = useState(false);
   const [pushToTalkActive, setPushToTalkActive] = useState(false);
+  const [developerSlotStates, setDeveloperSlotStates] = useState<SlotState[]>([]);
+  const [developerSlotLoading, setDeveloperSlotLoading] = useState(false);
+  const [developerSlotError, setDeveloperSlotError] = useState("");
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
@@ -104,14 +173,21 @@ export default function SessionPage() {
     0,
     utteranceTotal - visibleUtterances.length,
   );
-  const topicBudgetSeconds =
-    topicBudgets[currentTopicIndex] ?? TOPIC_BASE_SECONDS;
-  const topicElapsedSeconds =
-    topicStartedAt === null ? 0 : getElapsedSeconds(topicStartedAt, timerNow);
-  const topicRemainingSeconds = topicBudgetSeconds - topicElapsedSeconds;
+  const isLastTopic = currentTopicIndex >= DISCUSSION_TOPICS.length - 1;
+  const topicBudgetMs =
+    Math.min(
+      MAX_TOPIC_DURATION_MS,
+      (topicBudgets[currentTopicIndex] ?? BASE_TOPIC_DURATION_MS) +
+        topicExtensionMs,
+    );
+  const topicElapsedMs =
+    topicStartedAt === null ? 0 : Math.max(0, timerNow - topicStartedAt);
+  const topicRemainingSeconds = Math.ceil((topicBudgetMs - topicElapsedMs) / 1000);
+  const baseTimeElapsed = topicElapsedMs >= BASE_TOPIC_DURATION_MS;
+  const maxTimeElapsed = topicElapsedMs >= MAX_TOPIC_DURATION_MS;
   const topicProgress =
-    topicBudgetSeconds > 0
-      ? Math.min(1, topicElapsedSeconds / topicBudgetSeconds)
+    topicBudgetMs > 0
+      ? Math.min(1, topicElapsedMs / topicBudgetMs)
       : 1;
 
   useEffect(() => {
@@ -175,6 +251,15 @@ export default function SessionPage() {
   }, [session]);
 
   useEffect(() => {
+    if (!session?.id) {
+      setDeveloperSlotStates([]);
+      return;
+    }
+
+    void refreshDeveloperSlotStates(session.id);
+  }, [session?.id]);
+
+  useEffect(() => {
     speakerRef.current = normalizeSpeaker(speaker);
     setAudioInputLevels({ A: 0, B: 0 });
   }, [speaker]);
@@ -236,6 +321,45 @@ export default function SessionPage() {
 
     return () => window.clearInterval(timerId);
   }, [session?.id, topicStartedAt]);
+
+  useEffect(() => {
+    if (!session || topicStartedAt === null) return;
+    if (completionState !== "active") return;
+    if (busyAction || pushToTalkActive || transitionProposal) return;
+    if (timerNow < proposalCooldownUntil) return;
+
+    const reason = getTransitionProposalReason({
+      baseTimeElapsed,
+      maxTimeElapsed,
+      currentTopicSlot: developerSlotStates.find(
+        (slot) => slot.slot_name === currentTopic.slot_name,
+      ),
+      utterances,
+    });
+
+    if (!reason) return;
+
+    setTransitionProposal({
+      reason,
+      suggestedAt: Date.now(),
+      topicIndex: currentTopicIndex,
+    });
+  }, [
+    baseTimeElapsed,
+    busyAction,
+    completionState,
+    currentTopic.slot_name,
+    currentTopicIndex,
+    developerSlotStates,
+    maxTimeElapsed,
+    proposalCooldownUntil,
+    pushToTalkActive,
+    session,
+    timerNow,
+    topicStartedAt,
+    transitionProposal,
+    utterances,
+  ]);
 
   useEffect(() => {
     if (isEditingId) {
@@ -563,6 +687,7 @@ export default function SessionPage() {
         });
       }
 
+      await refreshDeveloperSlotStates(session.id);
       setStatusText("保存済み");
     } catch {
       setStatusText("保存エラー");
@@ -676,12 +801,129 @@ export default function SessionPage() {
     }
   }
 
+  async function refreshDeveloperSlotStates(sessionId: string) {
+    setDeveloperSlotLoading(true);
+    setDeveloperSlotError("");
+
+    try {
+      const detail = await fetchAdminSessionDetail(sessionId);
+      setDeveloperSlotStates(detail.slot_states);
+    } catch {
+      setDeveloperSlotError("slot states unavailable");
+    } finally {
+      setDeveloperSlotLoading(false);
+    }
+  }
+
+  async function acceptTransitionProposal() {
+    if (!session || busyAction || completionState !== "active") return;
+
+    setTransitionProposal(null);
+
+    if (isLastTopic) {
+      await completeSession();
+      return;
+    }
+
+    setBusyAction("switch_topic");
+    setStatusText("保存中");
+
+    try {
+      const triggerEventId = await saveButtonEvent(session.id, "switch_topic");
+      await postJson("/api/ai/update-slots", {
+        session_id: session.id,
+        trigger_event_id: triggerEventId,
+        current_topic: currentTopic.slot_name,
+        current_topic_title: currentTopic.title,
+      });
+      const data = await postJson<TopicSwitchResponse>("/api/ai/switch-topic", {
+        session_id: session.id,
+        trigger_event_id: triggerEventId,
+        current_topic: currentTopic.slot_name,
+        current_topic_title: currentTopic.title,
+        next_topic: nextTopic?.slot_name,
+        next_topic_title: nextTopic?.title,
+        force_switch: true,
+      });
+
+      advanceTopic();
+      setPromptPanel({
+        title: "次の話題へ",
+        body: data.suggestion.message,
+        suggestionId: data.suggestion.id,
+        tone: "switch",
+      });
+      await refreshDeveloperSlotStates(session.id);
+      setStatusText("保存済み");
+    } catch {
+      setStatusText("保存エラー");
+      setPromptPanel({
+        title: "話題転換を実行できません",
+        body: "通信状態またはデータベース接続を確認してください。",
+        tone: "error",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  function extendCurrentTopic() {
+    setTopicExtensionMs((current) =>
+      Math.min(MAX_EXTENSION_DURATION_MS, current + EXTENSION_STEP_MS),
+    );
+    setTransitionProposal(null);
+    setProposalCooldownUntil(Date.now() + PROPOSAL_COOLDOWN_MS);
+  }
+
+  function dismissTransitionProposal() {
+    setTransitionProposal(null);
+    setProposalCooldownUntil(Date.now() + PROPOSAL_COOLDOWN_MS);
+  }
+
+  async function completeSession() {
+    if (!session || completionState === "generating_minutes") return;
+
+    stopVoiceAudioInput();
+    setCompletionState("generating_minutes");
+    setBusyAction("update_slots");
+    setCompletionError("");
+    setStatusText("議事録生成中");
+
+    try {
+      const data = await postJson<FinalMinutesResponse>("/api/ai/final-minutes", {
+        session_id: session.id,
+        current_topic: currentTopic.slot_name,
+        current_topic_title: currentTopic.title,
+      });
+
+      setSession(data.session);
+      setFinalMinutes(data.final_minutes);
+      setCompletionState("completed");
+      setTopicStartedAt(null);
+      topicStartedAtRef.current = null;
+      setStatusText("完了");
+      await refreshDeveloperSlotStates(session.id);
+    } catch {
+      setCompletionState("failed");
+      setCompletionError("議事録生成に失敗しました。同じデータから再試行できます。");
+      setStatusText("議事録生成エラー");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   function resetTopicTiming() {
     const now = Date.now();
 
     setCurrentTopicIndex(0);
     setTopicBudgets(createInitialTopicBudgets());
     topicStartedAtRef.current = null;
+    setTopicExtensionMs(0);
+    setTransitionProposal(null);
+    setProposalCooldownUntil(0);
+    setCompletionState("active");
+    setCompletionError("");
+    setFinalMinutes(null);
     setTopicStartedAt(null);
     setTimerNow(now);
   }
@@ -698,18 +940,16 @@ export default function SessionPage() {
   function advanceTopic() {
     if (!nextTopic) return;
 
-    const elapsedSeconds =
-      topicStartedAt === null ? 0 : getElapsedSeconds(topicStartedAt);
     const now = Date.now();
 
-    setTopicBudgets((current) =>
-      distributeRemainingTopicTime(current, currentTopicIndex, elapsedSeconds),
-    );
     setCurrentTopicIndex((current) =>
       Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
     );
-    topicStartedAtRef.current = null;
-    setTopicStartedAt(null);
+    topicStartedAtRef.current = now;
+    setTopicStartedAt(now);
+    setTopicExtensionMs(0);
+    setTransitionProposal(null);
+    setProposalCooldownUntil(0);
     setTimerNow(now);
   }
 
@@ -823,6 +1063,32 @@ export default function SessionPage() {
             progress={topicProgress}
           />
         </div>
+
+        {transitionProposal ? (
+          <div className="mt-3">
+            <TopicTransitionProposalCard
+              isLastTopic={isLastTopic}
+              maxTimeElapsed={maxTimeElapsed}
+              reason={transitionProposal.reason}
+              extended={topicExtensionMs > 0}
+              disabled={Boolean(busyAction) || completionState !== "active"}
+              onAccept={() => void acceptTransitionProposal()}
+              onExtend={extendCurrentTopic}
+              onDismiss={dismissTransitionProposal}
+            />
+          </div>
+        ) : null}
+
+        {completionState === "completed" || completionState === "failed" ? (
+          <div className="mt-3">
+            <SessionCompletionPanel
+              state={completionState}
+              finalMinutes={finalMinutes}
+              error={completionError}
+              onRetry={() => void completeSession()}
+            />
+          </div>
+        ) : null}
 
         <div className="mt-3 grid gap-4 lg:grid-cols-[minmax(0,860px)_240px]">
           <div className="min-w-0 space-y-3">
@@ -965,9 +1231,235 @@ export default function SessionPage() {
               />
             </div>
           </div>
+
+          <DeveloperUndiscussedWords
+            slotStates={developerSlotStates}
+            loading={developerSlotLoading}
+            error={developerSlotError}
+            onRefresh={() => {
+              if (session?.id) void refreshDeveloperSlotStates(session.id);
+            }}
+          />
         </div>
       </section>
     </main>
+  );
+}
+
+function DeveloperUndiscussedWords(props: {
+  slotStates: SlotState[];
+  loading: boolean;
+  error: string;
+  onRefresh: () => void;
+}) {
+  const words =
+    props.slotStates.length === 0
+      ? DISCUSSION_TOPICS.map((topic) => ({
+          word: topic.title,
+          status: "empty" as const,
+        }))
+      : props.slotStates
+          .filter((slot) => !isTerminalSlotStatus(slot.status))
+          .map((slot) => ({
+            word: slot.slot_name,
+            status: slot.status,
+          }));
+  const filledCount = props.slotStates.filter(
+    (slot) => isTerminalSlotStatus(slot.status),
+  ).length;
+
+  return (
+    <aside className="rounded-md border border-stone-300 bg-white px-3 py-3 shadow-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="text-[11px] font-black uppercase tracking-[0.08em] text-stone-500">
+            Dev Tool
+          </div>
+          <h2 className="mt-1 text-[14px] font-black leading-tight text-stone-950">
+            未対話ワード
+          </h2>
+        </div>
+        <button
+          type="button"
+          onClick={props.onRefresh}
+          className="min-h-8 rounded-md border border-stone-300 bg-stone-50 px-2 text-[11px] font-black text-stone-700 active:scale-[0.99]"
+        >
+          更新
+        </button>
+      </div>
+
+      <div className="mt-2 text-[11px] font-bold text-stone-500">
+        {props.loading
+          ? "読み込み中"
+          : props.slotStates.length
+            ? `${filledCount}/${props.slotStates.length} filled`
+            : "初期トピック"}
+      </div>
+
+      {props.error ? (
+        <p className="mt-2 rounded-md border border-red-100 bg-red-50 px-2 py-1.5 text-[11px] font-bold text-red-700">
+          {props.error}
+        </p>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {words.length === 0 ? (
+          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-black text-emerald-800">
+            全項目OK
+          </span>
+        ) : (
+          words.map((item) => (
+            <span
+              key={item.word}
+              className={`rounded-full border px-2.5 py-1 text-[11px] font-black leading-tight ${
+                item.status === "partial"
+                  ? "border-amber-200 bg-amber-50 text-amber-800"
+                  : "border-stone-200 bg-stone-100 text-stone-700"
+              }`}
+              title={item.status}
+            >
+              {item.word}
+            </span>
+          ))
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function TopicTransitionProposalCard(props: {
+  isLastTopic: boolean;
+  maxTimeElapsed: boolean;
+  reason: ProposalReason;
+  extended: boolean;
+  disabled: boolean;
+  onAccept: () => void;
+  onExtend: () => void;
+  onDismiss: () => void;
+}) {
+  const reasonLabel = proposalReasonLabel(props.reason);
+
+  return (
+    <section className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[12px] font-black text-amber-800">
+            AIからの提案
+          </div>
+          <p className="mt-1 text-[15px] font-black leading-relaxed text-stone-950">
+            {props.isLastTopic
+              ? "すべてのテーマについてお話ししました。今回の対話を終了して、議事録を作成しますか？"
+              : "このテーマについて、ある程度お話しできたようです。次の話題をAIから提示しますか？"}
+          </p>
+          <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] font-bold text-stone-600">
+            <span className="rounded-full bg-white px-2 py-0.5">
+              {reasonLabel}
+            </span>
+            {props.extended ? (
+              <span className="rounded-full bg-white px-2 py-0.5">延長中</span>
+            ) : null}
+            {props.maxTimeElapsed ? (
+              <span className="rounded-full bg-white px-2 py-0.5">
+                最大時間到達
+              </span>
+            ) : null}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={props.onAccept}
+            disabled={props.disabled}
+            className="min-h-9 rounded-md bg-stone-950 px-3 text-[12px] font-black text-white disabled:bg-stone-300"
+          >
+            {props.isLastTopic
+              ? "対話を終了して議事録を作成する"
+              : "AIに次の話題を提示してもらう"}
+          </button>
+          <button
+            type="button"
+            onClick={props.onExtend}
+            disabled={props.disabled}
+            className="min-h-9 rounded-md border border-amber-300 bg-white px-3 text-[12px] font-black text-amber-900 disabled:text-stone-400"
+          >
+            もう少し話す
+          </button>
+          <button
+            type="button"
+            onClick={props.onDismiss}
+            disabled={props.disabled}
+            className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 disabled:text-stone-400"
+          >
+            閉じる
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SessionCompletionPanel(props: {
+  state: SessionCompletionState;
+  finalMinutes: { id: string; markdown: string; created_at: string } | null;
+  error: string;
+  onRetry: () => void;
+}) {
+  const [pdfFileName, setPdfFileName] = useState(() =>
+    createDefaultPdfFileName(),
+  );
+
+  if (props.state === "failed") {
+    return (
+      <section className="rounded-md border border-red-200 bg-red-50 px-4 py-3">
+        <div className="text-[13px] font-black text-red-800">議事録生成エラー</div>
+        <p className="mt-1 text-[13px] font-bold text-red-700">{props.error}</p>
+        <button
+          type="button"
+          onClick={props.onRetry}
+          className="mt-2 min-h-9 rounded-md bg-red-700 px-3 text-[12px] font-black text-white"
+        >
+          議事録を再生成
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
+      <div className="text-[13px] font-black text-emerald-800">対話完了</div>
+      <p className="mt-1 text-[13px] font-bold text-emerald-900">
+        議事録を作成して保存しました。
+      </p>
+      {props.finalMinutes ? (
+        <>
+          <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <label className="block">
+              <span className="text-[11px] font-black text-emerald-800">
+                PDFファイル名
+              </span>
+              <input
+                value={pdfFileName}
+                onChange={(event) => setPdfFileName(event.target.value)}
+                className="mt-1 h-9 w-full rounded-md border border-emerald-200 bg-white px-3 text-[13px] font-bold text-stone-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
+                placeholder="ACP議事録"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() =>
+                printFinalMinutesPdf(props.finalMinutes, pdfFileName)
+              }
+              className="min-h-9 self-end rounded-md bg-emerald-700 px-3 text-[12px] font-black text-white active:scale-[0.99]"
+            >
+              PDFとして保存
+            </button>
+          </div>
+          <div className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md border border-emerald-100 bg-white px-3 py-2 text-[12px] font-semibold text-stone-700">
+            {props.finalMinutes.markdown}
+          </div>
+        </>
+      ) : null}
+    </section>
   );
 }
 
@@ -1363,6 +1855,23 @@ async function fetchSessionDetail(sessionId: string): Promise<{
   return response.json();
 }
 
+async function fetchAdminSessionDetail(sessionId: string): Promise<{
+  slot_states: SlotState[];
+}> {
+  const response = await fetch(
+    `/api/admin/session/${encodeURIComponent(sessionId)}`,
+    {
+      cache: "no-store",
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Failed to load developer slot states: ${response.status}`);
+  }
+
+  return response.json();
+}
+
 async function addUtterance(
   sessionId: string,
   speaker: Speaker,
@@ -1595,54 +2104,170 @@ function compareUtterancesByTime(left: Utterance, right: Utterance) {
   );
 }
 
+function getTransitionProposalReason(input: {
+  baseTimeElapsed: boolean;
+  maxTimeElapsed: boolean;
+  currentTopicSlot?: SlotState;
+  utterances: Utterance[];
+}): ProposalReason | null {
+  if (input.maxTimeElapsed) return "max_time_elapsed";
+  if (isTerminalSlotStatus(input.currentTopicSlot?.status)) {
+    return "core_slots_completed";
+  }
+
+  const latestText = input.utterances.at(-1)?.text ?? "";
+  if (hasPreferNotToAnswer(latestText)) return "prefer_not_to_answer";
+  if (hasNoMoreToAdd(latestText)) return "no_more_to_add";
+  if (hasNotConsidered(latestText)) return "not_considered";
+  if (input.baseTimeElapsed) return "base_time_elapsed";
+
+  return null;
+}
+
+function isTerminalSlotStatus(status: unknown) {
+  return (
+    status === "answered" ||
+    status === "filled" ||
+    status === "no_preference" ||
+    status === "not_considered" ||
+    status === "cannot_verbalize" ||
+    status === "prefer_not_to_answer"
+  );
+}
+
+function hasNoMoreToAdd(text: string) {
+  return /特にない|もうない|ほかにはない|他にはない|大丈夫/.test(text);
+}
+
+function hasNotConsidered(text: string) {
+  return /分からない|わからない|考えたことがない|まだ決めていない|言葉にできない/.test(
+    text,
+  );
+}
+
+function hasPreferNotToAnswer(text: string) {
+  return /話したくない|答えたくない|言いたくない/.test(text);
+}
+
+function proposalReasonLabel(reason: ProposalReason) {
+  const labels: Record<ProposalReason, string> = {
+    base_time_elapsed: "基準時間経過",
+    max_time_elapsed: "最大時間到達",
+    core_slots_completed: "コア項目確認済み",
+    no_more_to_add: "追加なし",
+    not_considered: "保留回答",
+    prefer_not_to_answer: "回答回避",
+  };
+
+  return labels[reason];
+}
+
+function createDefaultPdfFileName() {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `ACP議事録-${year}-${month}-${day}`;
+}
+
+function printFinalMinutesPdf(
+  finalMinutes: { markdown: string; created_at: string } | null,
+  rawFileName: string,
+) {
+  if (!finalMinutes) return;
+
+  const fileName = sanitizePdfFileName(rawFileName || createDefaultPdfFileName());
+  const printWindow = window.open("", "_blank", "noopener,noreferrer");
+  if (!printWindow) return;
+
+  printWindow.document.write(
+    createPrintableMinutesHtml({
+      title: fileName,
+      markdown: finalMinutes.markdown,
+      createdAt: finalMinutes.created_at,
+    }),
+  );
+  printWindow.document.close();
+  printWindow.focus();
+  window.setTimeout(() => {
+    printWindow.print();
+  }, 250);
+}
+
+function createPrintableMinutesHtml(input: {
+  title: string;
+  markdown: string;
+  createdAt: string;
+}) {
+  const body = markdownToPrintableHtml(input.markdown);
+  const createdAt = escapeHtml(formatDateTime(input.createdAt));
+
+  return `<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(input.title)}</title>
+  <style>
+    @page { size: A4; margin: 18mm; }
+    body {
+      color: #1c1917;
+      font-family: "Yu Gothic", "Meiryo", "Noto Sans JP", sans-serif;
+      font-size: 12px;
+      line-height: 1.75;
+    }
+    h1 { font-size: 22px; margin: 0 0 14px; }
+    h2 { border-bottom: 1px solid #d6d3d1; font-size: 17px; margin: 22px 0 10px; padding-bottom: 4px; }
+    h3 { font-size: 14px; margin: 16px 0 6px; }
+    p { margin: 0 0 7px; }
+    .meta { color: #57534e; font-size: 10px; margin-bottom: 18px; }
+    .page-break { break-before: page; }
+  </style>
+</head>
+<body>
+  <div class="meta">PDF作成日時: ${createdAt}</div>
+  ${body}
+</body>
+</html>`;
+}
+
+function markdownToPrintableHtml(markdown: string) {
+  return markdown
+    .split(/\r?\n/)
+    .map((line) => {
+      if (line.startsWith("### ")) return `<h3>${escapeHtml(line.slice(4))}</h3>`;
+      if (line.startsWith("## ")) return `<h2>${escapeHtml(line.slice(3))}</h2>`;
+      if (line.startsWith("# ")) return `<h1>${escapeHtml(line.slice(2))}</h1>`;
+      if (line.trim() === "") return "<p>&nbsp;</p>";
+      return `<p>${escapeHtml(line)}</p>`;
+    })
+    .join("\n");
+}
+
+function sanitizePdfFileName(value: string) {
+  const sanitized = value
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return sanitized || createDefaultPdfFileName();
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 function createInitialTopicBudgets() {
-  return DISCUSSION_TOPICS.map(() => TOPIC_BASE_SECONDS);
+  return DISCUSSION_TOPICS.map(() => BASE_TOPIC_DURATION_MS);
 }
 
 function getElapsedSeconds(startedAt: number, now = Date.now()) {
   return Math.max(0, Math.floor((now - startedAt) / 1000));
-}
-
-function distributeRemainingTopicTime(
-  budgets: number[],
-  completedTopicIndex: number,
-  elapsedSeconds: number,
-) {
-  const currentBudget = budgets[completedTopicIndex] ?? TOPIC_BASE_SECONDS;
-  const timeDeltaSeconds = currentBudget - elapsedSeconds;
-  const firstRemainingIndex = completedTopicIndex + 1;
-  const remainingTopicCount = Math.max(
-    0,
-    DISCUSSION_TOPICS.length - firstRemainingIndex,
-  );
-
-  if (timeDeltaSeconds === 0 || remainingTopicCount === 0) return budgets;
-
-  const adjustments = distributeSignedSeconds(
-    timeDeltaSeconds,
-    remainingTopicCount,
-  );
-
-  return budgets.map((budget, index) => {
-    if (index < firstRemainingIndex) return budget;
-
-    const adjustment = adjustments[index - firstRemainingIndex] ?? 0;
-    return Math.max(0, budget + adjustment);
-  });
-}
-
-function distributeSignedSeconds(totalSeconds: number, bucketCount: number) {
-  if (bucketCount <= 0) return [];
-
-  const sign = totalSeconds < 0 ? -1 : 1;
-  const absoluteSeconds = Math.abs(totalSeconds);
-  const secondsPerBucket = Math.floor(absoluteSeconds / bucketCount);
-  const extraSeconds = absoluteSeconds % bucketCount;
-
-  return Array.from({ length: bucketCount }, (_, index) => {
-    const remainderAdjustment = index < extraSeconds ? 1 : 0;
-    return sign * (secondsPerBucket + remainderAdjustment);
-  });
 }
 
 function formatTimerSeconds(seconds: number) {
