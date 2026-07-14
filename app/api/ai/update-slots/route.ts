@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import {
-  ensureButtonEvent,
   getSessionContext,
   saveSlotStates,
 } from "../../../../lib/acp-store";
@@ -17,11 +16,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "session_id is required" }, { status: 400 });
     }
 
-    const trigger = await ensureButtonEvent(
-      sessionId,
-      "update_slots",
-      optionalString(body.trigger_event_id ?? body.triggerEventId),
-    );
     const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
     const currentTopicTitle = optionalString(
       body.current_topic_title ?? body.currentTopicTitle,
@@ -35,7 +29,6 @@ export async function POST(request: Request) {
     await saveSlotStates(sessionId, slotStates);
 
     return NextResponse.json({
-      trigger_event_id: trigger.id,
       slot_states: slotStates,
       final_minutes: null,
     });

@@ -6,15 +6,10 @@ import {
   normalizeConversationSpeaker,
   toJsonValue,
   type AcpSlotState,
-  type ButtonType,
   type ConversationUtterance,
   type FinalMinutesResult,
-  type SuggestionType,
 } from "./acp-mvp";
-import {
-  saveStudyInterventionForAiSuggestion,
-  saveStudySlotStatesForSession,
-} from "./research-store";
+import { saveStudySlotStatesForSession } from "./research-store";
 
 export async function getSessionContext(sessionId: string) {
   const session = await prisma.session.findUnique({
@@ -106,68 +101,6 @@ export async function saveSlotStates(sessionId: string, slots: AcpSlotState[]) {
     ),
   );
   await saveStudySlotStatesForSession(sessionId, slots);
-}
-
-export async function createButtonEvent(sessionId: string, buttonType: ButtonType) {
-  return prisma.buttonEvent.create({
-    data: {
-      sessionId,
-      buttonType,
-    },
-  });
-}
-
-export async function ensureButtonEvent(
-  sessionId: string,
-  buttonType: ButtonType,
-  triggerEventId?: string,
-) {
-  if (triggerEventId) {
-    const existing = await prisma.buttonEvent.findFirst({
-      where: {
-        id: triggerEventId,
-        sessionId,
-      },
-    });
-
-    if (existing) return existing;
-  }
-
-  return createButtonEvent(sessionId, buttonType);
-}
-
-export async function saveAiSuggestion(input: {
-  sessionId: string;
-  triggerEventId: string;
-  suggestionType: SuggestionType;
-  content: string;
-  reasoning?: string;
-  targetSlot?: string;
-}) {
-  const suggestion = await prisma.aiSuggestionLog.create({
-    data: {
-      sessionId: input.sessionId,
-      triggerEventId: input.triggerEventId,
-      suggestionType: input.suggestionType,
-      content: input.content,
-      reasoning: input.reasoning,
-      targetSlot: input.targetSlot,
-    },
-  });
-
-  await saveStudyInterventionForAiSuggestion({
-    id: suggestion.id,
-    sessionId: suggestion.sessionId,
-    triggerEventId: suggestion.triggerEventId,
-    suggestionType: suggestion.suggestionType,
-    content: suggestion.content,
-    reasoning: suggestion.reasoning,
-    targetSlot: suggestion.targetSlot,
-    adopted: suggestion.adopted,
-    createdAt: suggestion.createdAt,
-  });
-
-  return suggestion;
 }
 
 export async function saveFinalMinutes(

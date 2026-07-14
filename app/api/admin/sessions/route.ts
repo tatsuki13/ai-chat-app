@@ -12,8 +12,6 @@ export async function GET() {
         _count: {
           select: {
             utterances: true,
-            buttonEvents: true,
-            aiSuggestions: true,
           },
         },
         finalMinutes: {
@@ -31,8 +29,6 @@ export async function GET() {
         started_at: session.startedAt.toISOString(),
         ended_at: session.endedAt?.toISOString() ?? null,
         utterance_count: session._count.utterances,
-        button_event_count: session._count.buttonEvents,
-        ai_suggestion_count: session._count.aiSuggestions,
         has_final_minutes: session.finalMinutes.length > 0,
       })),
     });

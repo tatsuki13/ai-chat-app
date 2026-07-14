@@ -17,18 +17,6 @@ type AppUtteranceInput = {
   createdAt: Date;
 };
 
-type AiSuggestionInput = {
-  id: string;
-  sessionId: string;
-  triggerEventId?: string | null;
-  suggestionType: string;
-  content: string;
-  reasoning?: string | null;
-  targetSlot?: string | null;
-  adopted?: boolean | null;
-  createdAt: Date;
-};
-
 export async function ensureStudySessionForAppSession(
   _session: AppSessionInput,
 ) {
@@ -44,12 +32,6 @@ export async function saveStudyUtteranceForAppUtterance(
 export async function deleteStudyUtteranceForAppUtterance(
   _appUtteranceId: string,
   _appSessionId: string,
-) {
-  return null;
-}
-
-export async function saveStudyInterventionForAiSuggestion(
-  _suggestion: AiSuggestionInput,
 ) {
   return null;
 }

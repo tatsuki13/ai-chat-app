@@ -77,7 +77,6 @@ type SessionCompletionState =
 type PromptPanelState = {
   title: string;
   body: string;
-  suggestionId?: string;
   tone: PromptTone;
 };
 
@@ -660,12 +659,9 @@ export default function SessionPage() {
     setPromptPanel(getPendingPrompt(buttonType));
 
     try {
-      const triggerEventId = await saveButtonEvent(session.id, buttonType);
-
       if (buttonType === "next_question") {
         const data = await postJson<NextQuestionResponse>("/api/ai/next-question", {
           session_id: session.id,
-          trigger_event_id: triggerEventId,
           current_topic: currentTopic.slot_name,
           current_topic_title: currentTopic.title,
         });
@@ -677,7 +673,6 @@ export default function SessionPage() {
         setPromptPanel({
           title: "AIからの質問",
           body,
-          suggestionId: data.suggestion.id,
           tone: "question",
         });
       }
@@ -685,7 +680,6 @@ export default function SessionPage() {
       if (buttonType === "switch_topic") {
         const data = await postJson<TopicSwitchResponse>("/api/ai/switch-topic", {
           session_id: session.id,
-          trigger_event_id: triggerEventId,
           current_topic: currentTopic.slot_name,
           current_topic_title: currentTopic.title,
           next_topic: nextTopic?.slot_name,
@@ -700,7 +694,6 @@ export default function SessionPage() {
             ? "次の話題へ"
             : "今の話題でもう少し確認",
           body: data.suggestion.message,
-          suggestionId: data.suggestion.id,
           tone: data.suggestion.should_switch ? "switch" : "question",
         });
       }
@@ -708,7 +701,6 @@ export default function SessionPage() {
       if (buttonType === "check_end") {
         const data = await postJson<EndCheckResponse>("/api/ai/check-end", {
           session_id: session.id,
-          trigger_event_id: triggerEventId,
           current_topic: currentTopic.slot_name,
           current_topic_title: currentTopic.title,
         });
@@ -716,7 +708,6 @@ export default function SessionPage() {
         setPromptPanel({
           title: data.suggestion.can_end ? "全体終了確認" : "全体としてもう少し確認",
           body: data.suggestion.message,
-          suggestionId: data.suggestion.id,
           tone: "end",
         });
       }
@@ -724,7 +715,6 @@ export default function SessionPage() {
       if (buttonType === "update_slots") {
         await postJson("/api/ai/update-slots", {
           session_id: session.id,
-          trigger_event_id: triggerEventId,
           current_topic: currentTopic.slot_name,
           current_topic_title: currentTopic.title,
         });
@@ -894,16 +884,13 @@ export default function SessionPage() {
     setStatusText("保存中");
 
     try {
-      const triggerEventId = await saveButtonEvent(session.id, "switch_topic");
       await postJson("/api/ai/update-slots", {
         session_id: session.id,
-        trigger_event_id: triggerEventId,
         current_topic: currentTopic.slot_name,
         current_topic_title: currentTopic.title,
       });
       const data = await postJson<TopicSwitchResponse>("/api/ai/switch-topic", {
         session_id: session.id,
-        trigger_event_id: triggerEventId,
         current_topic: currentTopic.slot_name,
         current_topic_title: currentTopic.title,
         next_topic: nextTopic?.slot_name,
@@ -915,7 +902,6 @@ export default function SessionPage() {
       setPromptPanel({
         title: "次の話題へ",
         body: data.suggestion.message,
-        suggestionId: data.suggestion.id,
         tone: "switch",
       });
       await refreshDeveloperSlotStates(session.id);
@@ -2199,19 +2185,6 @@ async function updateSessionDisplayId(
   return data.session;
 }
 
-async function saveButtonEvent(sessionId: string, buttonType: ButtonType) {
-  const data = await postJson<{
-    button_event: {
-      id: string;
-    };
-  }>("/api/button-event", {
-    session_id: sessionId,
-    button_type: buttonType,
-  });
-
-  return data.button_event.id;
-}
-
 async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
   return requestJson<T>(url, "POST", body);
 }
@@ -2479,7 +2452,6 @@ function formatTimerSeconds(seconds: number) {
 
 type NextQuestionResponse = {
   suggestion: {
-    id: string;
     question: string;
     transition_phrase: string;
   };
@@ -2487,7 +2459,6 @@ type NextQuestionResponse = {
 
 type TopicSwitchResponse = {
   suggestion: {
-    id: string;
     message: string;
     should_switch: boolean;
     next_topic: string;
@@ -2496,7 +2467,6 @@ type TopicSwitchResponse = {
 
 type EndCheckResponse = {
   suggestion: {
-    id: string;
     can_end: boolean;
     message: string;
   };

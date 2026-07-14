@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import {
-  ensureButtonEvent,
   getSessionContext,
-  saveAiSuggestion,
   saveSlotStates,
 } from "../../../../lib/acp-store";
 import {
@@ -25,11 +23,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "session_id is required" }, { status: 400 });
     }
 
-    const trigger = await ensureButtonEvent(
-      sessionId,
-      "switch_topic",
-      optionalString(body.trigger_event_id ?? body.triggerEventId),
-    );
     const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
     const currentTopicTitle = optionalString(
       body.current_topic_title ?? body.currentTopicTitle,
@@ -62,21 +55,11 @@ export async function POST(request: Request) {
             nextTopic,
             nextTopicTitle,
           });
-    const savedSuggestion = await saveAiSuggestion({
-      sessionId,
-      triggerEventId: trigger.id,
-      suggestionType: "switch_topic",
-      content: result.message,
-      reasoning: result.reason,
-      targetSlot: result.target_slot,
-    });
 
     return NextResponse.json({
-      trigger_event_id: trigger.id,
       suggestion: {
-        id: savedSuggestion.id,
-        suggestion_type: savedSuggestion.suggestionType,
-        content: savedSuggestion.content,
+        suggestion_type: "switch_topic",
+        content: result.message,
         message: result.message,
         target_slot: result.target_slot,
         should_switch: result.should_switch,
@@ -88,7 +71,7 @@ export async function POST(request: Request) {
           slots: slotStates,
           currentTopic,
         }),
-        created_at: savedSuggestion.createdAt.toISOString(),
+        created_at: new Date().toISOString(),
       },
     });
   } catch (error) {

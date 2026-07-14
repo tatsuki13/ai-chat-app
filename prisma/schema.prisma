@@ -12,8 +12,6 @@ model Session {
   condition       String?
   startedAt       DateTime           @default(now()) @map("started_at")
   endedAt         DateTime?          @map("ended_at")
-  aiSuggestions   AiSuggestionLog[]
-  buttonEvents    ButtonEvent[]
   finalMinutes    FinalMinute[]
   slotStates      SlotState[]
   utterances      SessionUtterance[]
@@ -35,40 +33,6 @@ model SessionUtterance {
   @@index([speaker])
   @@index([createdAt])
   @@map("utterances")
-}
-
-model ButtonEvent {
-  id            String            @id @default(cuid())
-  sessionId     String            @map("session_id")
-  buttonType    String            @map("button_type")
-  createdAt     DateTime          @default(now()) @map("created_at")
-  aiSuggestions AiSuggestionLog[] @relation("TriggerButtonEvent")
-  session       Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-
-  @@index([sessionId])
-  @@index([buttonType])
-  @@index([createdAt])
-  @@map("button_events")
-}
-
-model AiSuggestionLog {
-  id             String       @id @default(cuid())
-  sessionId      String       @map("session_id")
-  triggerEventId String?      @map("trigger_event_id")
-  suggestionType String       @map("suggestion_type")
-  content        String
-  reasoning      String?
-  targetSlot     String?      @map("target_slot")
-  adopted        Boolean?
-  createdAt      DateTime     @default(now()) @map("created_at")
-  session        Session      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  triggerEvent   ButtonEvent? @relation("TriggerButtonEvent", fields: [triggerEventId], references: [id])
-
-  @@index([sessionId])
-  @@index([triggerEventId])
-  @@index([suggestionType])
-  @@index([createdAt])
-  @@map("ai_suggestions")
 }
 
 model SlotState {

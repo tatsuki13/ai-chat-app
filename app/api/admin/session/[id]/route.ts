@@ -26,12 +26,6 @@ export async function GET(_request: Request, context: RouteContext) {
         utterances: {
           orderBy: { createdAt: "asc" },
         },
-        buttonEvents: {
-          orderBy: { createdAt: "asc" },
-        },
-        aiSuggestions: {
-          orderBy: { createdAt: "asc" },
-        },
         slotStates: true,
         finalMinutes: {
           orderBy: { createdAt: "desc" },
@@ -90,25 +84,6 @@ export async function GET(_request: Request, context: RouteContext) {
         speaker: utterance.speaker,
         text: utterance.text,
         created_at: utterance.created_at,
-      })),
-      button_events: session.buttonEvents.map((event) => ({
-        id: event.id,
-        session_id: event.sessionId,
-        participant_code: session.participantCode,
-        button_type: event.buttonType,
-        created_at: event.createdAt.toISOString(),
-      })),
-      ai_suggestions: session.aiSuggestions.map((suggestion) => ({
-        id: suggestion.id,
-        session_id: suggestion.sessionId,
-        participant_code: session.participantCode,
-        trigger_event_id: suggestion.triggerEventId,
-        suggestion_type: suggestion.suggestionType,
-        content: suggestion.content,
-        reasoning: suggestion.reasoning,
-        target_slot: suggestion.targetSlot,
-        adopted: suggestion.adopted,
-        created_at: suggestion.createdAt.toISOString(),
       })),
       slot_states: slotStates,
       slot_control: slotControl,

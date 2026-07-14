@@ -10,8 +10,6 @@ type SessionSummary = {
   started_at: string;
   ended_at: string | null;
   utterance_count: number;
-  button_event_count: number;
-  ai_suggestion_count: number;
   has_final_minutes: boolean;
 };
 
@@ -27,21 +25,6 @@ type AdminDetail = {
     id: string;
     speaker: string;
     text: string;
-    created_at: string;
-  }>;
-  button_events: Array<{
-    id: string;
-    button_type: string;
-    created_at: string;
-  }>;
-  ai_suggestions: Array<{
-    id: string;
-    trigger_event_id: string | null;
-    suggestion_type: string;
-    content: string;
-    reasoning: string | null;
-    target_slot: string | null;
-    adopted: boolean | null;
     created_at: string;
   }>;
   slot_states: Array<{
@@ -169,10 +152,11 @@ export default function AdminPage() {
                   <div className="mt-1 text-[13px] font-bold text-stone-500">
                     {formatDateTime(session.started_at)}
                   </div>
-                  <div className="mt-2 grid grid-cols-3 gap-1 text-center text-[12px] font-black">
+                  <div className="mt-2 grid grid-cols-2 gap-1 text-center text-[12px] font-black">
                     <Metric value={session.utterance_count} label="発話" />
-                    <Metric value={session.button_event_count} label="ボタン" />
-                    <Metric value={session.ai_suggestion_count} label="AI" />
+                    <span className="rounded-md bg-stone-100 px-2 py-1 text-stone-700">
+                      {session.has_final_minutes ? "議事録あり" : "議事録なし"}
+                    </span>
                   </div>
                 </button>
               ))
@@ -213,51 +197,6 @@ export default function AdminPage() {
                     />
                   ))}
                   {detail.utterances.length === 0 ? <EmptyLine /> : null}
-                </div>
-              </Panel>
-
-              <Panel title="ボタン押下ログ">
-                <div className="grid gap-2 md:grid-cols-2">
-                  {detail.button_events.map((event) => (
-                    <div key={event.id} className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2">
-                      <div className="text-[14px] font-black">{buttonLabel(event.button_type)}</div>
-                      <div className="mt-1 text-[12px] font-bold text-stone-500">
-                        {formatDateTime(event.created_at)}
-                      </div>
-                      <div className="mt-1 truncate font-mono text-[11px] text-stone-400">{event.id}</div>
-                    </div>
-                  ))}
-                  {detail.button_events.length === 0 ? <EmptyLine /> : null}
-                </div>
-              </Panel>
-
-              <Panel title="AI提案ログ">
-                <div className="space-y-3">
-                  {detail.ai_suggestions.map((suggestion) => (
-                    <article key={suggestion.id} className="rounded-lg border border-stone-200 bg-white p-3 shadow-sm">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge>{suggestion.suggestion_type}</Badge>
-                        <Badge>{suggestion.target_slot ?? "targetなし"}</Badge>
-                        <Badge>{suggestion.adopted === true ? "採用" : suggestion.adopted === false ? "不採用" : "未記録"}</Badge>
-                        <span className="text-[12px] font-bold text-stone-500">
-                          {formatDateTime(suggestion.created_at)}
-                        </span>
-                      </div>
-                      <p className="mt-3 whitespace-pre-wrap text-[16px] font-bold leading-relaxed">
-                        {suggestion.content}
-                      </p>
-                      <div className="mt-3 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2">
-                        <div className="text-[12px] font-black text-stone-500">reasoning</div>
-                        <p className="mt-1 whitespace-pre-wrap text-[14px] leading-relaxed text-stone-700">
-                          {suggestion.reasoning || "-"}
-                        </p>
-                      </div>
-                      <div className="mt-2 truncate font-mono text-[11px] text-stone-400">
-                        trigger_event_id: {suggestion.trigger_event_id ?? "-"}
-                      </div>
-                    </article>
-                  ))}
-                  {detail.ai_suggestions.length === 0 ? <EmptyLine /> : null}
                 </div>
               </Panel>
 
@@ -398,17 +337,6 @@ async function fetchJson<T>(url: string): Promise<T> {
 
   if (!response.ok) throw new Error(`Request failed: ${url}`);
   return response.json() as Promise<T>;
-}
-
-function buttonLabel(type: string) {
-  const labels: Record<string, string> = {
-    next_question: "質問する",
-    switch_topic: "話題を変える",
-    check_end: "終了確認",
-    update_slots: "議事録更新",
-  };
-
-  return labels[type] ?? type;
 }
 
 function formatDateTime(value: string) {
