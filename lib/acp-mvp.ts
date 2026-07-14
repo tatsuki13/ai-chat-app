@@ -383,6 +383,15 @@ export type SubSlotControlState = {
   inDeferredQueue: boolean;
   canAskAgain: boolean;
 };
+export type SubSlotControlOverride = {
+  topicId: string;
+  subSlotId: string;
+  status: ScopedSlotStatus;
+  value?: string;
+  unansweredReason?: UnansweredReason;
+  lastUpdatedAt?: string;
+  lastUpdatedTopicId?: string;
+};
 export type MainSlotControlState = {
   id: string;
   label: string;
@@ -719,10 +728,17 @@ export function buildSlotControlDebugState(input: {
   slots: SlotControlInputSlot[];
   currentTopic?: string;
   includeBeforeSessionEnd?: boolean;
+  subSlotOverrides?: SubSlotControlOverride[];
 }): SlotControlDebugState {
   const currentTopic = resolveDiscussionTopic(input.currentTopic);
+  const overrideMap = new Map(
+    (input.subSlotOverrides ?? []).map((override) => [
+      `${override.topicId}:${override.subSlotId}`,
+      override,
+    ]),
+  );
   const mainSlots = DISCUSSION_TOPICS.map((topic) =>
-    buildMainSlotControlState(topic, input.slots, currentTopic.id),
+    buildMainSlotControlState(topic, input.slots, currentTopic.id, overrideMap),
   );
   const deferredSlotQueue = mainSlots
     .flatMap((mainSlot) => buildDeferredItemsForMainSlot(mainSlot, currentTopic.id))
@@ -777,23 +793,27 @@ function buildMainSlotControlState(
   topic: (typeof DISCUSSION_TOPICS)[number],
   slots: SlotControlInputSlot[],
   currentTopicId: string,
+  overrideMap: Map<string, SubSlotControlOverride>,
 ): MainSlotControlState {
   const slot = slots.find((item) => item.slot_name === topic.slot_name);
   const status = toScopedSlotStatus(slot?.status);
   const unansweredReason = getUnansweredReason(status);
   const value = slot ? joinUniqueText("", slot.summary, slot.evidence_utterance) : "";
   const subSlots = topic.aspects.map((aspect) => {
-    const aspectStatus = getAspectScopedStatus(aspect, status, value);
+    const override = overrideMap.get(`${topic.id}:${aspect.id}`);
+    const aspectStatus =
+      override?.status ?? getAspectScopedStatus(aspect, status, value);
     const aspectReason = getUnansweredReason(aspectStatus);
     return {
       id: aspect.id,
       label: aspect.label,
       priority: aspect.priority,
       status: aspectStatus,
-      value: aspectMatchesText(aspect.label, value) ? value : undefined,
-      unansweredReason: aspectReason,
-      lastUpdatedAt: slot?.updated_at,
-      lastUpdatedTopicId: slot?.updated_at ? topic.id : undefined,
+      value: override?.value ?? (aspectMatchesText(aspect.label, value) ? value : undefined),
+      unansweredReason: override?.unansweredReason ?? aspectReason,
+      lastUpdatedAt: override?.lastUpdatedAt ?? slot?.updated_at,
+      lastUpdatedTopicId:
+        override?.lastUpdatedTopicId ?? (slot?.updated_at ? topic.id : undefined),
       inDeferredQueue: canDeferSlotStatus(aspectStatus),
       canAskAgain: canAskAgainStatus(aspectStatus),
     };

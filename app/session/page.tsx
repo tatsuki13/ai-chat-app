@@ -5,6 +5,7 @@ import {
   buildSlotControlDebugState,
   DISCUSSION_TOPIC,
   DISCUSSION_TOPICS,
+  type SlotControlDebugState,
 } from "../../lib/acp-mvp";
 import {
   createSingleMicInputService,
@@ -157,6 +158,8 @@ export default function SessionPage() {
   const [audioInputLoading, setAudioInputLoading] = useState(false);
   const [pushToTalkActive, setPushToTalkActive] = useState(false);
   const [developerSlotStates, setDeveloperSlotStates] = useState<SlotState[]>([]);
+  const [developerSlotControl, setDeveloperSlotControl] =
+    useState<SlotControlDebugState | null>(null);
   const [developerSlotLoading, setDeveloperSlotLoading] = useState(false);
   const [developerSlotError, setDeveloperSlotError] = useState("");
   const logScrollRef = useRef<HTMLDivElement | null>(null);
@@ -269,11 +272,12 @@ export default function SessionPage() {
   useEffect(() => {
     if (!session?.id) {
       setDeveloperSlotStates([]);
+      setDeveloperSlotControl(null);
       return;
     }
 
     void refreshDeveloperSlotStates(session.id);
-  }, [session?.id]);
+  }, [session?.id, currentTopic.slot_name]);
 
   useEffect(() => {
     speakerRef.current = normalizeSpeaker(speaker);
@@ -758,6 +762,7 @@ export default function SessionPage() {
     setIsEditingId(false);
     setIdError("");
     setDeveloperSlotStates([]);
+    setDeveloperSlotControl(null);
     setDeveloperSlotError("");
     setDeveloperSlotLoading(false);
     resetTopicTiming();
@@ -771,6 +776,7 @@ export default function SessionPage() {
       setUtteranceTotal(0);
       setDraft("");
       setDeveloperSlotStates([]);
+      setDeveloperSlotControl(null);
       resetTopicTiming();
       setStatusText("保存済み");
     } catch {
@@ -856,10 +862,12 @@ export default function SessionPage() {
     setDeveloperSlotError("");
 
     try {
-      const detail = await fetchAdminSessionDetail(sessionId);
+      const detail = await fetchAdminSessionDetail(sessionId, currentTopic.slot_name);
       setDeveloperSlotStates(detail.slot_states);
+      setDeveloperSlotControl(detail.slot_control ?? null);
     } catch {
       setDeveloperSlotError("slot states unavailable");
+      setDeveloperSlotControl(null);
     } finally {
       setDeveloperSlotLoading(false);
     }
@@ -1265,6 +1273,7 @@ export default function SessionPage() {
           <div className="space-y-3">
             <DeveloperDialogueTopics
               slotStates={developerSlotStates}
+              slotControl={developerSlotControl}
               currentTopic={currentTopic.slot_name}
               loading={developerSlotLoading}
               error={developerSlotError}
@@ -1312,15 +1321,18 @@ export default function SessionPage() {
 
 function DeveloperDialogueTopics(props: {
   slotStates: SlotState[];
+  slotControl: SlotControlDebugState | null;
   currentTopic: string;
   loading: boolean;
   error: string;
   onRefresh: () => void;
 }) {
-  const slotControl = buildSlotControlDebugState({
-    slots: props.slotStates,
-    currentTopic: props.currentTopic,
-  });
+  const slotControl =
+    props.slotControl ??
+    buildSlotControlDebugState({
+      slots: props.slotStates,
+      currentTopic: props.currentTopic,
+    });
   const filledCount = props.slotStates.filter(
     (slot) => isTerminalSlotStatus(slot.status),
   ).length;
@@ -2020,11 +2032,19 @@ async function fetchSessionDetail(sessionId: string): Promise<{
   return response.json();
 }
 
-async function fetchAdminSessionDetail(sessionId: string): Promise<{
+async function fetchAdminSessionDetail(
+  sessionId: string,
+  currentTopic?: string,
+): Promise<{
   slot_states: SlotState[];
+  slot_control?: SlotControlDebugState;
 }> {
+  const params = new URLSearchParams();
+  if (currentTopic) params.set("current_topic", currentTopic);
   const response = await fetch(
-    `/api/admin/session/${encodeURIComponent(sessionId)}`,
+    `/api/admin/session/${encodeURIComponent(sessionId)}${
+      params.size ? `?${params.toString()}` : ""
+    }`,
     {
       cache: "no-store",
     },

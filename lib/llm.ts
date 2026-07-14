@@ -34,11 +34,15 @@ import {
   type AuxiliaryMinutesItem,
   type AcpSlotState,
   type ConversationUtterance,
+  type ScopedSlotStatus,
   type EndCheckResult,
   type FinalMinutesResult,
   type NextQuestionResult,
   type Sensitivity,
+  type SlotControlDebugState,
+  type SubSlotControlOverride,
   type TopicSwitchResult,
+  type UnansweredReason,
 } from "./acp-mvp";
 
 type ConversationContext = {
@@ -181,6 +185,20 @@ const SYSTEM_FINAL_MINUTES = [
   "",
   "出力形式:",
   '{"markdown":"# ACP対話 議事録\\n...","json":{"generated_at":"...","session":{"id":"...","participant_code":"..."},"summary":"...","themes":[{"theme_id":"future_life_continuity","title":"...","level":2,"response_state":"expressed","summary":"...","evidence_utterance":"...","aspects":[{"aspect_id":"continued_activity","label":"...","status":"partial | filled | empty","evidence":[...]}]}],"theme_metrics":{"themeReachRate":0,"responseStateCoverage":0,"valueExpressionRate":0,"evidenceCoverage":0},"slots":[...],"auxiliary_items":[{"item_name":"未解決課題・次回確認事項","summary":"...","evidence_utterance":"..."}],"utterances":[...]}}',
+].join("\n");
+
+const SYSTEM_SLOT_CONTROL_DEBUG = [
+  "あなたはACP対話ログを読み、開発確認用にサブスロットの状態を意味判定するAIです。",
+  "テーマ名・サブスロット名は変更せず、提供された topic_id と aspect_id だけを使ってください。",
+  "語彙の完全一致ではなく、本人発話の意味から該当するサブスロットを判断してください。",
+  "ただし、根拠発話がないもの、会話ログに存在しない根拠、推測だけの内容は answered / partially_answered / not_applicable / declined / unable_to_verbalize にしないでください。",
+  "非unansweredにする場合は、必ず会話ログ中の本人発話または介護者質問の短い抜粋を evidence_utterance に入れてください。",
+  "本人が「特にない」「該当しない」と明確に答えた場合は not_applicable、話したくない場合は declined、言語化できない場合は unable_to_verbalize としてください。",
+  "根拠が弱いが関連発話がある場合は partially_answered、十分に具体的な根拠がある場合だけ answered としてください。",
+  "出力はJSONのみとしてください。",
+  "",
+  "出力形式:",
+  '{"main_slots":[{"topic_id":"...","sub_slots":[{"id":"...","status":"unanswered | partially_answered | answered | not_applicable | declined | unable_to_verbalize | needs_follow_up | deferred","summary":"...","evidence_utterance":"...","unanswered_reason":"not_discussed | time_limit | topic_changed | declined | unable_to_verbalize | needs_follow_up"}]}]}',
 ].join("\n");
 
 const SLOT_KEYWORDS: Record<AcpSlotName, string[]> = {
@@ -355,6 +373,181 @@ export async function generateFinalMinutes(
       context,
     ),
   };
+}
+
+type SemanticSlotControlResult = {
+  main_slots?: Array<{
+    topic_id?: string;
+    sub_slots?: Array<{
+      id?: string;
+      status?: string;
+      summary?: string;
+      evidence_utterance?: string;
+      unanswered_reason?: string;
+    }>;
+  }>;
+};
+
+export async function buildSemanticSlotControlDebugState(input: {
+  utterances: ConversationUtterance[];
+  slots: AcpSlotState[];
+  currentTopic?: string;
+  includeBeforeSessionEnd?: boolean;
+}): Promise<SlotControlDebugState> {
+  const fallback = buildSlotControlDebugState({
+    slots: input.slots,
+    currentTopic: input.currentTopic,
+    includeBeforeSessionEnd: input.includeBeforeSessionEnd,
+  });
+
+  if (input.utterances.length === 0) return fallback;
+
+  const result = await requestJson<SemanticSlotControlResult>(
+    SYSTEM_SLOT_CONTROL_DEBUG,
+    {
+      current_topic: input.currentTopic,
+      topics: DISCUSSION_TOPICS.map((topic) => ({
+        topic_id: topic.id,
+        main_slot: topic.slot_name,
+        title: topic.title,
+        sub_slots: topic.aspects.map((aspect) => ({
+          id: aspect.id,
+          label: aspect.label,
+          priority: aspect.priority,
+        })),
+      })),
+      slot_states: input.slots,
+      conversation_log: renderTranscript(input.utterances),
+    },
+    { main_slots: [] },
+  );
+  const overrides = normalizeSemanticSlotOverrides(
+    result,
+    input.utterances,
+  );
+
+  return buildSlotControlDebugState({
+    slots: input.slots,
+    currentTopic: input.currentTopic,
+    includeBeforeSessionEnd: input.includeBeforeSessionEnd,
+    subSlotOverrides: overrides,
+  });
+}
+
+function normalizeSemanticSlotOverrides(
+  result: SemanticSlotControlResult,
+  utterances: ConversationUtterance[],
+): SubSlotControlOverride[] {
+  const validTopicIds = new Set<string>(DISCUSSION_TOPICS.map((topic) => topic.id));
+  const aspectIdsByTopic = new Map<string, Set<string>>(
+    DISCUSSION_TOPICS.map((topic) => [
+      topic.id,
+      new Set(topic.aspects.map((aspect) => aspect.id)),
+    ]),
+  );
+  const overrides: SubSlotControlOverride[] = [];
+
+  for (const mainSlot of result.main_slots ?? []) {
+    const topicId = typeof mainSlot.topic_id === "string" ? mainSlot.topic_id : "";
+    if (!validTopicIds.has(topicId)) continue;
+
+    const validAspectIds = aspectIdsByTopic.get(topicId);
+    if (!validAspectIds) continue;
+
+    for (const subSlot of mainSlot.sub_slots ?? []) {
+      const subSlotId = typeof subSlot.id === "string" ? subSlot.id : "";
+      if (!validAspectIds.has(subSlotId)) continue;
+
+      const status = normalizeScopedSlotStatus(subSlot.status);
+      const evidence = normalizeEvidenceText(subSlot.evidence_utterance);
+      const requiresEvidence = status !== "unanswered" && status !== "deferred";
+
+      if (requiresEvidence && !evidenceMatchesTranscript(evidence, utterances)) {
+        continue;
+      }
+
+      overrides.push({
+        topicId,
+        subSlotId,
+        status,
+        value: evidence || nonEmpty(subSlot.summary, ""),
+        unansweredReason: normalizeUnansweredReason(subSlot.unanswered_reason, status),
+        lastUpdatedTopicId: topicId,
+      });
+    }
+  }
+
+  return overrides;
+}
+
+function normalizeScopedSlotStatus(value: unknown): ScopedSlotStatus {
+  switch (value) {
+    case "answered":
+    case "partially_answered":
+    case "not_applicable":
+    case "declined":
+    case "unable_to_verbalize":
+    case "needs_follow_up":
+    case "deferred":
+      return value;
+    default:
+      return "unanswered";
+  }
+}
+
+function normalizeUnansweredReason(
+  value: unknown,
+  status: ScopedSlotStatus,
+): UnansweredReason | undefined {
+  switch (value) {
+    case "not_discussed":
+    case "time_limit":
+    case "topic_changed":
+    case "declined":
+    case "unable_to_verbalize":
+    case "needs_follow_up":
+      return value;
+    default:
+      if (status === "declined") return "declined";
+      if (status === "unable_to_verbalize") return "unable_to_verbalize";
+      if (status === "partially_answered" || status === "needs_follow_up") {
+        return "needs_follow_up";
+      }
+      if (status === "unanswered") return "not_discussed";
+      return undefined;
+  }
+}
+
+function normalizeEvidenceText(value: unknown) {
+  if (typeof value !== "string") return "";
+
+  return value
+    .replace(/^(本人|高齢者役|elder|介護者|caregiver)\s*[:：]\s*/i, "")
+    .trim();
+}
+
+function evidenceMatchesTranscript(
+  evidence: string,
+  utterances: ConversationUtterance[],
+) {
+  const normalizedEvidence = normalizeForEvidenceMatch(evidence);
+  if (normalizedEvidence.length < 4) return false;
+
+  return utterances.some((utterance) => {
+    const normalizedUtterance = normalizeForEvidenceMatch(utterance.text);
+    if (!normalizedUtterance) return false;
+
+    return (
+      normalizedUtterance.includes(normalizedEvidence) ||
+      normalizedEvidence.includes(normalizedUtterance)
+    );
+  });
+}
+
+function normalizeForEvidenceMatch(value: string) {
+  return value
+    .replace(/[「」『』"'\s、。,.，．]/g, "")
+    .toLowerCase();
 }
 
 async function requestJson<T>(

@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import {
   createEmptySlotStates,
-  buildSlotControlDebugState,
   mergeSlotStates,
   normalizeConversationSpeaker,
   normalizeSlotStatus,
 } from "../../../../../lib/acp-mvp";
+import { buildSemanticSlotControlDebugState } from "../../../../../lib/llm";
 import { prisma } from "../../../../../lib/prisma";
 
 export const runtime = "nodejs";
@@ -54,6 +54,18 @@ export async function GET(_request: Request, context: RouteContext) {
       })),
     );
 
+    const normalizedUtterances = session.utterances.map((utterance) => ({
+      id: utterance.id,
+      speaker: normalizeConversationSpeaker(utterance.speaker),
+      text: utterance.text,
+      created_at: utterance.createdAt.toISOString(),
+    }));
+    const slotControl = await buildSemanticSlotControlDebugState({
+      utterances: normalizedUtterances,
+      slots: slotStates,
+      currentTopic: optionalString(new URL(_request.url).searchParams.get("current_topic")),
+    });
+
     return NextResponse.json({
       session: {
         id: session.id,
@@ -62,13 +74,13 @@ export async function GET(_request: Request, context: RouteContext) {
         started_at: session.startedAt.toISOString(),
         ended_at: session.endedAt?.toISOString() ?? null,
       },
-      utterances: session.utterances.map((utterance) => ({
+      utterances: normalizedUtterances.map((utterance) => ({
         id: utterance.id,
-        session_id: utterance.sessionId,
+        session_id: session.id,
         participant_code: session.participantCode,
-        speaker: normalizeConversationSpeaker(utterance.speaker),
+        speaker: utterance.speaker,
         text: utterance.text,
-        created_at: utterance.createdAt.toISOString(),
+        created_at: utterance.created_at,
       })),
       button_events: session.buttonEvents.map((event) => ({
         id: event.id,
@@ -90,9 +102,7 @@ export async function GET(_request: Request, context: RouteContext) {
         created_at: suggestion.createdAt.toISOString(),
       })),
       slot_states: slotStates,
-      slot_control: buildSlotControlDebugState({
-        slots: slotStates,
-      }),
+      slot_control: slotControl,
       final_minutes: session.finalMinutes.map((minutes) => ({
         id: minutes.id,
         session_id: minutes.sessionId,
@@ -110,4 +120,8 @@ export async function GET(_request: Request, context: RouteContext) {
       { status: 500 },
     );
   }
+}
+
+function optionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
