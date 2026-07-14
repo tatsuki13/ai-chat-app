@@ -661,9 +661,40 @@ async function requestJson<T>(
 
     return parsed ? ({ ...fallback, ...parsed } as T) : fallback;
   } catch (error) {
-    console.error("LLM request failed", error);
+    console.error("LLM request failed", describeLlmError(error));
     return fallback;
   }
+}
+
+function describeLlmError(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return { message: String(error) };
+  }
+
+  const record = error as Record<string, unknown>;
+  const cause = record.cause;
+  const causeRecord =
+    cause && typeof cause === "object" ? (cause as Record<string, unknown>) : null;
+
+  return {
+    name: typeof record.name === "string" ? record.name : undefined,
+    message: typeof record.message === "string" ? record.message : undefined,
+    status: record.status,
+    code: record.code,
+    type: record.type,
+    requestID: record.requestID,
+    cause:
+      causeRecord
+        ? {
+            name: typeof causeRecord.name === "string" ? causeRecord.name : undefined,
+            message:
+              typeof causeRecord.message === "string"
+                ? causeRecord.message
+                : undefined,
+            code: causeRecord.code,
+          }
+        : undefined,
+  };
 }
 
 function getClient(apiKey: string) {
