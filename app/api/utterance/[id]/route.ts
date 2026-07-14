@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
 import {
   deleteStudyUtteranceForAppUtterance,
@@ -17,10 +18,11 @@ export async function PATCH(request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
     const body = await request.json();
-    const speaker = requiredString(body.speaker);
+    const rawSpeaker = requiredString(body.speaker);
+    const speaker = normalizeSpeaker(rawSpeaker);
     const text = requiredString(body.text);
 
-    if (!isSpeaker(speaker) || !text) {
+    if (!isSpeaker(rawSpeaker) || !text) {
       return NextResponse.json(
         { error: "speaker and text are required" },
         { status: 400 },
@@ -94,6 +96,10 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
 function requiredString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeSpeaker(value: string) {
+  return normalizeConversationSpeaker(value);
 }
 
 function isSpeaker(value: string): value is "A" | "B" | "elder" | "caregiver" {

@@ -5,6 +5,7 @@ import {
   saveAiSuggestion,
   saveSlotStates,
 } from "../../../../lib/acp-store";
+import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
 import {
   generateNextQuestion,
   updateSlotsFromConversation,
@@ -69,6 +70,10 @@ export async function POST(request: Request) {
         reason: result.reason,
         sensitivity: result.sensitivity,
         slot_states_updated: context.utterances.length > 0,
+        control_debug: buildSlotControlDebugState({
+          slots: slotStates,
+          currentTopic,
+        }),
         created_at: savedSuggestion.createdAt.toISOString(),
       },
     });

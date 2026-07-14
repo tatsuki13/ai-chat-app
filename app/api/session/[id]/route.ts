@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
+import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
 import { ensureStudySessionForAppSession } from "../../../../lib/research-store";
 
@@ -56,7 +57,7 @@ export async function GET(_request: Request, context: RouteContext) {
       utterance_count: utteranceCount,
       utterances: utterances.reverse().map((utterance) => ({
         id: utterance.id,
-        speaker: utterance.speaker,
+        speaker: normalizeConversationSpeaker(utterance.speaker),
         text: utterance.text,
         created_at: utterance.createdAt.toISOString(),
       })),

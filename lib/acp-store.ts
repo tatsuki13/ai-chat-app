@@ -3,6 +3,7 @@ import { prisma } from "./prisma";
 import {
   createEmptySlotStates,
   mergeSlotStates,
+  normalizeConversationSpeaker,
   toJsonValue,
   type AcpSlotState,
   type ButtonType,
@@ -42,7 +43,7 @@ export async function getSessionContext(sessionId: string) {
     session,
     utterances: session.utterances.map((utterance) => ({
       id: utterance.id,
-      speaker: utterance.speaker,
+      speaker: normalizeConversationSpeaker(utterance.speaker),
       text: utterance.text,
       created_at: utterance.createdAt.toISOString(),
     })) satisfies ConversationUtterance[],

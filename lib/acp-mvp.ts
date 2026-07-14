@@ -344,6 +344,75 @@ export type ThemeCompletenessMetrics = {
   valueExpressionRate: number;
   evidenceCoverage: number;
 };
+export type ScopedSlotStatus =
+  | "unanswered"
+  | "partially_answered"
+  | "answered"
+  | "not_applicable"
+  | "declined"
+  | "unable_to_verbalize"
+  | "needs_follow_up"
+  | "deferred";
+export type UnansweredReason =
+  | "not_discussed"
+  | "time_limit"
+  | "topic_changed"
+  | "declined"
+  | "unable_to_verbalize"
+  | "needs_follow_up";
+export type DeferredSlotItem = {
+  mainSlotId: string;
+  mainSlotLabel: string;
+  subSlotId?: string;
+  subSlotLabel?: string;
+  sourceTopicId: string;
+  reason: UnansweredReason;
+  priority: number;
+  canAskAgain: boolean;
+  suggestedTiming: "related_topic" | "after_current_topic" | "before_session_end";
+};
+export type SubSlotControlState = {
+  id: string;
+  label: string;
+  priority: AspectPriority;
+  status: ScopedSlotStatus;
+  value?: string;
+  unansweredReason?: UnansweredReason;
+  lastUpdatedAt?: string;
+  lastUpdatedTopicId?: string;
+  inDeferredQueue: boolean;
+  canAskAgain: boolean;
+};
+export type MainSlotControlState = {
+  id: string;
+  label: string;
+  topicId: string;
+  status: ScopedSlotStatus;
+  isCurrentTopic: boolean;
+  inDeferredQueue: boolean;
+  canAskAgain: boolean;
+  unansweredReason?: UnansweredReason;
+  lastUpdatedAt?: string;
+  lastUpdatedTopicId?: string;
+  subSlots: SubSlotControlState[];
+};
+export type SlotControlDebugState = {
+  currentTopicId: string;
+  currentMainSlot: string;
+  referencedSubSlots: string[];
+  selectionReason: string;
+  deferredSlotQueue: DeferredSlotItem[];
+  beforeSessionEndTargets: DeferredSlotItem[];
+  allSlotReferenceUsed: boolean;
+  mainSlots: MainSlotControlState[];
+};
+type SlotControlInputSlot = {
+  slot_name: string;
+  status: unknown;
+  summary: string;
+  evidence_utterance: string;
+  updated_at?: string;
+};
 export type Speaker = "caregiver" | "elder" | "family";
 export type ButtonType =
   | "next_question"
@@ -452,6 +521,20 @@ export const SPEAKER_LABELS: Record<string, string> = {
   elder: "本人",
   family: "家族",
 };
+
+export function normalizeConversationSpeaker(value: string): Speaker {
+  if (value === "B" || value === "caregiver") return "caregiver";
+  if (value === "family") return "family";
+  return "elder";
+}
+
+export function isElderSpeaker(value: string) {
+  return normalizeConversationSpeaker(value) === "elder";
+}
+
+export function isCaregiverSpeaker(value: string) {
+  return normalizeConversationSpeaker(value) === "caregiver";
+}
 
 export function createEmptySlotStates(): AcpSlotState[] {
   return ACP_SLOT_NAMES.map((slotName) => ({
@@ -630,6 +713,193 @@ export function getOptionalAspects(topic: (typeof DISCUSSION_TOPICS)[number]) {
 
 export function getCrossTopicAspects(topic: (typeof DISCUSSION_TOPICS)[number]) {
   return topic.aspects.filter((aspect) => aspect.priority === "cross_topic");
+}
+
+export function buildSlotControlDebugState(input: {
+  slots: SlotControlInputSlot[];
+  currentTopic?: string;
+  includeBeforeSessionEnd?: boolean;
+}): SlotControlDebugState {
+  const currentTopic = resolveDiscussionTopic(input.currentTopic);
+  const mainSlots = DISCUSSION_TOPICS.map((topic) =>
+    buildMainSlotControlState(topic, input.slots, currentTopic.id),
+  );
+  const deferredSlotQueue = mainSlots
+    .flatMap((mainSlot) => buildDeferredItemsForMainSlot(mainSlot, currentTopic.id))
+    .sort((left, right) => left.priority - right.priority);
+  const referencedSubSlots = mainSlots
+    .find((slot) => slot.topicId === currentTopic.id)
+    ?.subSlots.filter((slot) => slot.canAskAgain)
+    .map((slot) => slot.label) ?? [];
+
+  return {
+    currentTopicId: currentTopic.id,
+    currentMainSlot: currentTopic.slot_name,
+    referencedSubSlots,
+    selectionReason:
+      "質問候補生成は現在テーマのメインスロット、配下サブスロット、関連する保留項目だけを参照します。",
+    deferredSlotQueue,
+    beforeSessionEndTargets: input.includeBeforeSessionEnd
+      ? deferredSlotQueue.filter((item) => item.suggestedTiming === "before_session_end")
+      : [],
+    allSlotReferenceUsed: false,
+    mainSlots,
+  };
+}
+
+export function getCurrentTopicQuestionScope(input: {
+  slots: SlotControlInputSlot[];
+  currentTopic?: string;
+}) {
+  const debugState = buildSlotControlDebugState(input);
+  const currentMainSlot = debugState.mainSlots.find((slot) => slot.isCurrentTopic);
+
+  return {
+    currentTopicId: debugState.currentTopicId,
+    currentMainSlot: debugState.currentMainSlot,
+    referencedSubSlots:
+      currentMainSlot?.subSlots
+        .filter((slot) => slot.canAskAgain)
+        .map((slot) => ({
+          id: slot.id,
+          label: slot.label,
+          status: slot.status,
+          unansweredReason: slot.unansweredReason,
+        })) ?? [],
+    relatedDeferredItems: debugState.deferredSlotQueue.filter(
+      (item) => item.suggestedTiming === "related_topic",
+    ),
+    allSlotReferenceUsed: false,
+  };
+}
+
+function buildMainSlotControlState(
+  topic: (typeof DISCUSSION_TOPICS)[number],
+  slots: SlotControlInputSlot[],
+  currentTopicId: string,
+): MainSlotControlState {
+  const slot = slots.find((item) => item.slot_name === topic.slot_name);
+  const status = toScopedSlotStatus(slot?.status);
+  const unansweredReason = getUnansweredReason(status);
+  const value = slot ? joinUniqueText("", slot.summary, slot.evidence_utterance) : "";
+  const subSlots = topic.aspects.map((aspect) => {
+    const aspectStatus = getAspectScopedStatus(aspect, status, value);
+    const aspectReason = getUnansweredReason(aspectStatus);
+    return {
+      id: aspect.id,
+      label: aspect.label,
+      priority: aspect.priority,
+      status: aspectStatus,
+      value: aspectMatchesText(aspect.label, value) ? value : undefined,
+      unansweredReason: aspectReason,
+      lastUpdatedAt: slot?.updated_at,
+      lastUpdatedTopicId: slot?.updated_at ? topic.id : undefined,
+      inDeferredQueue: canDeferSlotStatus(aspectStatus),
+      canAskAgain: canAskAgainStatus(aspectStatus),
+    };
+  });
+
+  return {
+    id: String(topic.slot_name),
+    label: topic.title,
+    topicId: topic.id,
+    status,
+    isCurrentTopic: topic.id === currentTopicId,
+    inDeferredQueue: canDeferSlotStatus(status),
+    canAskAgain: canAskAgainStatus(status),
+    unansweredReason,
+    lastUpdatedAt: slot?.updated_at,
+    lastUpdatedTopicId: slot?.updated_at ? topic.id : undefined,
+    subSlots,
+  };
+}
+
+function buildDeferredItemsForMainSlot(
+  mainSlot: MainSlotControlState,
+  currentTopicId: string,
+): DeferredSlotItem[] {
+  const mainTopicIndex = DISCUSSION_TOPICS.findIndex((topic) => topic.id === mainSlot.topicId);
+  const currentTopicIndex = DISCUSSION_TOPICS.findIndex((topic) => topic.id === currentTopicId);
+  const isPastTopic = mainTopicIndex >= 0 && currentTopicIndex >= 0 && mainTopicIndex < currentTopicIndex;
+  const timing = isPastTopic ? "after_current_topic" : "before_session_end";
+
+  return mainSlot.subSlots
+    .filter((subSlot) => subSlot.inDeferredQueue && subSlot.canAskAgain)
+    .map((subSlot, index) => ({
+      mainSlotId: mainSlot.id,
+      mainSlotLabel: mainSlot.label,
+      subSlotId: subSlot.id,
+      subSlotLabel: subSlot.label,
+      sourceTopicId: mainSlot.topicId,
+      reason: subSlot.unansweredReason ?? "not_discussed",
+      priority: mainSlot.isCurrentTopic ? index + 1 : index + 10,
+      canAskAgain: subSlot.canAskAgain,
+      suggestedTiming: mainSlot.isCurrentTopic ? "related_topic" : timing,
+    }));
+}
+
+function toScopedSlotStatus(status: unknown): ScopedSlotStatus {
+  switch (status) {
+    case "answered":
+    case "filled":
+      return "answered";
+    case "partial":
+      return "partially_answered";
+    case "no_preference":
+      return "not_applicable";
+    case "prefer_not_to_answer":
+      return "declined";
+    case "not_considered":
+    case "cannot_verbalize":
+      return "unable_to_verbalize";
+    default:
+      return "unanswered";
+  }
+}
+
+function getAspectScopedStatus(
+  aspect: AspectDefinition,
+  mainStatus: ScopedSlotStatus,
+  text: string,
+): ScopedSlotStatus {
+  if (mainStatus === "declined" || mainStatus === "not_applicable") return mainStatus;
+  if (mainStatus === "unable_to_verbalize") return "unable_to_verbalize";
+  if (!text.trim()) return "unanswered";
+  if (aspectMatchesText(aspect.label, text)) {
+    return mainStatus === "answered" ? "answered" : "partially_answered";
+  }
+  return mainStatus === "answered" && aspect.priority === "optional"
+    ? "not_applicable"
+    : "unanswered";
+}
+
+function getUnansweredReason(status: ScopedSlotStatus): UnansweredReason | undefined {
+  if (status === "unanswered") return "not_discussed";
+  if (status === "partially_answered" || status === "needs_follow_up") {
+    return "needs_follow_up";
+  }
+  if (status === "declined") return "declined";
+  if (status === "unable_to_verbalize") return "unable_to_verbalize";
+  return undefined;
+}
+
+function canDeferSlotStatus(status: ScopedSlotStatus) {
+  return (
+    status === "unanswered" ||
+    status === "partially_answered" ||
+    status === "needs_follow_up" ||
+    status === "deferred" ||
+    status === "unable_to_verbalize"
+  );
+}
+
+function canAskAgainStatus(status: ScopedSlotStatus) {
+  return (
+    status === "unanswered" ||
+    status === "partially_answered" ||
+    status === "needs_follow_up" ||
+    status === "deferred"
+  );
 }
 
 export function getResearchThemeAspects(

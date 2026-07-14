@@ -9,7 +9,10 @@ import {
   generateTopicSwitch,
   updateSlotsFromConversation,
 } from "../../../../lib/llm";
-import { DISCUSSION_TOPICS } from "../../../../lib/acp-mvp";
+import {
+  buildSlotControlDebugState,
+  DISCUSSION_TOPICS,
+} from "../../../../lib/acp-mvp";
 
 export const runtime = "nodejs";
 
@@ -81,6 +84,10 @@ export async function POST(request: Request) {
         reason: result.reason,
         sensitivity: result.sensitivity,
         slot_states_updated: context.utterances.length > 0,
+        control_debug: buildSlotControlDebugState({
+          slots: slotStates,
+          currentTopic,
+        }),
         created_at: savedSuggestion.createdAt.toISOString(),
       },
     });

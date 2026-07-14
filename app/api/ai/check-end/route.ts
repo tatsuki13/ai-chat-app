@@ -9,6 +9,7 @@ import {
   checkConversationEnd,
   updateSlotsFromConversation,
 } from "../../../../lib/llm";
+import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
 
 export const runtime = "nodejs";
 
@@ -68,6 +69,11 @@ export async function POST(request: Request) {
         reason: result.reason,
         remaining_slots: result.remaining_slots,
         slot_states_updated: context.utterances.length > 0,
+        control_debug: buildSlotControlDebugState({
+          slots: slotStates,
+          currentTopic,
+          includeBeforeSessionEnd: true,
+        }),
         created_at: savedSuggestion.createdAt.toISOString(),
       },
     });

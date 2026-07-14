@@ -6,6 +6,7 @@ import {
   OPTIONAL_RESEARCH_THEMES,
   RESEARCH_THEMES,
   buildFallbackMinutes,
+  buildSlotControlDebugState,
   calculateThemeCompletenessMetrics,
   getCoreResearchThemeAspects,
   getCrossTopicResearchThemeAspects,
@@ -15,11 +16,13 @@ import {
   getResearchThemeResponseState,
   getResearchThemeSummary,
   getSlotResponseState,
+  getCurrentTopicQuestionScope,
   getTopicAspects,
   getCoreAspects,
   getOptionalAspects,
   getCrossTopicAspects,
   getUnfilledSlots,
+  isElderSpeaker,
   isTerminalSlotStatus,
   mergeSlotStates,
   normalizeSlotName,
@@ -88,6 +91,8 @@ const SYSTEM_NEXT_QUESTION = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
   "質問選択の主軸は current_topic です。ACP全体の未充足スロットは補助情報として扱ってください。",
+  "通常の質問候補生成では question_scope に含まれる現在テーマのメインスロット、配下サブスロット、関連する保留項目だけを参照してください。",
+  "question_scope.allSlotReferenceUsed は false である必要があります。将来テーマや現在テーマと無関係な未充足スロットを質問候補に含めないでください。",
   "研究上の評価単位は research_themes の6Themeです。available_topics は画面遷移用の話題であり、研究Themeそのものではありません。",
   "current_topic.aspects は記録整理と質問生成の補助であり、質問ノルマではありません。",
   "current_topic.core_aspectsを優先し、optional_aspectsを埋めるためだけの質問は生成しないでください。",
@@ -254,7 +259,7 @@ export async function generateNextQuestion(
   );
   const result = await requestJson<Partial<NextQuestionResult>>(
     SYSTEM_NEXT_QUESTION,
-    buildConversationPayload(context),
+    buildQuestionPayload(context),
     fallback,
   );
 
@@ -292,12 +297,35 @@ export async function checkConversationEnd(
     fallback,
   );
 
-  return {
+  const output = {
     can_end: typeof result.can_end === "boolean" ? result.can_end : fallback.can_end,
     message: nonEmpty(result.message, fallback.message),
     reason: nonEmpty(result.reason, fallback.reason),
     remaining_slots: normalizeRemainingSlots(result.remaining_slots, fallback.remaining_slots),
   };
+
+  const endCheckDebug = buildSlotControlDebugState({
+    slots: filterAcpSlotStates(context.slotStates),
+    currentTopic: context.currentTopic,
+    includeBeforeSessionEnd: true,
+  });
+  const endTargets = endCheckDebug.deferredSlotQueue.filter(
+    (item) => item.canAskAgain,
+  );
+
+  if (output.can_end && endTargets.length > 0) {
+    const labels = [...new Set(endTargets.map((item) => item.mainSlotLabel))].slice(0, 3);
+
+    return {
+      can_end: false,
+      message: `ここまでのお話では、まだ詳しく触れていないことがいくつかあります。${labels.map((label) => `「${label}」`).join("と")}のうち、今のうちに話しておきたいものはありますか。特になければ、このまま終了しても大丈夫です。\n選択肢: 話す / 今回は話さない / このまま終了する`,
+      reason:
+        "再確認可能な保留項目が残っているため、終了前にまとめて確認する段階を提示しました。",
+      remaining_slots: labels,
+    };
+  }
+
+  return output;
 }
 
 export async function generateFinalMinutes(
@@ -638,6 +666,46 @@ function buildConversationPayload(context: ConversationContext) {
   };
 }
 
+function buildQuestionPayload(context: ConversationContext) {
+  const payload = buildConversationPayload(context);
+  const currentTopic = resolveTopic(context.currentTopic);
+  const scopedSlots = filterAcpSlotStates(context.slotStates);
+  const currentSlotState = findSlotState(scopedSlots, currentTopic.slot_name);
+  const questionScope = getCurrentTopicQuestionScope({
+    slots: scopedSlots,
+    currentTopic: currentTopic.slot_name,
+  });
+
+  return {
+    ...payload,
+    available_topics: payload.available_topics.filter(
+      (topic) => topic.slot_name === currentTopic.slot_name,
+    ),
+    slot_states: currentSlotState ? [currentSlotState] : [],
+    unfilled_slots:
+      currentSlotState && !isTerminalSlotStatus(currentSlotState.status)
+        ? [
+            {
+              slot_name: currentSlotState.slot_name,
+              status: currentSlotState.status,
+              response_state: getSlotResponseState(currentSlotState),
+              summary: currentSlotState.summary,
+            },
+          ]
+        : [],
+    question_scope: questionScope,
+    control_debug: {
+      currentTopicId: questionScope.currentTopicId,
+      currentMainSlot: questionScope.currentMainSlot,
+      referencedSubSlots: questionScope.referencedSubSlots.map((slot) => slot.label),
+      selectionReason:
+        "質問生成payloadでは現在テーマのスロットと関連保留項目のみを参照対象にしています。",
+      deferredSlotQueue: questionScope.relatedDeferredItems,
+      allSlotReferenceUsed: false,
+    },
+  };
+}
+
 function ensureFinalMinutesIncludeTopic(
   minutes: FinalMinutesResult,
   context: ConversationContext,
@@ -751,11 +819,11 @@ function fallbackUpdateSlots(
     }
 
     const status =
-      evidence.utterance.speaker === "elder" &&
+      isElderSpeaker(evidence.utterance.speaker) &&
       evidence.utterance.text.replace(/\s/g, "").length >= 18
         ? "answered"
         : "partial";
-    const speaker = evidence.utterance.speaker === "elder" ? "本人" : "介護者";
+    const speaker = isElderSpeaker(evidence.utterance.speaker) ? "本人" : "介護者";
     const inferredPrefix =
       explicitNone && evidence.index > explicitNone.index ? "(AI推測) " : "";
 
@@ -933,12 +1001,9 @@ function fallbackNextQuestion(
   const contextualSlot = ACP_SLOT_NAMES.find((slotName) =>
     hasKeyword(recentText, SLOT_KEYWORDS[slotName]),
   );
-  const unfilled = getUnfilledSlots(slotStates);
   const selected =
     !isTerminalSlotStatus(preferredState?.status) ? preferredSlot :
-    unfilled.find((slot) => slot.slot_name === contextualSlot)?.slot_name ??
-    unfilled.find((slot) => slot.status === "partial")?.slot_name ??
-    unfilled[0]?.slot_name ??
+    contextualSlot === preferredSlot ? contextualSlot :
     preferredSlot;
   const targetSlot = ACP_SLOT_NAMES.includes(selected as AcpSlotName)
     ? (selected as AcpSlotName)
@@ -1064,7 +1129,7 @@ function isRepeatedQuestion(
   if (!normalizedQuestion) return true;
 
   return recentUtterances(utterances, 8).some((utterance) => {
-    if (utterance.speaker === "elder") return false;
+    if (isElderSpeaker(utterance.speaker)) return false;
 
     const sameSlot = findPromptedSlotFromText(utterance.text) === targetSlot;
     const sameText = normalizeAnswerText(utterance.text) === normalizedQuestion;
@@ -1096,7 +1161,7 @@ function detectExplicitNoneResponses(
   const responsesBySlot = new Map<AcpSlotName, ExplicitNoneResponse>();
 
   context.utterances.forEach((utterance, index) => {
-    if (utterance.speaker !== "elder" || !isExplicitNoneAnswer(utterance.text)) {
+    if (!isElderSpeaker(utterance.speaker) || !isExplicitNoneAnswer(utterance.text)) {
       return;
     }
 
@@ -1126,7 +1191,7 @@ function detectUncertainResponses(
   const responsesBySlot = new Map<AcpSlotName, UncertainResponse>();
 
   context.utterances.forEach((utterance, index) => {
-    if (utterance.speaker !== "elder" || isExplicitNoneAnswer(utterance.text)) {
+    if (!isElderSpeaker(utterance.speaker) || isExplicitNoneAnswer(utterance.text)) {
       return;
     }
 
@@ -1160,7 +1225,7 @@ function getLatestUncertainResponse(
 
   const hasNewerElderUtterance = context.utterances
     .slice(latest.index + 1)
-    .some((utterance) => utterance.speaker === "elder");
+    .some((utterance) => isElderSpeaker(utterance.speaker));
 
   return hasNewerElderUtterance ? undefined : latest;
 }
@@ -1183,7 +1248,7 @@ function findPromptedSlotBeforeAnswer(
 ) {
   for (let index = answerIndex - 1; index >= Math.max(0, answerIndex - 4); index -= 1) {
     const utterance = utterances[index];
-    if (!utterance || utterance.speaker === "elder") continue;
+    if (!utterance || isElderSpeaker(utterance.speaker)) continue;
 
     const slotName = findPromptedSlotFromText(utterance.text);
     if (slotName) return slotName;
@@ -1339,7 +1404,7 @@ function countPromptsForSlot(
   slotName: AcpSlotName,
 ) {
   return utterances.filter((utterance) => {
-    if (utterance.speaker === "elder") return false;
+    if (isElderSpeaker(utterance.speaker)) return false;
     return findPromptedSlotFromText(utterance.text) === slotName;
   }).length;
 }
@@ -1354,7 +1419,7 @@ function isUncertaintySummary(text: string) {
 
 function formatSpeakerEvidence(utterance: ConversationUtterance) {
   const speaker =
-    utterance.speaker === "elder"
+    isElderSpeaker(utterance.speaker)
       ? "本人"
       : utterance.speaker === "caregiver"
         ? "介護者"

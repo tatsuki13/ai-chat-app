@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import {
   createEmptySlotStates,
+  buildSlotControlDebugState,
   mergeSlotStates,
+  normalizeConversationSpeaker,
   normalizeSlotStatus,
 } from "../../../../../lib/acp-mvp";
 import { prisma } from "../../../../../lib/prisma";
@@ -64,7 +66,7 @@ export async function GET(_request: Request, context: RouteContext) {
         id: utterance.id,
         session_id: utterance.sessionId,
         participant_code: session.participantCode,
-        speaker: utterance.speaker,
+        speaker: normalizeConversationSpeaker(utterance.speaker),
         text: utterance.text,
         created_at: utterance.createdAt.toISOString(),
       })),
@@ -88,6 +90,9 @@ export async function GET(_request: Request, context: RouteContext) {
         created_at: suggestion.createdAt.toISOString(),
       })),
       slot_states: slotStates,
+      slot_control: buildSlotControlDebugState({
+        slots: slotStates,
+      }),
       final_minutes: session.finalMinutes.map((minutes) => ({
         id: minutes.id,
         session_id: minutes.sessionId,

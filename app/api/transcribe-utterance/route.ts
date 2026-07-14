@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { prisma } from "../../../lib/prisma";
+import { normalizeConversationSpeaker } from "../../../lib/acp-mvp";
 import { saveStudyUtteranceForAppUtterance } from "../../../lib/research-store";
 
 export const runtime = "nodejs";
@@ -20,11 +21,12 @@ export async function POST(request: Request) {
 
     const formData = await request.formData();
     const sessionId = requiredString(formData.get("session_id"));
-    const speaker = requiredString(formData.get("speaker"));
+    const rawSpeaker = requiredString(formData.get("speaker"));
+    const speaker = normalizeSpeaker(rawSpeaker);
     const audio = formData.get("audio");
     const startedAt = optionalDate(formData.get("started_at"));
 
-    if (!sessionId || !isSpeaker(speaker) || !(audio instanceof File)) {
+    if (!sessionId || !isSpeaker(rawSpeaker) || !(audio instanceof File)) {
       return NextResponse.json(
         { error: "session_id, speaker, and audio are required" },
         { status: 400 },
@@ -129,6 +131,10 @@ function optionalDate(value: FormDataEntryValue | null) {
     : new Date(value);
 
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function normalizeSpeaker(value: string) {
+  return normalizeConversationSpeaker(value);
 }
 
 function isSpeaker(value: string): value is "A" | "B" | "elder" | "caregiver" {

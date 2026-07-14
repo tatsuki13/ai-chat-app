@@ -1,16 +1,21 @@
 "use client";
 
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
-import { DISCUSSION_TOPIC, DISCUSSION_TOPICS } from "../../lib/acp-mvp";
+import {
+  buildSlotControlDebugState,
+  DISCUSSION_TOPIC,
+  DISCUSSION_TOPICS,
+} from "../../lib/acp-mvp";
 import {
   createSingleMicInputService,
   loadAudioInputs,
   type SingleMicAudioChunk,
   type SingleMicInputLevel,
   type SingleMicInputService,
+  type StereoSpeaker,
 } from "./audio-input-service";
 
-type Speaker = "A" | "B" | "caregiver" | "elder";
+type Speaker = "caregiver" | "elder";
 type ButtonType = "next_question" | "switch_topic" | "check_end" | "update_slots";
 type PromptTone = "question" | "switch" | "end" | "status" | "error";
 
@@ -116,7 +121,7 @@ export default function SessionPage() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [utterances, setUtterances] = useState<Utterance[]>([]);
   const [utteranceTotal, setUtteranceTotal] = useState(0);
-  const [speaker, setSpeaker] = useState<Speaker>("A");
+  const [speaker, setSpeaker] = useState<Speaker>("elder");
   const [draft, setDraft] = useState("");
   const [busyAction, setBusyAction] = useState<ButtonType | "start" | "id" | null>("start");
   const [promptPanel, setPromptPanel] = useState<PromptPanelState | null>(
@@ -158,7 +163,7 @@ export default function SessionPage() {
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
-  const speakerRef = useRef<Speaker>("A");
+  const speakerRef = useRef<Speaker>("elder");
   const pushToTalkPressedRef = useRef(false);
   const pushToTalkStartingRef = useRef(false);
   const pushToTalkActiveRef = useRef(false);
@@ -528,7 +533,7 @@ export default function SessionPage() {
       if (!voiceInputServiceRef.current.isRunning()) return;
       if (!pushToTalkPressedRef.current) return;
 
-      const activeSpeaker = normalizeSpeaker(speakerRef.current) as "A" | "B";
+      const activeSpeaker = toAudioSpeaker(speakerRef.current);
       startTopicTimerIfNeeded();
       voiceInputServiceRef.current.startCapture(activeSpeaker);
       pushToTalkActiveRef.current = true;
@@ -556,7 +561,7 @@ export default function SessionPage() {
   function updateVoiceInputLevel(level: SingleMicInputLevel) {
     if (!pushToTalkActiveRef.current) return;
 
-    const activeSpeaker = normalizeSpeaker(speakerRef.current);
+    const activeSpeaker = toAudioSpeaker(speakerRef.current);
     const normalizedLevel = Math.min(1, Math.max(level.rms * 8, level.peak));
 
     setAudioInputLevels({
@@ -1205,16 +1210,16 @@ export default function SessionPage() {
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <SpeakerButton
-                  active={speaker === "A"}
+                  active={speaker === "elder"}
                   label="本人"
                   level={audioInputLevels.A}
-                  onClick={() => setSpeaker("A")}
+                  onClick={() => setSpeaker("elder")}
                 />
                 <SpeakerButton
-                  active={speaker === "B"}
+                  active={speaker === "caregiver"}
                   label="介護者"
                   level={audioInputLevels.B}
-                  onClick={() => setSpeaker("B")}
+                  onClick={() => setSpeaker("caregiver")}
                 />
               </div>
               <p className="mt-1 text-[11px] font-bold text-stone-500">
@@ -1252,8 +1257,9 @@ export default function SessionPage() {
           </div>
 
           <div className="space-y-3">
-            <DeveloperUndiscussedWords
+            <DeveloperDialogueTopics
               slotStates={developerSlotStates}
+              currentTopic={currentTopic.slot_name}
               loading={developerSlotLoading}
               error={developerSlotError}
               onRefresh={() => {
@@ -1298,24 +1304,17 @@ export default function SessionPage() {
   );
 }
 
-function DeveloperUndiscussedWords(props: {
+function DeveloperDialogueTopics(props: {
   slotStates: SlotState[];
+  currentTopic: string;
   loading: boolean;
   error: string;
   onRefresh: () => void;
 }) {
-  const words =
-    props.slotStates.length === 0
-      ? DISCUSSION_TOPICS.map((topic) => ({
-          word: topic.title,
-          status: "empty" as const,
-        }))
-      : props.slotStates
-          .filter((slot) => !isTerminalSlotStatus(slot.status))
-          .map((slot) => ({
-            word: slot.slot_name,
-            status: slot.status,
-          }));
+  const slotControl = buildSlotControlDebugState({
+    slots: props.slotStates,
+    currentTopic: props.currentTopic,
+  });
   const filledCount = props.slotStates.filter(
     (slot) => isTerminalSlotStatus(slot.status),
   ).length;
@@ -1328,7 +1327,7 @@ function DeveloperUndiscussedWords(props: {
             Dev Tool
           </div>
           <h2 className="mt-1 text-[14px] font-black leading-tight text-stone-950">
-            未対話ワード
+            対話トピックス
           </h2>
         </div>
         <button
@@ -1354,29 +1353,137 @@ function DeveloperUndiscussedWords(props: {
         </p>
       ) : null}
 
-      <div className="mt-3 flex flex-wrap gap-1.5">
-        {words.length === 0 ? (
-          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-black text-emerald-800">
-            全項目OK
-          </span>
-        ) : (
-          words.map((item) => (
-            <span
-              key={item.word}
-              className={`rounded-full border px-2.5 py-1 text-[11px] font-black leading-tight ${
-                item.status === "partial"
-                  ? "border-amber-200 bg-amber-50 text-amber-800"
-                  : "border-stone-200 bg-stone-100 text-stone-700"
-              }`}
-              title={item.status}
-            >
-              {item.word}
-            </span>
-          ))
-        )}
+      <div className="mt-3 space-y-2">
+        {slotControl.mainSlots.map((mainSlot) => (
+          <details
+            key={mainSlot.topicId}
+            open={mainSlot.isCurrentTopic}
+            className={`rounded-md border px-2 py-2 ${
+              mainSlot.isCurrentTopic
+                ? "border-emerald-200 bg-emerald-50"
+                : "border-stone-200 bg-stone-50"
+            }`}
+          >
+            <summary className="cursor-pointer text-[12px] font-black leading-snug text-stone-900">
+              {mainSlot.isCurrentTopic ? "▼ " : "▶ "}
+              {mainSlot.label}
+              <span className="ml-1 text-[10px] font-bold text-stone-500">
+                {slotStatusLabel(mainSlot.status)}
+              </span>
+            </summary>
+            <div className="mt-2 space-y-1.5">
+              {mainSlot.subSlots.map((subSlot) => (
+                <div
+                  key={`${mainSlot.topicId}-${subSlot.id}`}
+                  className="rounded-md bg-white px-2 py-1.5 text-[11px] leading-snug text-stone-700"
+                >
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-black text-stone-900">{subSlot.label}</span>
+                    <StatusPill status={subSlot.status} />
+                    {subSlot.inDeferredQueue ? <MiniPill text="保留" tone="amber" /> : null}
+                    {subSlot.canAskAgain ? <MiniPill text="再質問可" tone="stone" /> : null}
+                  </div>
+                  <div className="mt-1 text-[10px] font-bold text-stone-500">
+                    理由: {subSlot.unansweredReason ?? "-"} / 更新テーマ:{" "}
+                    {subSlot.lastUpdatedTopicId ?? "-"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </details>
+        ))}
       </div>
+
+      <details className="mt-3 rounded-md border border-stone-200 bg-stone-50 px-2 py-2">
+        <summary className="cursor-pointer text-[11px] font-black text-stone-700">
+          制御確認
+        </summary>
+        <div className="mt-2 space-y-1 text-[10px] font-bold leading-relaxed text-stone-600">
+          <div>現在テーマID: {slotControl.currentTopicId}</div>
+          <div>参照メインスロット: {slotControl.currentMainSlot}</div>
+          <div>
+            参照サブスロット:{" "}
+            {slotControl.referencedSubSlots.length
+              ? slotControl.referencedSubSlots.join(" / ")
+              : "-"}
+          </div>
+          <div>全スロット参照: {slotControl.allSlotReferenceUsed ? "あり" : "なし"}</div>
+          <div>保留キュー: {slotControl.deferredSlotQueue.length}件</div>
+          <div>終了前確認対象: {slotControl.beforeSessionEndTargets.length}件</div>
+          <div>{slotControl.selectionReason}</div>
+        </div>
+      </details>
     </aside>
   );
+}
+
+function StatusPill(props: { status: string }) {
+  return (
+    <span
+      className={`rounded-full border px-1.5 py-0.5 text-[10px] font-black ${slotStatusClassName(
+        props.status,
+      )}`}
+    >
+      {slotStatusLabel(props.status)}
+    </span>
+  );
+}
+
+function MiniPill(props: { text: string; tone: "amber" | "stone" }) {
+  return (
+    <span
+      className={`rounded-full px-1.5 py-0.5 text-[10px] font-black ${
+        props.tone === "amber"
+          ? "bg-amber-100 text-amber-800"
+          : "bg-stone-100 text-stone-700"
+      }`}
+    >
+      {props.text}
+    </span>
+  );
+}
+
+function slotStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    unanswered: "未回答",
+    partially_answered: "部分回答",
+    partial: "部分回答",
+    answered: "回答済み",
+    filled: "回答済み",
+    not_applicable: "該当なし",
+    no_preference: "該当なし",
+    declined: "辞退",
+    prefer_not_to_answer: "辞退",
+    unable_to_verbalize: "言語化困難",
+    cannot_verbalize: "言語化困難",
+    not_considered: "未検討",
+    needs_follow_up: "要確認",
+    deferred: "保留",
+  };
+
+  return labels[status] ?? status;
+}
+
+function slotStatusClassName(status: string) {
+  if (status === "answered" || status === "filled") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  if (status === "partially_answered" || status === "partial" || status === "needs_follow_up") {
+    return "border-amber-200 bg-amber-50 text-amber-800";
+  }
+  if (
+    status === "not_applicable" ||
+    status === "no_preference" ||
+    status === "declined" ||
+    status === "prefer_not_to_answer"
+  ) {
+    return "border-sky-200 bg-sky-50 text-sky-800";
+  }
+  if (status === "unable_to_verbalize" || status === "cannot_verbalize") {
+    return "border-violet-200 bg-violet-50 text-violet-800";
+  }
+
+  return "border-stone-200 bg-stone-100 text-stone-700";
 }
 
 function TopicTransitionProposalCard(props: {
@@ -1687,7 +1794,7 @@ function SpeechBubble(props: {
   onDelete: (utteranceId: string) => Promise<void>;
 }) {
   const normalizedSpeaker = normalizeSpeaker(props.utterance.speaker);
-  const isSpeakerB = normalizedSpeaker === "B";
+  const isSpeakerB = normalizedSpeaker === "caregiver";
   const [isEditing, setIsEditing] = useState(false);
   const [editSpeaker, setEditSpeaker] = useState<Speaker>(normalizedSpeaker);
   const [editText, setEditText] = useState(props.utterance.text);
@@ -1754,8 +1861,8 @@ function SpeechBubble(props: {
               disabled={isSaving}
               className="min-h-9 rounded-md border border-stone-300 bg-white px-2 text-[12px] font-black text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100"
             >
-              <option value="A">本人</option>
-              <option value="B">介護者</option>
+              <option value="elder">本人</option>
+              <option value="caregiver">介護者</option>
             </select>
             <textarea
               value={editText}
@@ -1975,7 +2082,7 @@ async function deleteUtterance(utteranceId: string) {
 
 async function sendAudioChunkToStt(
   sessionId: string,
-  speaker: Speaker,
+  speaker: StereoSpeaker,
   blob: Blob,
   mimeType: string,
   chunkNumber: number,
@@ -1986,7 +2093,7 @@ async function sendAudioChunkToStt(
   const extension = getAudioFileExtension(mimeType);
 
   formData.append("session_id", sessionId);
-  formData.append("speaker", speaker);
+  formData.append("speaker", normalizeSpeaker(speaker));
   formData.append(
     "audio",
     blob,
@@ -2020,7 +2127,11 @@ function getAudioFileExtension(mimeType: string) {
 }
 
 function normalizeSpeaker(value: string): Speaker {
-  return value === "B" || value === "caregiver" ? "B" : "A";
+  return value === "B" || value === "caregiver" ? "caregiver" : "elder";
+}
+
+function toAudioSpeaker(speaker: Speaker): StereoSpeaker {
+  return speaker === "caregiver" ? "B" : "A";
 }
 
 function shouldIgnorePushToTalkShortcut(target: EventTarget | null) {
