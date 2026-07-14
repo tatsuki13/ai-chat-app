@@ -22,6 +22,7 @@ import {
   getOptionalAspects,
   getCrossTopicAspects,
   getUnfilledSlots,
+  isCaregiverSpeaker,
   isElderSpeaker,
   isTerminalSlotStatus,
   mergeSlotStates,
@@ -91,6 +92,8 @@ const COMMON_AI_POLICY = [
   "Return only the requested JSON shape.",
 ].join("\n");
 
+const CAREGIVER_INTERPRETATION_AGREEMENT_PREFIX = "介護者解釈に同意: ";
+
 const SYSTEM_NEXT_QUESTION = [
   "あなたはACP対話を支援するAIです。",
   "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
@@ -126,6 +129,9 @@ const SYSTEM_UPDATE_SLOTS = [
   "本人が質問に対して「特にない」「今はない」「わからない」「言えない」「思いつかない」「話したくない」などと明示した場合、それは無回答ではなく有効なresponseStateです。summaryには「明示回答: ...」として記録してください。",
   "わからない・決められないは not_considered か partial、言語化困難は cannot_verbalize、特に希望がない／任せたいは no_preference、答えたくないは prefer_not_to_answer を使ってください。",
   "ただし、その後の別話題で同じスロットに関係する本人発話が出た場合は、明示回答だけで固定せず、後から出た根拠発話でsummaryを更新してください。",
+  "本人発話を最優先してください。ただし対話として、介護者が本人の発言を要約・解釈し、その直後または近接する本人発話で明確に同意している場合は、本人の意思として扱えます。",
+  "介護者の要約・解釈を根拠にする場合、summaryまたはevidence_utteranceの先頭に必ず「介護者解釈に同意: 」を付け、介護者の要約発話と本人の同意発話の両方を含めてください。",
+  "本人の同意がない介護者だけの推測・代弁・解釈は、本人の意思として answered にしないでください。",
   "他のThemeの発言からスロットを補う場合は、本人発話を根拠にし、summaryまたはevidence_utteranceの先頭に「(AI推測)」を付けてください。AI推測だけでansweredにしないでください。",
   "未解決課題・次回確認事項はACPスロットではありません。slotsには絶対に「未解決課題」を出力しないでください。",
   "明示的な「ない」を、AIの推測で別の希望や価値観に置き換えないでください。",
@@ -177,6 +183,8 @@ const SYSTEM_FINAL_MINUTES = [
   "固定のお題とTheme -> Aspect -> Evidenceの対応を意識して議事録に含めてください。",
   "AIが表示した質問や話題転換文は介入ログであり、会話ログや本人の根拠発話として扱わないでください。",
   "本人の希望と根拠発話を区別し、推測で断定しないでください。",
+  "介護者の要約・解釈に本人が明確に同意した内容を本人意思として記録する場合は、「介護者解釈に同意: 」を付け、介護者発話と本人同意発話を併記してください。",
+  "本人の同意が確認できない介護者解釈だけを本人意思として記録しないでください。",
   "本人が「ない」「わからない」「言えない」と答えた項目は、欠落ではなく明示回答として記録してください。",
   "他の話題の発言から補った内容は「(AI推測)」を付け、根拠発話を併記してください。",
   "本人発話にない内容を補完せず、関連発話はあるが明示確認されていない内容は本人の意思として断定しないでください。",
@@ -191,10 +199,15 @@ const SYSTEM_SLOT_CONTROL_DEBUG = [
   "あなたはACP対話ログを読み、開発確認用にサブスロットの状態を意味判定するAIです。",
   "テーマ名・サブスロット名は変更せず、提供された topic_id と aspect_id だけを使ってください。",
   "語彙の完全一致ではなく、本人発話の意味から該当するサブスロットを判断してください。",
+  "ACPの考え方に沿って、本人の価値観・希望・不安・拒否・保留を尊重し、無理に埋めるための判定はしないでください。",
+  "本人発話を最優先してください。ただし、介護者が本人の発言を要約・解釈し、その直後または近接する本人発話で「はい」「そう」「それでいい」「うん」など明確に同意している場合は、本人の意思として扱えます。",
+  "介護者の要約・解釈への本人同意を根拠にする場合は、evidence_utterance の先頭に必ず「介護者解釈に同意: 」を付け、介護者の要約発話と本人の同意発話の両方を短く含めてください。",
+  "本人の同意がない介護者だけの推測・代弁・解釈は answered / partially_answered にしないでください。",
   "ただし、根拠発話がないもの、会話ログに存在しない根拠、推測だけの内容は answered / partially_answered / not_applicable / declined / unable_to_verbalize にしないでください。",
-  "非unansweredにする場合は、必ず会話ログ中の本人発話または介護者質問の短い抜粋を evidence_utterance に入れてください。",
+  "非unansweredにする場合は、必ず会話ログ中の本人発話、または介護者要約と本人同意の短い抜粋を evidence_utterance に入れてください。",
   "本人が「特にない」「該当しない」と明確に答えた場合は not_applicable、話したくない場合は declined、言語化できない場合は unable_to_verbalize としてください。",
-  "根拠が弱いが関連発話がある場合は partially_answered、十分に具体的な根拠がある場合だけ answered としてください。",
+  "意味的にそのサブスロットの話として認識できるが、理由・条件・具体性が足りない場合は needs_follow_up または partially_answered としてください。",
+  "根拠が弱いが関連発話がある場合は partially_answered、ACP上それ以上深掘りすべき曖昧さがある場合は needs_follow_up、十分に具体的な根拠がある場合だけ answered としてください。",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
@@ -257,7 +270,12 @@ export async function updateSlotsFromConversation(
 
   const updatedSlots = applyExplicitNoneResponses(
     context,
-    normalizeSlotUpdateResult(result.slots, fallback, context.slotStates),
+    normalizeSlotUpdateResult(
+      result.slots,
+      fallback,
+      context.slotStates,
+      context.utterances,
+    ),
   );
 
   const policySlots = isLegacyDialogueMode()
@@ -277,7 +295,7 @@ export async function generateNextQuestion(
   );
   const result = await requestJson<Partial<NextQuestionResult>>(
     SYSTEM_NEXT_QUESTION,
-    buildQuestionPayload(context),
+    await buildQuestionPayload(context),
     fallback,
   );
 
@@ -521,19 +539,29 @@ function normalizeUnansweredReason(
 function normalizeEvidenceText(value: unknown) {
   if (typeof value !== "string") return "";
 
-  return value
-    .replace(/^(本人|高齢者役|elder|介護者|caregiver)\s*[:：]\s*/i, "")
-    .trim();
+  const text = value.trim();
+
+  if (text.startsWith(CAREGIVER_INTERPRETATION_AGREEMENT_PREFIX)) {
+    return text;
+  }
+
+  return text.replace(/^(本人|高齢者役|elder|介護者|caregiver)\s*[:：]\s*/i, "").trim();
 }
 
 function evidenceMatchesTranscript(
   evidence: string,
   utterances: ConversationUtterance[],
 ) {
+  if (evidence.startsWith(CAREGIVER_INTERPRETATION_AGREEMENT_PREFIX)) {
+    return caregiverAgreementEvidenceMatchesTranscript(evidence, utterances);
+  }
+
   const normalizedEvidence = normalizeForEvidenceMatch(evidence);
   if (normalizedEvidence.length < 4) return false;
 
   return utterances.some((utterance) => {
+    if (!isElderSpeaker(utterance.speaker)) return false;
+
     const normalizedUtterance = normalizeForEvidenceMatch(utterance.text);
     if (!normalizedUtterance) return false;
 
@@ -542,6 +570,65 @@ function evidenceMatchesTranscript(
       normalizedEvidence.includes(normalizedUtterance)
     );
   });
+}
+
+function caregiverAgreementEvidenceMatchesTranscript(
+  evidence: string,
+  utterances: ConversationUtterance[],
+) {
+  const evidenceBody = evidence
+    .slice(CAREGIVER_INTERPRETATION_AGREEMENT_PREFIX.length)
+    .trim();
+  const evidencePieces = extractEvidencePieces(evidenceBody);
+  const caregiverIndexes = utterances
+    .map((utterance, index) => ({ utterance, index }))
+    .filter(({ utterance }) => isCaregiverSpeaker(utterance.speaker));
+  const elderIndexes = utterances
+    .map((utterance, index) => ({ utterance, index }))
+    .filter(({ utterance }) => isElderSpeaker(utterance.speaker));
+
+  const caregiverMatch = caregiverIndexes.find(({ utterance }) =>
+    evidencePieces.some((piece) => evidencePieceMatchesUtterance(piece, utterance.text)),
+  );
+  const elderMatch = elderIndexes.find(({ utterance, index }) => {
+    if (!caregiverMatch || index <= caregiverMatch.index || index - caregiverMatch.index > 4) {
+      return false;
+    }
+
+    return (
+      evidencePieces.some((piece) => evidencePieceMatchesUtterance(piece, utterance.text)) ||
+      isAgreementUtterance(utterance.text)
+    );
+  });
+
+  return Boolean(caregiverMatch && elderMatch);
+}
+
+function extractEvidencePieces(value: string) {
+  return value
+    .split(/(?:本人|高齢者役|elder|介護者|caregiver)\s*[:：]|[／/|｜\n]/i)
+    .map((piece) => piece.trim())
+    .filter((piece) => normalizeForEvidenceMatch(piece).length >= 2);
+}
+
+function evidencePieceMatchesUtterance(piece: string, utteranceText: string) {
+  const normalizedPiece = normalizeForEvidenceMatch(piece);
+  const normalizedUtterance = normalizeForEvidenceMatch(utteranceText);
+
+  if (normalizedPiece.length < 2 || normalizedUtterance.length < 2) return false;
+
+  return (
+    normalizedUtterance.includes(normalizedPiece) ||
+    normalizedPiece.includes(normalizedUtterance)
+  );
+}
+
+function isAgreementUtterance(text: string) {
+  const normalized = normalizeForEvidenceMatch(text);
+
+  return /^(はい|うん|そう|そうです|それでいい|それでいいです|それで大丈夫|その通り|そのとおり|合っています|あっています|間違いない|まちがいない|いいです|大丈夫です)$/.test(
+    normalized,
+  );
 }
 
 function normalizeForEvidenceMatch(value: string) {
@@ -594,6 +681,7 @@ function normalizeSlotUpdateResult(
   value: unknown,
   fallback: AcpSlotState[],
   currentSlots: AcpSlotState[],
+  utterances: ConversationUtterance[],
 ): AcpSlotState[] {
   if (!Array.isArray(value)) return fallback;
 
@@ -608,15 +696,23 @@ function normalizeSlotUpdateResult(
     const rawSlotName = typeof raw.slot_name === "string" ? raw.slot_name.trim() : "";
     const slotName = normalizeSlotName(rawSlotName);
     const baseSlot = fallbackByName.get(slotName) ?? currentByName.get(slotName);
+    const status = normalizeSlotStatus(raw.status);
+    const summary = nonEmpty(raw.summary, baseSlot?.summary ?? "");
+    const evidence = nonEmpty(
+      raw.evidence_utterance,
+      baseSlot?.evidence_utterance ?? "",
+    );
+
+    if (status !== "unanswered" && !slotUpdateHasValidEvidence(evidence, utterances)) {
+      if (baseSlot) updatesByName.set(slotName, baseSlot);
+      return;
+    }
 
     updatesByName.set(slotName, {
       slot_name: slotName,
-      status: normalizeSlotStatus(raw.status),
-      summary: nonEmpty(raw.summary, baseSlot?.summary ?? ""),
-      evidence_utterance: nonEmpty(
-        raw.evidence_utterance,
-        baseSlot?.evidence_utterance ?? "",
-      ),
+      status,
+      summary,
+      evidence_utterance: evidence,
       updated_at:
         typeof raw.updated_at === "string"
           ? raw.updated_at
@@ -636,6 +732,13 @@ function normalizeSlotUpdateResult(
       }
     );
   });
+}
+
+function slotUpdateHasValidEvidence(
+  evidence: string,
+  utterances: ConversationUtterance[],
+) {
+  return evidenceMatchesTranscript(normalizeEvidenceText(evidence), utterances);
 }
 
 function normalizeNextQuestionResult(
@@ -859,15 +962,24 @@ function buildConversationPayload(context: ConversationContext) {
   };
 }
 
-function buildQuestionPayload(context: ConversationContext) {
+async function buildQuestionPayload(context: ConversationContext) {
   const payload = buildConversationPayload(context);
   const currentTopic = resolveTopic(context.currentTopic);
   const scopedSlots = filterAcpSlotStates(context.slotStates);
   const currentSlotState = findSlotState(scopedSlots, currentTopic.slot_name);
-  const questionScope = getCurrentTopicQuestionScope({
+  const fallbackQuestionScope = getCurrentTopicQuestionScope({
     slots: scopedSlots,
     currentTopic: currentTopic.slot_name,
   });
+  const semanticControl = await buildSemanticSlotControlDebugState({
+    utterances: context.utterances,
+    slots: scopedSlots,
+    currentTopic: currentTopic.slot_name,
+  });
+  const questionScope = buildQuestionScopeFromSlotControl(
+    semanticControl,
+    fallbackQuestionScope,
+  );
 
   return {
     ...payload,
@@ -896,6 +1008,32 @@ function buildQuestionPayload(context: ConversationContext) {
       deferredSlotQueue: questionScope.relatedDeferredItems,
       allSlotReferenceUsed: false,
     },
+  };
+}
+
+function buildQuestionScopeFromSlotControl(
+  debugState: SlotControlDebugState,
+  fallback: ReturnType<typeof getCurrentTopicQuestionScope>,
+) {
+  const currentMainSlot = debugState.mainSlots.find((slot) => slot.isCurrentTopic);
+
+  if (!currentMainSlot) return fallback;
+
+  return {
+    currentTopicId: debugState.currentTopicId,
+    currentMainSlot: debugState.currentMainSlot,
+    referencedSubSlots: currentMainSlot.subSlots
+      .filter((slot) => slot.canAskAgain)
+      .map((slot) => ({
+        id: slot.id,
+        label: slot.label,
+        status: slot.status,
+        unansweredReason: slot.unansweredReason,
+      })),
+    relatedDeferredItems: debugState.deferredSlotQueue.filter(
+      (item) => item.suggestedTiming === "related_topic",
+    ),
+    allSlotReferenceUsed: false,
   };
 }
 

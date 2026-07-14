@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  buildSlotControlDebugState,
   createEmptySlotStates,
   mergeSlotStates,
   normalizeConversationSpeaker,
@@ -60,11 +61,19 @@ export async function GET(_request: Request, context: RouteContext) {
       text: utterance.text,
       created_at: utterance.createdAt.toISOString(),
     }));
-    const slotControl = await buildSemanticSlotControlDebugState({
-      utterances: normalizedUtterances,
-      slots: slotStates,
-      currentTopic: optionalString(new URL(_request.url).searchParams.get("current_topic")),
-    });
+    const searchParams = new URL(_request.url).searchParams;
+    const currentTopic = optionalString(searchParams.get("current_topic"));
+    const useSemanticSlotControl = searchParams.get("semantic") === "1";
+    const slotControl = useSemanticSlotControl
+      ? await buildSemanticSlotControlDebugState({
+          utterances: normalizedUtterances,
+          slots: slotStates,
+          currentTopic,
+        })
+      : buildSlotControlDebugState({
+          slots: slotStates,
+          currentTopic,
+        });
 
     return NextResponse.json({
       session: {

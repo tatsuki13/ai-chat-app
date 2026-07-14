@@ -857,12 +857,19 @@ export default function SessionPage() {
     }
   }
 
-  async function refreshDeveloperSlotStates(sessionId: string) {
+  async function refreshDeveloperSlotStates(
+    sessionId: string,
+    options: { semantic?: boolean } = {},
+  ) {
     setDeveloperSlotLoading(true);
     setDeveloperSlotError("");
 
     try {
-      const detail = await fetchAdminSessionDetail(sessionId, currentTopic.slot_name);
+      const detail = await fetchAdminSessionDetail(
+        sessionId,
+        currentTopic.slot_name,
+        options.semantic === true,
+      );
       setDeveloperSlotStates(detail.slot_states);
       setDeveloperSlotControl(detail.slot_control ?? null);
     } catch {
@@ -1278,7 +1285,9 @@ export default function SessionPage() {
               loading={developerSlotLoading}
               error={developerSlotError}
               onRefresh={() => {
-                if (session?.id) void refreshDeveloperSlotStates(session.id);
+                if (session?.id) {
+                  void refreshDeveloperSlotStates(session.id, { semantic: true });
+                }
               }}
             />
 
@@ -2035,12 +2044,14 @@ async function fetchSessionDetail(sessionId: string): Promise<{
 async function fetchAdminSessionDetail(
   sessionId: string,
   currentTopic?: string,
+  semantic = false,
 ): Promise<{
   slot_states: SlotState[];
   slot_control?: SlotControlDebugState;
 }> {
   const params = new URLSearchParams();
   if (currentTopic) params.set("current_topic", currentTopic);
+  if (semantic) params.set("semantic", "1");
   const response = await fetch(
     `/api/admin/session/${encodeURIComponent(sessionId)}${
       params.size ? `?${params.toString()}` : ""
