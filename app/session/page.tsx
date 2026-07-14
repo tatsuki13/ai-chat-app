@@ -757,15 +757,20 @@ export default function SessionPage() {
     setPromptPanel(createOpeningPrompt());
     setIsEditingId(false);
     setIdError("");
+    setDeveloperSlotStates([]);
+    setDeveloperSlotError("");
+    setDeveloperSlotLoading(false);
     resetTopicTiming();
 
     try {
       const created = await startSession();
       window.localStorage.setItem(STORAGE_KEY, created.id);
+      sessionRef.current = created;
       setSession(created);
       setUtterances([]);
       setUtteranceTotal(0);
       setDraft("");
+      setDeveloperSlotStates([]);
       resetTopicTiming();
       setStatusText("保存済み");
     } catch {
@@ -1094,7 +1099,8 @@ export default function SessionPage() {
                 <button
                   type="button"
                   onClick={handleNewSession}
-                  className="min-h-8 rounded-md border border-stone-300 bg-white px-3 text-[13px] font-bold text-stone-700 shadow-sm active:scale-[0.99]"
+                  disabled={Boolean(busyAction)}
+                  className="min-h-8 rounded-md border border-stone-300 bg-white px-3 text-[13px] font-bold text-stone-700 shadow-sm active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
                 >
                   新規
                 </button>
