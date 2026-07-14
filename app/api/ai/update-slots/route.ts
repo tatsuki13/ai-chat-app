@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import {
   getSessionContext,
+  saveSubSlotStates,
   saveSlotStates,
 } from "../../../../lib/acp-store";
-import { updateSlotsFromConversation } from "../../../../lib/llm";
+import { updateSlotStateBundleFromConversation } from "../../../../lib/llm";
 
 export const runtime = "nodejs";
 
@@ -21,15 +22,18 @@ export async function POST(request: Request) {
       body.current_topic_title ?? body.currentTopicTitle,
     );
     const context = await getSessionContext(sessionId);
-    const slotStates = await updateSlotsFromConversation({
+    const bundle = await updateSlotStateBundleFromConversation({
       ...context,
       currentTopic,
       currentTopicTitle,
     });
-    await saveSlotStates(sessionId, slotStates);
+    await saveSlotStates(sessionId, bundle.slotStates);
+    await saveSubSlotStates(sessionId, bundle.subSlotStates);
 
     return NextResponse.json({
-      slot_states: slotStates,
+      slot_states: bundle.slotStates,
+      sub_slot_states: bundle.subSlotStates,
+      slot_classification_debug: bundle.debug,
       final_minutes: null,
     });
   } catch (error) {

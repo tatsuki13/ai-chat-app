@@ -659,6 +659,14 @@ export default function SessionPage() {
     setPromptPanel(getPendingPrompt(buttonType));
 
     try {
+      if (buttonType !== "update_slots") {
+        await postJson("/api/ai/update-slots", {
+          session_id: session.id,
+          current_topic: currentTopic.slot_name,
+          current_topic_title: currentTopic.title,
+        });
+      }
+
       if (buttonType === "next_question") {
         const data = await postJson<NextQuestionResponse>("/api/ai/next-question", {
           session_id: session.id,
@@ -941,6 +949,11 @@ export default function SessionPage() {
     setStatusText("議事録生成中");
 
     try {
+      await postJson("/api/ai/update-slots", {
+        session_id: session.id,
+        current_topic: currentTopic.slot_name,
+        current_topic_title: currentTopic.title,
+      });
       const data = await postJson<FinalMinutesResponse>("/api/ai/final-minutes", {
         session_id: session.id,
         current_topic: currentTopic.slot_name,
@@ -1272,7 +1285,7 @@ export default function SessionPage() {
               error={developerSlotError}
               onRefresh={() => {
                 if (session?.id) {
-                  void refreshDeveloperSlotStates(session.id, { semantic: true });
+                  void refreshDeveloperSlotStates(session.id);
                 }
               }}
             />
@@ -1397,7 +1410,12 @@ function DeveloperDialogueTopics(props: {
                     {subSlot.canAskAgain ? <MiniPill text="再質問可" tone="stone" /> : null}
                   </div>
                   <div className="mt-1 text-[10px] font-bold text-stone-500">
-                    理由: {subSlot.unansweredReason ?? "-"} / 更新テーマ:{" "}
+                    completion: {subSlot.completion ?? "-"} / responseState:{" "}
+                    {subSlot.responseState ?? "-"} / reasonCode:{" "}
+                    {subSlot.reasonCode ?? subSlot.unansweredReason ?? "-"}
+                  </div>
+                  <div className="mt-0.5 text-[10px] font-bold text-stone-500">
+                    根拠数: {subSlot.evidenceUtteranceCount ?? 0} / 更新テーマ:{" "}
                     {subSlot.lastUpdatedTopicId ?? "-"}
                   </div>
                 </div>

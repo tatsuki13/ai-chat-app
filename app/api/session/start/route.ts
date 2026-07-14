@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../../lib/prisma";
 import { createInitialSlotStates } from "../../../../lib/acp-store";
-import { ensureStudySessionForAppSession } from "../../../../lib/research-store";
 
 export const runtime = "nodejs";
 
@@ -37,13 +36,6 @@ export async function POST(request: Request) {
       },
     });
     const slotStates = await createInitialSlotStates(session.id);
-    await ensureStudySessionForAppSession({
-      id: session.id,
-      participantCode: session.participantCode,
-      condition: session.condition,
-      startedAt: session.startedAt,
-      endedAt: session.endedAt,
-    });
 
     return NextResponse.json({
       session: {

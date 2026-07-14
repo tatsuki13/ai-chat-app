@@ -2,7 +2,6 @@ import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { prisma } from "../../../lib/prisma";
 import { normalizeConversationSpeaker } from "../../../lib/acp-mvp";
-import { saveStudyUtteranceForAppUtterance } from "../../../lib/research-store";
 
 export const runtime = "nodejs";
 
@@ -61,14 +60,6 @@ export async function POST(request: Request) {
         createdAt: startedAt ?? undefined,
       },
     });
-    await saveStudyUtteranceForAppUtterance({
-      id: utterance.id,
-      sessionId: utterance.sessionId,
-      speaker: utterance.speaker,
-      text: utterance.text,
-      createdAt: utterance.createdAt,
-    });
-
     return NextResponse.json({
       utterance: {
         id: utterance.id,

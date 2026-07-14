@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
-import { ensureStudySessionForAppSession } from "../../../../lib/research-store";
 
 export const runtime = "nodejs";
 
@@ -115,13 +114,6 @@ export async function PATCH(request: Request, context: RouteContext) {
       data: {
         participantCode,
       },
-    });
-    await ensureStudySessionForAppSession({
-      id: session.id,
-      participantCode: session.participantCode,
-      condition: session.condition,
-      startedAt: session.startedAt,
-      endedAt: session.endedAt,
     });
 
     return NextResponse.json({

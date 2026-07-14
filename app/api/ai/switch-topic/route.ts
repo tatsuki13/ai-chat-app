@@ -1,12 +1,8 @@
 import { NextResponse } from "next/server";
 import {
   getSessionContext,
-  saveSlotStates,
 } from "../../../../lib/acp-store";
-import {
-  generateTopicSwitch,
-  updateSlotsFromConversation,
-} from "../../../../lib/llm";
+import { generateTopicSwitch } from "../../../../lib/llm";
 import {
   buildSlotControlDebugState,
   DISCUSSION_TOPICS,
@@ -31,25 +27,11 @@ export async function POST(request: Request) {
     const nextTopicTitle = optionalString(body.next_topic_title ?? body.nextTopicTitle);
     const forceSwitch = Boolean(body.force_switch ?? body.forceSwitch);
     const context = await getSessionContext(sessionId);
-    const slotStates =
-      context.utterances.length > 0
-        ? await updateSlotsFromConversation({
-            ...context,
-            currentTopic,
-            currentTopicTitle,
-            nextTopic,
-            nextTopicTitle,
-          })
-        : context.slotStates;
-    if (context.utterances.length > 0) {
-      await saveSlotStates(sessionId, slotStates);
-    }
     const result =
       forceSwitch && nextTopic
         ? createForcedTopicSwitch(nextTopic, nextTopicTitle)
         : await generateTopicSwitch({
             ...context,
-            slotStates,
             currentTopic,
             currentTopicTitle,
             nextTopic,
@@ -66,10 +48,11 @@ export async function POST(request: Request) {
         next_topic: result.next_topic,
         reason: result.reason,
         sensitivity: result.sensitivity,
-        slot_states_updated: context.utterances.length > 0,
+        slot_states_updated: false,
         control_debug: buildSlotControlDebugState({
-          slots: slotStates,
+          slots: context.slotStates,
           currentTopic,
+          subSlotStates: context.subSlotStates,
         }),
         created_at: new Date().toISOString(),
       },

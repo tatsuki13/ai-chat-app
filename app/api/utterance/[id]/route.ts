@@ -1,10 +1,6 @@
 import { NextResponse } from "next/server";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
-import {
-  deleteStudyUtteranceForAppUtterance,
-  saveStudyUtteranceForAppUtterance,
-} from "../../../../lib/research-store";
 
 export const runtime = "nodejs";
 
@@ -36,14 +32,6 @@ export async function PATCH(request: Request, context: RouteContext) {
         text,
       },
     });
-    await saveStudyUtteranceForAppUtterance({
-      id: utterance.id,
-      sessionId: utterance.sessionId,
-      speaker: utterance.speaker,
-      text: utterance.text,
-      createdAt: utterance.createdAt,
-    });
-
     return NextResponse.json({
       utterance: {
         id: utterance.id,
@@ -70,7 +58,6 @@ export async function DELETE(_request: Request, context: RouteContext) {
       where: { id },
       select: {
         id: true,
-        sessionId: true,
       },
     });
 
@@ -78,7 +65,6 @@ export async function DELETE(_request: Request, context: RouteContext) {
       return NextResponse.json({ error: "Utterance not found" }, { status: 404 });
     }
 
-    await deleteStudyUtteranceForAppUtterance(utterance.id, utterance.sessionId);
     await prisma.sessionUtterance.delete({
       where: { id },
     });

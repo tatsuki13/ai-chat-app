@@ -2,14 +2,9 @@ import { NextResponse } from "next/server";
 import {
   getSessionContext,
   saveFinalMinutes,
-  saveSlotStates,
 } from "../../../../lib/acp-store";
-import {
-  generateFinalMinutes,
-  updateSlotsFromConversation,
-} from "../../../../lib/llm";
+import { generateFinalMinutes } from "../../../../lib/llm";
 import { prisma } from "../../../../lib/prisma";
-import { ensureStudySessionForAppSession } from "../../../../lib/research-store";
 
 export const runtime = "nodejs";
 
@@ -27,22 +22,8 @@ export async function POST(request: Request) {
       body.current_topic_title ?? body.currentTopicTitle,
     );
     const context = await getSessionContext(sessionId);
-    const slotStates =
-      context.utterances.length > 0
-        ? await updateSlotsFromConversation({
-            ...context,
-            currentTopic,
-            currentTopicTitle,
-          })
-        : context.slotStates;
-
-    if (context.utterances.length > 0) {
-      await saveSlotStates(sessionId, slotStates);
-    }
-
     const minutes = await generateFinalMinutes({
       ...context,
-      slotStates,
       currentTopic,
       currentTopicTitle,
       sessionId: context.session.id,
@@ -55,14 +36,6 @@ export async function POST(request: Request) {
       data: { endedAt },
     });
 
-    await ensureStudySessionForAppSession({
-      id: session.id,
-      participantCode: session.participantCode,
-      condition: session.condition,
-      startedAt: session.startedAt,
-      endedAt: session.endedAt,
-    });
-
     return NextResponse.json({
       session: {
         id: session.id,
@@ -71,7 +44,8 @@ export async function POST(request: Request) {
         started_at: session.startedAt.toISOString(),
         ended_at: session.endedAt?.toISOString() ?? null,
       },
-      slot_states: slotStates,
+      slot_states: context.slotStates,
+      sub_slot_states: context.subSlotStates,
       final_minutes: {
         id: savedMinutes.id,
         markdown: savedMinutes.markdown,

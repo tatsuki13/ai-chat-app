@@ -1,12 +1,8 @@
 import { NextResponse } from "next/server";
 import {
   getSessionContext,
-  saveSlotStates,
 } from "../../../../lib/acp-store";
-import {
-  checkConversationEnd,
-  updateSlotsFromConversation,
-} from "../../../../lib/llm";
+import { checkConversationEnd } from "../../../../lib/llm";
 import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
 
 export const runtime = "nodejs";
@@ -25,20 +21,8 @@ export async function POST(request: Request) {
       body.current_topic_title ?? body.currentTopicTitle,
     );
     const context = await getSessionContext(sessionId);
-    const slotStates =
-      context.utterances.length > 0
-        ? await updateSlotsFromConversation({
-            ...context,
-            currentTopic,
-            currentTopicTitle,
-          })
-        : context.slotStates;
-    if (context.utterances.length > 0) {
-      await saveSlotStates(sessionId, slotStates);
-    }
     const result = await checkConversationEnd({
       ...context,
-      slotStates,
       currentTopic,
       currentTopicTitle,
     });
@@ -51,11 +35,12 @@ export async function POST(request: Request) {
         message: result.message,
         reason: result.reason,
         remaining_slots: result.remaining_slots,
-        slot_states_updated: context.utterances.length > 0,
+        slot_states_updated: false,
         control_debug: buildSlotControlDebugState({
-          slots: slotStates,
+          slots: context.slotStates,
           currentTopic,
           includeBeforeSessionEnd: true,
+          subSlotStates: context.subSlotStates,
         }),
         created_at: new Date().toISOString(),
       },

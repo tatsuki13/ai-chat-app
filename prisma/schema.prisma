@@ -13,6 +13,7 @@ model Session {
   startedAt       DateTime           @default(now()) @map("started_at")
   endedAt         DateTime?          @map("ended_at")
   finalMinutes    FinalMinute[]
+  subSlotStates    SlotSubState[]
   slotStates      SlotState[]
   utterances      SessionUtterance[]
 
@@ -49,6 +50,31 @@ model SlotState {
   @@index([sessionId])
   @@index([status])
   @@map("slot_states")
+}
+
+model SlotSubState {
+  id                   String   @id @default(cuid())
+  sessionId            String   @map("session_id")
+  mainSlotId           String   @map("main_slot_id")
+  subSlotId            String   @map("sub_slot_id")
+  completion           String
+  responseState        String   @map("response_state")
+  reasonCode           String?  @map("reason_code")
+  evidenceUtteranceIds Json     @map("evidence_utterance_ids")
+  canAskAgain          Boolean  @default(true) @map("can_ask_again")
+  isDeferred           Boolean  @default(false) @map("is_deferred")
+  lastUpdatedTopicId   String?  @map("last_updated_topic_id")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+  session              Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, mainSlotId, subSlotId])
+  @@index([sessionId])
+  @@index([mainSlotId])
+  @@index([subSlotId])
+  @@index([completion])
+  @@index([responseState])
+  @@index([reasonCode])
+  @@map("slot_sub_states")
 }
 
 model FinalMinute {

@@ -1,13 +1,9 @@
 import { NextResponse } from "next/server";
 import {
   getSessionContext,
-  saveSlotStates,
 } from "../../../../lib/acp-store";
 import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
-import {
-  generateNextQuestion,
-  updateSlotsFromConversation,
-} from "../../../../lib/llm";
+import { generateNextQuestion } from "../../../../lib/llm";
 
 export const runtime = "nodejs";
 
@@ -25,20 +21,8 @@ export async function POST(request: Request) {
       body.current_topic_title ?? body.currentTopicTitle,
     );
     const context = await getSessionContext(sessionId);
-    const slotStates =
-      context.utterances.length > 0
-        ? await updateSlotsFromConversation({
-            ...context,
-            currentTopic,
-            currentTopicTitle,
-          })
-        : context.slotStates;
-    if (context.utterances.length > 0) {
-      await saveSlotStates(sessionId, slotStates);
-    }
     const result = await generateNextQuestion({
       ...context,
-      slotStates,
       currentTopic,
       currentTopicTitle,
     });
@@ -52,10 +36,11 @@ export async function POST(request: Request) {
         target_slot: result.target_slot,
         reason: result.reason,
         sensitivity: result.sensitivity,
-        slot_states_updated: context.utterances.length > 0,
+        slot_states_updated: false,
         control_debug: buildSlotControlDebugState({
-          slots: slotStates,
+          slots: context.slotStates,
           currentTopic,
+          subSlotStates: context.subSlotStates,
         }),
         created_at: new Date().toISOString(),
       },

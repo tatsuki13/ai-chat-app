@@ -2,9 +2,13 @@ import { NextResponse } from "next/server";
 import {
   buildSlotControlDebugState,
   createEmptySlotStates,
+  isSlotClassificationResponseState,
+  isSlotCompletion,
+  isSlotReasonCode,
   mergeSlotStates,
   normalizeConversationSpeaker,
   normalizeSlotStatus,
+  type StoredSubSlotState,
 } from "../../../../../lib/acp-mvp";
 import { buildSemanticSlotControlDebugState } from "../../../../../lib/llm";
 import { prisma } from "../../../../../lib/prisma";
@@ -27,6 +31,7 @@ export async function GET(_request: Request, context: RouteContext) {
           orderBy: { createdAt: "asc" },
         },
         slotStates: true,
+        subSlotStates: true,
         finalMinutes: {
           orderBy: { createdAt: "desc" },
           take: 10,
@@ -58,6 +63,25 @@ export async function GET(_request: Request, context: RouteContext) {
     const searchParams = new URL(_request.url).searchParams;
     const currentTopic = optionalString(searchParams.get("current_topic"));
     const useSemanticSlotControl = searchParams.get("semantic") === "1";
+    const subSlotStates = session.subSlotStates.map((state): StoredSubSlotState => ({
+      mainSlotId: state.mainSlotId,
+      subSlotId: state.subSlotId,
+      completion: isSlotCompletion(state.completion) ? state.completion : "none",
+      responseState: isSlotClassificationResponseState(state.responseState)
+        ? state.responseState
+        : "no_response",
+      reasonCode:
+        state.reasonCode && isSlotReasonCode(state.reasonCode)
+          ? state.reasonCode
+          : null,
+      evidenceUtteranceIds: Array.isArray(state.evidenceUtteranceIds)
+        ? state.evidenceUtteranceIds.map(String)
+        : [],
+      canAskAgain: state.canAskAgain,
+      isDeferred: state.isDeferred,
+      lastUpdatedTopicId: state.lastUpdatedTopicId,
+      updatedAt: state.updatedAt.toISOString(),
+    }));
     const slotControl = useSemanticSlotControl
       ? await buildSemanticSlotControlDebugState({
           utterances: normalizedUtterances,
@@ -67,6 +91,7 @@ export async function GET(_request: Request, context: RouteContext) {
       : buildSlotControlDebugState({
           slots: slotStates,
           currentTopic,
+          subSlotStates,
         });
 
     return NextResponse.json({
@@ -86,6 +111,7 @@ export async function GET(_request: Request, context: RouteContext) {
         created_at: utterance.created_at,
       })),
       slot_states: slotStates,
+      sub_slot_states: subSlotStates,
       slot_control: slotControl,
       final_minutes: session.finalMinutes.map((minutes) => ({
         id: minutes.id,

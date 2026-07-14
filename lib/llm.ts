@@ -8,6 +8,9 @@ import {
   buildFallbackMinutes,
   buildSlotControlDebugState,
   calculateThemeCompletenessMetrics,
+  canAskAgainSubSlotState,
+  canTransitionSubSlotState,
+  createEmptySubSlotStates,
   getCoreResearchThemeAspects,
   getCrossTopicResearchThemeAspects,
   getOptionalResearchThemeAspects,
@@ -17,6 +20,8 @@ import {
   getResearchThemeSummary,
   getSlotResponseState,
   getCurrentTopicQuestionScope,
+  getSlotResolution,
+  getSubSlotDefinitions,
   getTopicAspects,
   getCoreAspects,
   getOptionalAspects,
@@ -24,23 +29,33 @@ import {
   getUnfilledSlots,
   isCaregiverSpeaker,
   isElderSpeaker,
+  isDeferredSubSlotState,
+  isSlotClassificationResponseState,
+  isSlotCompletion,
+  isSlotReasonCode,
   isTerminalSlotStatus,
   mergeSlotStates,
   normalizeSlotName,
   normalizeSlotStatus,
   recentUtterances,
   renderTranscript,
+  resolveDiscussionTopic,
+  resolveSubSlotDefinition,
   resolveResearchThemeForSlot,
   type AcpSlotName,
   type AuxiliaryMinutesItem,
   type AcpSlotState,
   type ConversationUtterance,
+  type SlotClassificationResponseState,
+  type SlotCompletion,
   type ScopedSlotStatus,
   type EndCheckResult,
   type FinalMinutesResult,
   type NextQuestionResult,
   type Sensitivity,
+  type SlotReasonCode,
   type SlotControlDebugState,
+  type StoredSubSlotState,
   type SubSlotControlOverride,
   type TopicSwitchResult,
   type UnansweredReason,
@@ -49,6 +64,7 @@ import {
 type ConversationContext = {
   utterances: ConversationUtterance[];
   slotStates: AcpSlotState[];
+  subSlotStates?: StoredSubSlotState[];
   sessionId?: string;
   participantCode?: string | null;
   currentTopic?: string;
@@ -112,10 +128,12 @@ const SYSTEM_NEXT_QUESTION = [
   "その話題を続ける必要がある場合は、「大切にしていることはありますか」の言い換えではなく、最近の出来事、嫌だったこと、避けたいこと、時間の使い方など具体的な別角度にしてください。",
   "質問は高齢者を責めず、答えやすく、介護者がそのまま読み上げられる日本語にしてください。",
   "重すぎる話題へ急に飛ばず、既に十分話されている内容を繰り返さないでください。",
+  "next_question_input.askableSubSlots に含まれる mainSlotId/subSlotId の組み合わせだけを targetMainSlotId/targetSubSlotId に指定してください。",
+  "askableSubSlots が空の場合は、追加質問ではなく話題転換や終了確認を促す短い文にしてください。",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
-  '{"question":"...","transition_phrase":"...","target_slot":"...","reason":"...","sensitivity":"low | medium | high"}',
+  '{"question":"...","transition_phrase":"...","target_slot":"...","targetMainSlotId":"...","targetSubSlotId":"...","reason":"...","sensitivity":"low | medium | high"}',
 ].join("\n");
 
 const SYSTEM_UPDATE_SLOTS = [
@@ -140,6 +158,25 @@ const SYSTEM_UPDATE_SLOTS = [
   "",
   "出力形式:",
   '{"slots":[{"slot_name":"今の生活で大切にしていること","status":"unanswered | partial | answered | no_preference | not_considered | cannot_verbalize | prefer_not_to_answer","summary":"...","evidence_utterance":"..."}]}',
+].join("\n");
+
+const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
+  "あなたはACP対話ログの発話を、固定されたメインスロット・サブスロット定義へ分類するAIです。",
+  "あなたの役割は意味分類だけです。スロット状態の確定、保存可否、状態遷移、再質問可否はコード側が行います。",
+  "提供された mainSlotId と subSlotId だけを使用してください。新しいID、スロット名、類似名、別名を作ってはいけません。",
+  "発話内容を要約・正規化して正式な内容として返してはいけません。",
+  "根拠は必ず conversation_log に存在する utterance.id で返してください。発話IDがない根拠は返さないでください。",
+  "一つの発話につき分類は最大3件までにしてください。該当しない発話は unmatchedUtteranceIds に入れてください。",
+  "completion は none / partial / complete のみです。",
+  "responseState は answered / no_response / explicit_none / not_considered / unable_to_verbalize / declined / ambiguous / conflicting のみです。",
+  "reasonCode は not_discussed / time_limit / topic_changed / explicit_none / not_considered / unable_to_verbalize / declined / insufficient_detail / ambiguous / conflicting / null のみです。",
+  "完全回答は complete + answered、部分回答は partial + answered、曖昧は partial + ambiguous、矛盾は partial + conflicting としてください。",
+  "「特にない」は none + explicit_none + explicit_none、「まだ考えていない」は none + not_considered + not_considered、「言葉にできない」は none + unable_to_verbalize + unable_to_verbalize、「話したくない」は none + declined + declined としてください。",
+  "介護者の解釈だけを本人意思にしないでください。介護者要約に本人が明確に同意した場合のみ、介護者要約発話IDと本人同意発話IDを両方 evidenceUtteranceIds に含めてください。",
+  "出力はJSONのみとしてください。",
+  "",
+  "出力形式:",
+  '{"classifications":[{"mainSlotId":"...","subSlotId":"...","completion":"none | partial | complete","responseState":"answered | no_response | explicit_none | not_considered | unable_to_verbalize | declined | ambiguous | conflicting","reasonCode":"not_discussed | time_limit | topic_changed | explicit_none | not_considered | unable_to_verbalize | declined | insufficient_detail | ambiguous | conflicting | null","evidenceUtteranceIds":["..."],"classificationNote":"任意"}],"unmatchedUtteranceIds":["..."]}',
 ].join("\n");
 
 const SYSTEM_TOPIC_SWITCH = [
@@ -181,6 +218,8 @@ const SYSTEM_FINAL_MINUTES = [
   "あなたはACP対話の実験用議事録を作成するAIです。",
   "会話ログとACPスロット状態から、研究者が確認しやすいMarkdown議事録とJSON要約を作ってください。",
   "固定のお題とTheme -> Aspect -> Evidenceの対応を意識して議事録に含めてください。",
+  "slot_states と sub_slot_states はコード側で確定済みの状態です。議事録生成時にスロット状態を変更・補完・再判定してはいけません。",
+  "sub_slot_states の completion / responseState / reasonCode / evidenceUtteranceIds をそのまま尊重してください。",
   "AIが表示した質問や話題転換文は介入ログであり、会話ログや本人の根拠発話として扱わないでください。",
   "本人の希望と根拠発話を区別し、推測で断定しないでください。",
   "介護者の要約・解釈に本人が明確に同意した内容を本人意思として記録する場合は、「介護者解釈に同意: 」を付け、介護者発話と本人同意発話を併記してください。",
@@ -189,6 +228,9 @@ const SYSTEM_FINAL_MINUTES = [
   "他の話題の発言から補った内容は「(AI推測)」を付け、根拠発話を併記してください。",
   "本人発話にない内容を補完せず、関連発話はあるが明示確認されていない内容は本人の意思として断定しないでください。",
   "未解決課題・次回確認事項はACPスロットに含めず、json.auxiliary_items とMarkdownの補助項目に分けて記録してください。",
+  "not_discussed は「今回の対話では話題に上がらなかった」と記載し、「考えていない」と解釈しないでください。",
+  "declined は「今回は話さない意向」と記載し、「希望なし」と解釈しないでください。",
+  "ambiguous / conflicting は曖昧さや矛盾を残して記載し、一方だけに統合しないでください。",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
@@ -253,36 +295,404 @@ const UNCERTAINTY_SWITCH_REASON =
 
 let client: OpenAI | null = null;
 
+type SlotClassificationResult = {
+  classifications?: SlotClassification[];
+  unmatchedUtteranceIds?: string[];
+};
+
+type SlotClassification = {
+  mainSlotId?: string;
+  subSlotId?: string;
+  completion?: string;
+  responseState?: string;
+  reasonCode?: string | null;
+  evidenceUtteranceIds?: unknown;
+  classificationNote?: string;
+};
+
+type SlotCandidateValidationResult =
+  | { accepted: true }
+  | {
+      accepted: false;
+      reason:
+        | "unknown_main_slot"
+        | "unknown_sub_slot"
+        | "invalid_sub_slot_parent"
+        | "invalid_completion"
+        | "invalid_response_state"
+        | "invalid_reason_code"
+        | "missing_evidence"
+        | "unknown_evidence_utterance"
+        | "invalid_transition";
+    };
+
+type SlotStateBundle = {
+  slotStates: AcpSlotState[];
+  subSlotStates: StoredSubSlotState[];
+  debug: {
+    candidates: SlotClassification[];
+    accepted: SlotClassification[];
+    rejected: Array<{
+      candidate: SlotClassification;
+      reason: Exclude<SlotCandidateValidationResult, { accepted: true }>["reason"];
+      utteranceIds: string[];
+    }>;
+    unmatchedUtteranceIds: string[];
+  };
+};
+
 export async function updateSlotsFromConversation(
   context: ConversationContext,
 ): Promise<AcpSlotState[]> {
-  const fallback = fallbackUpdateSlots(
-    context.utterances,
+  const bundle = await updateSlotStateBundleFromConversation(context);
+
+  return bundle.slotStates;
+}
+
+export async function updateSlotStateBundleFromConversation(
+  context: ConversationContext,
+): Promise<SlotStateBundle> {
+  const fallbackSubSlotStates = context.subSlotStates?.length
+    ? context.subSlotStates
+    : createEmptySubSlotStates();
+  const fallbackSlotStates = deriveMainSlotStatesFromSubSlots(
     context.slotStates,
-    context.currentTopic,
+    fallbackSubSlotStates,
+    context.utterances,
   );
-  const payload = buildConversationPayload(context);
-  const result = await requestJson<{ slots?: AcpSlotState[] }>(
-    SYSTEM_UPDATE_SLOTS,
-    payload,
-    { slots: fallback },
+  const utterancesWithIds = context.utterances.filter((utterance) => utterance.id);
+
+  if (utterancesWithIds.length === 0) {
+    return {
+      slotStates: fallbackSlotStates,
+      subSlotStates: fallbackSubSlotStates,
+      debug: {
+        candidates: [],
+        accepted: [],
+        rejected: [],
+        unmatchedUtteranceIds: [],
+      },
+    };
+  }
+
+  const result = await requestJson<SlotClassificationResult>(
+    SYSTEM_CLASSIFY_SLOT_UTTERANCES,
+    buildSlotClassificationPayload(context, fallbackSubSlotStates),
+    { classifications: [], unmatchedUtteranceIds: [] },
+  );
+  const applied = applySlotClassifications({
+    result,
+    utterances: context.utterances,
+    currentStates: fallbackSubSlotStates,
+    currentTopic: context.currentTopic,
+    sessionId: context.sessionId,
+  });
+  const slotStates = deriveMainSlotStatesFromSubSlots(
+    context.slotStates,
+    applied.subSlotStates,
+    context.utterances,
   );
 
-  const updatedSlots = applyExplicitNoneResponses(
-    context,
-    normalizeSlotUpdateResult(
-      result.slots,
-      fallback,
-      context.slotStates,
-      context.utterances,
+  return {
+    slotStates,
+    subSlotStates: applied.subSlotStates,
+    debug: applied.debug,
+  };
+}
+
+function buildSlotClassificationPayload(
+  context: ConversationContext,
+  subSlotStates: StoredSubSlotState[],
+) {
+  return {
+    session: getSessionMetadata(context),
+    currentTopic: resolveDiscussionTopic(context.currentTopic),
+    slotDefinitions: DISCUSSION_TOPICS.map((topic) => ({
+      mainSlotId: topic.id,
+      mainSlotLabel: topic.title,
+      subSlots: getSubSlotDefinitions()
+        .filter((definition) => definition.mainSlotId === topic.id)
+        .map((definition) => ({
+          id: definition.id,
+          label: definition.label,
+          description: definition.description,
+          completeCriteria: definition.completeCriteria,
+          partialCriteria: definition.partialCriteria,
+          exclusionCriteria: definition.exclusionCriteria,
+        })),
+    })),
+    currentSubSlotStates: subSlotStates,
+    conversation_log: context.utterances.map((utterance) => ({
+      id: utterance.id,
+      speaker: utterance.speaker,
+      text: utterance.text,
+      created_at: utterance.created_at ?? utterance.createdAt ?? null,
+    })),
+    maxClassificationsPerUtterance: 3,
+  };
+}
+
+function applySlotClassifications(input: {
+  result: SlotClassificationResult;
+  utterances: ConversationUtterance[];
+  currentStates: StoredSubSlotState[];
+  currentTopic?: string;
+  sessionId?: string;
+}) {
+  const utteranceIds = new Set(
+    input.utterances.map((utterance) => utterance.id).filter(Boolean) as string[],
+  );
+  const byKey = new Map(
+    input.currentStates.map((state) => [
+      `${state.mainSlotId}:${state.subSlotId}`,
+      state,
+    ]),
+  );
+  const accepted: SlotClassification[] = [];
+  const rejected: SlotStateBundle["debug"]["rejected"] = [];
+  const perEvidenceCount = new Map<string, number>();
+  const now = new Date().toISOString();
+  const currentTopicId = resolveDiscussionTopic(input.currentTopic).id;
+
+  for (const candidate of input.result.classifications ?? []) {
+    const evidenceIds = normalizeEvidenceIds(candidate.evidenceUtteranceIds);
+    const validation = validateSlotClassificationCandidate(
+      candidate,
+      evidenceIds,
+      utteranceIds,
+    );
+
+    if (validation.accepted === false) {
+      rejected.push({
+        candidate,
+        reason: validation.reason,
+        utteranceIds: evidenceIds,
+      });
+      logRejectedSlotCandidate(candidate, validation.reason, evidenceIds, input.sessionId);
+      continue;
+    }
+
+    const primaryEvidenceId = evidenceIds[0];
+    const currentCount = perEvidenceCount.get(primaryEvidenceId) ?? 0;
+    if (currentCount >= 3) {
+      rejected.push({
+        candidate,
+        reason: "missing_evidence",
+        utteranceIds: evidenceIds,
+      });
+      logRejectedSlotCandidate(candidate, "missing_evidence", evidenceIds, input.sessionId);
+      continue;
+    }
+    perEvidenceCount.set(primaryEvidenceId, currentCount + 1);
+
+    const mainSlotId = candidate.mainSlotId as string;
+    const subSlotId = candidate.subSlotId as string;
+    const key = `${mainSlotId}:${subSlotId}`;
+    const current = byKey.get(key);
+    const nextBase = {
+      mainSlotId,
+      subSlotId,
+      completion: candidate.completion as SlotCompletion,
+      responseState: candidate.responseState as SlotClassificationResponseState,
+      reasonCode: (candidate.reasonCode ?? null) as SlotReasonCode | null,
+      evidenceUtteranceIds: mergeEvidenceIds(
+        current?.evidenceUtteranceIds ?? [],
+        evidenceIds,
+      ),
+      lastUpdatedTopicId: currentTopicId,
+      updatedAt: now,
+    };
+    const nextState: StoredSubSlotState = {
+      ...nextBase,
+      canAskAgain: canAskAgainSubSlotState(nextBase),
+      isDeferred: isDeferredSubSlotState(nextBase),
+    };
+
+    if (!canTransitionSubSlotState(current, nextState)) {
+      rejected.push({
+        candidate,
+        reason: "invalid_transition",
+        utteranceIds: evidenceIds,
+      });
+      logRejectedSlotCandidate(candidate, "invalid_transition", evidenceIds, input.sessionId);
+      continue;
+    }
+
+    byKey.set(key, mergeSubSlotState(current, nextState));
+    accepted.push(candidate);
+  }
+
+  return {
+    subSlotStates: [...byKey.values()],
+    debug: {
+      candidates: input.result.classifications ?? [],
+      accepted,
+      rejected,
+      unmatchedUtteranceIds: normalizeEvidenceIds(input.result.unmatchedUtteranceIds),
+    },
+  };
+}
+
+function validateSlotClassificationCandidate(
+  candidate: SlotClassification,
+  evidenceIds: string[],
+  utteranceIds: Set<string>,
+): SlotCandidateValidationResult {
+  const mainSlotId = typeof candidate.mainSlotId === "string" ? candidate.mainSlotId : "";
+  const subSlotId = typeof candidate.subSlotId === "string" ? candidate.subSlotId : "";
+  const knownMainSlot = DISCUSSION_TOPICS.some((topic) => topic.id === mainSlotId);
+
+  if (!knownMainSlot) return { accepted: false, reason: "unknown_main_slot" };
+  if (!subSlotId) return { accepted: false, reason: "unknown_sub_slot" };
+
+  const anySubSlot = getSubSlotDefinitions().some(
+    (definition) => definition.id === subSlotId,
+  );
+  if (!anySubSlot) return { accepted: false, reason: "unknown_sub_slot" };
+  if (!resolveSubSlotDefinition(mainSlotId, subSlotId)) {
+    return { accepted: false, reason: "invalid_sub_slot_parent" };
+  }
+  if (!isSlotCompletion(candidate.completion)) {
+    return { accepted: false, reason: "invalid_completion" };
+  }
+  if (!isSlotClassificationResponseState(candidate.responseState)) {
+    return { accepted: false, reason: "invalid_response_state" };
+  }
+  if (candidate.reasonCode !== null && candidate.reasonCode !== undefined) {
+    if (!isSlotReasonCode(candidate.reasonCode)) {
+      return { accepted: false, reason: "invalid_reason_code" };
+    }
+  }
+  if (candidate.responseState !== "no_response" && evidenceIds.length === 0) {
+    return { accepted: false, reason: "missing_evidence" };
+  }
+  if (evidenceIds.some((id) => !utteranceIds.has(id))) {
+    return { accepted: false, reason: "unknown_evidence_utterance" };
+  }
+
+  return { accepted: true };
+}
+
+function mergeSubSlotState(
+  current: StoredSubSlotState | undefined,
+  next: StoredSubSlotState,
+): StoredSubSlotState {
+  if (!current) return next;
+  if (current.completion === "complete" && next.completion !== "complete") {
+    return {
+      ...current,
+      evidenceUtteranceIds: mergeEvidenceIds(
+        current.evidenceUtteranceIds,
+        next.evidenceUtteranceIds,
+      ),
+      updatedAt: next.updatedAt,
+    };
+  }
+
+  return {
+    ...next,
+    evidenceUtteranceIds: mergeEvidenceIds(
+      current.evidenceUtteranceIds,
+      next.evidenceUtteranceIds,
     ),
+  };
+}
+
+function deriveMainSlotStatesFromSubSlots(
+  currentSlots: AcpSlotState[],
+  subSlotStates: StoredSubSlotState[],
+  utterances: ConversationUtterance[],
+): AcpSlotState[] {
+  const utteranceById = new Map(
+    utterances
+      .filter((utterance) => utterance.id)
+      .map((utterance) => [utterance.id as string, utterance]),
   );
+  const currentByName = new Map(currentSlots.map((slot) => [slot.slot_name, slot]));
 
-  const policySlots = isLegacyDialogueMode()
-    ? updatedSlots
-    : applyUncertainResponses(context, updatedSlots);
+  return DISCUSSION_TOPICS.map((topic) => {
+    const topicStates = subSlotStates.filter((state) => state.mainSlotId === topic.id);
+    const strongest = getMainSlotStatusFromSubSlots(topicStates);
+    const evidenceIds = mergeEvidenceIds(
+      [],
+      topicStates.flatMap((state) => state.evidenceUtteranceIds),
+    );
+    const evidenceText = evidenceIds
+      .map((id) => utteranceById.get(id))
+      .filter((utterance): utterance is ConversationUtterance => Boolean(utterance))
+      .map((utterance) => formatSpeakerEvidence(utterance))
+      .join("\n");
+    const summary = evidenceText || currentByName.get(topic.slot_name)?.summary || "未確認";
 
-  return mergeSlotStates(context.slotStates, policySlots);
+    return {
+      slot_name: topic.slot_name,
+      status: strongest,
+      summary,
+      evidence_utterance: evidenceText,
+      updated_at:
+        topicStates
+          .map((state) => state.updatedAt)
+          .sort()
+          .at(-1) ?? currentByName.get(topic.slot_name)?.updated_at,
+    };
+  });
+}
+
+function getMainSlotStatusFromSubSlots(
+  states: StoredSubSlotState[],
+): AcpSlotState["status"] {
+  if (states.some((state) => state.responseState === "declined")) {
+    return "prefer_not_to_answer";
+  }
+  if (states.some((state) => state.responseState === "explicit_none")) {
+    return "no_preference";
+  }
+  if (states.some((state) => state.responseState === "unable_to_verbalize")) {
+    return "cannot_verbalize";
+  }
+  if (states.some((state) => state.responseState === "not_considered")) {
+    return "not_considered";
+  }
+  if (states.some((state) => state.completion === "complete")) {
+    return "answered";
+  }
+  if (
+    states.some(
+      (state) =>
+        state.completion === "partial" ||
+        state.responseState === "ambiguous" ||
+        state.responseState === "conflicting",
+    )
+  ) {
+    return "partial";
+  }
+
+  return "unanswered";
+}
+
+function normalizeEvidenceIds(value: unknown) {
+  if (!Array.isArray(value)) return [];
+
+  return [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))];
+}
+
+function mergeEvidenceIds(left: string[], right: string[]) {
+  return [...new Set([...left, ...right].map((item) => item.trim()).filter(Boolean))];
+}
+
+function logRejectedSlotCandidate(
+  candidate: SlotClassification,
+  reason: Exclude<SlotCandidateValidationResult, { accepted: true }>["reason"],
+  utteranceIds: string[],
+  sessionId?: string,
+) {
+  console.warn("Rejected slot classification", {
+    candidate,
+    reason,
+    utteranceIds,
+    sessionId,
+    occurredAt: new Date().toISOString(),
+  });
 }
 
 export async function generateNextQuestion(
@@ -309,18 +719,7 @@ export async function generateNextQuestion(
 export async function generateTopicSwitch(
   context: ConversationContext,
 ): Promise<TopicSwitchResult> {
-  const fallback = fallbackTopicSwitch(context);
-  const result = await requestJson<Partial<TopicSwitchResult>>(
-    SYSTEM_TOPIC_SWITCH,
-    buildConversationPayload(context),
-    fallback,
-  );
-
-  const output = normalizeTopicSwitchResult(result, fallback, context);
-
-  return isLegacyDialogueMode()
-    ? output
-    : applyUncertaintyTopicSwitchPolicy(context, output);
+  return fallbackTopicSwitch(context);
 }
 
 export async function checkConversationEnd(
@@ -344,6 +743,7 @@ export async function checkConversationEnd(
     slots: filterAcpSlotStates(context.slotStates),
     currentTopic: context.currentTopic,
     includeBeforeSessionEnd: true,
+    subSlotStates: context.subSlotStates,
   });
   const endTargets = endCheckDebug.deferredSlotQueue.filter(
     (item) => item.canAskAgain,
@@ -726,6 +1126,7 @@ function normalizeSlotUpdateResult(
     const raw = item as Record<string, unknown>;
     const rawSlotName = typeof raw.slot_name === "string" ? raw.slot_name.trim() : "";
     const slotName = normalizeSlotName(rawSlotName);
+    if (!slotName) return;
     const baseSlot = fallbackByName.get(slotName) ?? currentByName.get(slotName);
     const status = normalizeSlotStatus(raw.status);
     const summary = nonEmpty(raw.summary, baseSlot?.summary ?? "");
@@ -802,15 +1203,38 @@ function normalizeNextQuestionResult(
   }
 
   const targetSlot = normalizeAcpTargetSlot(result.target_slot, fallback.target_slot);
+  const targetMainSlotId =
+    typeof result.targetMainSlotId === "string" ? result.targetMainSlotId : "";
+  const targetSubSlotId =
+    typeof result.targetSubSlotId === "string" ? result.targetSubSlotId : "";
+  const askableSubSlots = buildAskableSubSlotsForQuestionPayload(
+    buildSlotControlDebugState({
+      slots: filterAcpSlotStates(context.slotStates),
+      currentTopic: currentTopic.slot_name,
+      subSlotStates: context.subSlotStates,
+    }),
+    context.subSlotStates ?? [],
+  );
+  const hasValidTargetSubSlot =
+    !targetMainSlotId && !targetSubSlotId
+      ? true
+      : askableSubSlots.some(
+          (slot) =>
+            slot.mainSlotId === targetMainSlotId &&
+            slot.subSlotId === targetSubSlotId,
+        );
   const question = nonEmpty(result.question, fallback.question);
   const shouldUseFallbackQuestion =
     isRepeatedQuestion(context.utterances, question, targetSlot) ||
-    !isQuestionRelevantToCurrentTopic(context, targetSlot);
+    !isQuestionRelevantToCurrentTopic(context, targetSlot) ||
+    !hasValidTargetSubSlot;
 
   return {
     question: shouldUseFallbackQuestion ? fallback.question : question,
     transition_phrase: nonEmpty(result.transition_phrase, fallback.transition_phrase),
     target_slot: shouldUseFallbackQuestion ? fallback.target_slot : targetSlot,
+    targetMainSlotId: shouldUseFallbackQuestion ? undefined : targetMainSlotId || undefined,
+    targetSubSlotId: shouldUseFallbackQuestion ? undefined : targetSubSlotId || undefined,
     reason: nonEmpty(result.reason, fallback.reason),
     sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
   };
@@ -850,6 +1274,12 @@ function buildConversationPayload(context: ConversationContext) {
   const acpSlotStates = filterAcpSlotStates(context.slotStates);
   const currentSlotState = findSlotState(acpSlotStates, currentTopic.slot_name);
   const currentResearchTheme = resolveResearchThemeForSlot(currentTopic.slot_name);
+  const utteranceById = new Map(
+    context.utterances
+      .filter((utterance) => utterance.id)
+      .map((utterance) => [utterance.id as string, utterance]),
+  );
+  const subSlotStates = context.subSlotStates ?? [];
 
   return {
     discussion_topic: DISCUSSION_TOPIC,
@@ -949,6 +1379,18 @@ function buildConversationPayload(context: ConversationContext) {
     all_conversation_log: renderTranscript(context.utterances),
     recent_5_turns: renderTranscript(recentUtterances(context.utterances, 5)),
     slot_states: acpSlotStates,
+    sub_slot_states: subSlotStates.map((state) => ({
+      ...state,
+      evidenceUtterances: state.evidenceUtteranceIds
+        .map((id) => utteranceById.get(id))
+        .filter((utterance): utterance is ConversationUtterance => Boolean(utterance))
+        .map((utterance) => ({
+          id: utterance.id,
+          speaker: utterance.speaker,
+          text: utterance.text,
+          created_at: utterance.created_at ?? utterance.createdAt ?? null,
+        })),
+    })),
     theme_metrics: calculateThemeCompletenessMetrics(acpSlotStates),
     unfilled_slots: getUnfilledSlots(acpSlotStates).map((slot) => ({
       slot_name: slot.slot_name,
@@ -1001,15 +1443,20 @@ async function buildQuestionPayload(context: ConversationContext) {
   const fallbackQuestionScope = getCurrentTopicQuestionScope({
     slots: scopedSlots,
     currentTopic: currentTopic.slot_name,
+    subSlotStates: context.subSlotStates,
   });
-  const semanticControl = await buildSemanticSlotControlDebugState({
-    utterances: context.utterances,
+  const slotControl = buildSlotControlDebugState({
     slots: scopedSlots,
     currentTopic: currentTopic.slot_name,
+    subSlotStates: context.subSlotStates,
   });
   const questionScope = buildQuestionScopeFromSlotControl(
-    semanticControl,
+    slotControl,
     fallbackQuestionScope,
+  );
+  const askableSubSlots = buildAskableSubSlotsForQuestionPayload(
+    slotControl,
+    context.subSlotStates ?? [],
   );
 
   return {
@@ -1030,6 +1477,27 @@ async function buildQuestionPayload(context: ConversationContext) {
           ]
         : [],
     question_scope: questionScope,
+    next_question_input: {
+      currentTopic: {
+        id: currentTopic.id,
+        title: currentTopic.title,
+      },
+      askableSubSlots,
+      recentUtterances: recentUtterances(context.utterances, 8).map((utterance) => ({
+        id: utterance.id,
+        speaker: utterance.speaker,
+        text: utterance.text,
+      })),
+      alreadyAskedQuestions: context.utterances
+        .filter((utterance) => !isElderSpeaker(utterance.speaker))
+        .map((utterance) => utterance.text)
+        .slice(-8),
+      remainingQuestionCount: Math.max(
+        0,
+        currentTopic.maxFollowUpQuestions -
+          countPromptsForSlot(context.utterances, currentTopic.slot_name as AcpSlotName),
+      ),
+    },
     control_debug: {
       currentTopicId: questionScope.currentTopicId,
       currentMainSlot: questionScope.currentMainSlot,
@@ -1040,6 +1508,34 @@ async function buildQuestionPayload(context: ConversationContext) {
       allSlotReferenceUsed: false,
     },
   };
+}
+
+function buildAskableSubSlotsForQuestionPayload(
+  debugState: SlotControlDebugState,
+  subSlotStates: StoredSubSlotState[],
+) {
+  const currentMainSlot = debugState.mainSlots.find((slot) => slot.isCurrentTopic);
+  if (!currentMainSlot) return [];
+
+  return currentMainSlot.subSlots
+    .filter((slot) => slot.canAskAgain)
+    .map((slot) => {
+      const definition = resolveSubSlotDefinition(currentMainSlot.topicId, slot.id);
+      const stored = subSlotStates.find(
+        (state) =>
+          state.mainSlotId === currentMainSlot.topicId &&
+          state.subSlotId === slot.id,
+      );
+
+      return {
+        mainSlotId: currentMainSlot.topicId,
+        subSlotId: slot.id,
+        label: slot.label,
+        description: definition?.description ?? slot.label,
+        completion: stored?.completion ?? "none",
+        responseState: stored?.responseState ?? "no_response",
+      };
+    });
 }
 
 function buildQuestionScopeFromSlotControl(
@@ -1456,9 +1952,11 @@ function filterAcpSlotStates(slots: AcpSlotState[]) {
 
 function normalizeAcpTargetSlot(value: unknown, fallback: string) {
   const text = typeof value === "string" ? value.trim() : "";
+  const normalizedText = normalizeSlotName(text);
+  const normalizedFallback = normalizeSlotName(fallback);
 
-  if (text) return normalizeSlotName(text);
-  if (fallback) return normalizeSlotName(fallback);
+  if (normalizedText) return normalizedText;
+  if (normalizedFallback) return normalizedFallback;
 
   return ACP_SLOT_NAMES[0];
 }
@@ -1477,7 +1975,8 @@ function normalizeRemainingSlots(value: unknown, fallback: string[]) {
 
   const slots = value
     .map(String)
-    .map((slotName) => normalizeSlotName(slotName));
+    .map((slotName) => normalizeSlotName(slotName))
+    .filter((slotName): slotName is AcpSlotName => Boolean(slotName));
 
   return slots.length > 0 || fallback.length === 0 ? slots : fallback;
 }

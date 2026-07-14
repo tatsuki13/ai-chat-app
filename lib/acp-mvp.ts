@@ -328,6 +328,52 @@ export type AspectDefinition = {
   label: string;
   priority: AspectPriority;
 };
+export type SubSlotDefinition = {
+  id: string;
+  mainSlotId: string;
+  label: string;
+  description: string;
+  completeCriteria: string;
+  partialCriteria: string;
+  exclusionCriteria?: string;
+};
+export type SlotCompletion = "none" | "partial" | "complete";
+export type SlotClassificationResponseState =
+  | "answered"
+  | "no_response"
+  | "explicit_none"
+  | "not_considered"
+  | "unable_to_verbalize"
+  | "declined"
+  | "ambiguous"
+  | "conflicting";
+export type SlotReasonCode =
+  | "not_discussed"
+  | "time_limit"
+  | "topic_changed"
+  | "explicit_none"
+  | "not_considered"
+  | "unable_to_verbalize"
+  | "declined"
+  | "insufficient_detail"
+  | "ambiguous"
+  | "conflicting";
+export type StoredSubSlotState = {
+  mainSlotId: string;
+  subSlotId: string;
+  completion: SlotCompletion;
+  responseState: SlotClassificationResponseState;
+  reasonCode: SlotReasonCode | null;
+  evidenceUtteranceIds: string[];
+  canAskAgain: boolean;
+  isDeferred: boolean;
+  lastUpdatedTopicId: string | null;
+  updatedAt: string;
+};
+export type SlotResolution = {
+  hasContent: boolean;
+  hasResponse: boolean;
+};
 export type EvidenceReference = {
   themeId: string;
   aspectId: string;
@@ -357,6 +403,10 @@ export type UnansweredReason =
   | "not_discussed"
   | "time_limit"
   | "topic_changed"
+  | "not_considered"
+  | "insufficient_detail"
+  | "ambiguous"
+  | "conflicting"
   | "declined"
   | "unable_to_verbalize"
   | "needs_follow_up";
@@ -376,6 +426,10 @@ export type SubSlotControlState = {
   label: string;
   priority: AspectPriority;
   status: ScopedSlotStatus;
+  completion?: SlotCompletion;
+  responseState?: SlotClassificationResponseState;
+  reasonCode?: SlotReasonCode | null;
+  evidenceUtteranceCount?: number;
   value?: string;
   unansweredReason?: UnansweredReason;
   lastUpdatedAt?: string;
@@ -423,12 +477,6 @@ type SlotControlInputSlot = {
   updated_at?: string;
 };
 export type Speaker = "caregiver" | "elder" | "family";
-export type ButtonType =
-  | "next_question"
-  | "switch_topic"
-  | "check_end"
-  | "update_slots";
-export type SuggestionType = "next_question" | "switch_topic" | "check_end";
 export type Sensitivity = "low" | "medium" | "high";
 
 export type ConversationUtterance = {
@@ -447,10 +495,36 @@ export type AcpSlotState = {
   updated_at?: string;
 };
 
+export const SLOT_COMPLETIONS = ["none", "partial", "complete"] as const;
+export const SLOT_CLASSIFICATION_RESPONSE_STATES = [
+  "answered",
+  "no_response",
+  "explicit_none",
+  "not_considered",
+  "unable_to_verbalize",
+  "declined",
+  "ambiguous",
+  "conflicting",
+] as const;
+export const SLOT_REASON_CODES = [
+  "not_discussed",
+  "time_limit",
+  "topic_changed",
+  "explicit_none",
+  "not_considered",
+  "unable_to_verbalize",
+  "declined",
+  "insufficient_detail",
+  "ambiguous",
+  "conflicting",
+] as const;
+
 export type NextQuestionResult = {
   question: string;
   transition_phrase: string;
   target_slot: AcpSlotName | string;
+  targetMainSlotId?: string;
+  targetSubSlotId?: string;
   reason: string;
   sensitivity: Sensitivity;
 };
@@ -514,15 +588,6 @@ export type AuxiliaryMinutesItem = {
   evidence_utterance: string;
 };
 
-export const BUTTON_LABELS: Record<ButtonType, string> = {
-  next_question: "質問する",
-  switch_topic: "話題を変える",
-  check_end: "終了確認",
-  update_slots: "議事録更新",
-};
-
-export const BUTTON_TYPES = Object.keys(BUTTON_LABELS) as ButtonType[];
-
 export const SPEAKER_LABELS: Record<string, string> = {
   A: "本人",
   B: "介護者",
@@ -562,6 +627,7 @@ export function mergeSlotStates(
 
   updates.forEach((slot) => {
     const slotName = normalizeSlotName(slot.slot_name);
+    if (!slotName) return;
     const currentSlot = byName.get(slotName);
     byName.set(slotName, mergeSingleSlotState(currentSlot, {
       slot_name: slotName,
@@ -584,11 +650,11 @@ export function mergeSlotStates(
   });
 }
 
-export function normalizeSlotName(value: unknown): AcpSlotName {
+export function normalizeSlotName(value: unknown): AcpSlotName | null {
   const text = typeof value === "string" ? value.trim() : "";
 
   if (ACP_SLOT_NAMES.includes(text as AcpSlotName)) return text as AcpSlotName;
-  return LEGACY_SLOT_THEME_MAP[text] ?? ACP_SLOT_NAMES[0];
+  return LEGACY_SLOT_THEME_MAP[text] ?? null;
 }
 
 function mergeSingleSlotState(
@@ -660,10 +726,6 @@ export function normalizeSlotStatus(value: unknown): SlotStatus {
   return "unanswered";
 }
 
-export function isButtonType(value: unknown): value is ButtonType {
-  return typeof value === "string" && BUTTON_TYPES.includes(value as ButtonType);
-}
-
 export function getUnfilledSlots(slots: AcpSlotState[]) {
   return slots.filter((slot) => !isTerminalSlotStatus(slot.status));
 }
@@ -712,6 +774,155 @@ export function getTopicAspects(topic: (typeof DISCUSSION_TOPICS)[number]) {
   return topic.aspects;
 }
 
+export function getSubSlotDefinitions(): SubSlotDefinition[] {
+  return DISCUSSION_TOPICS.flatMap((topic) =>
+    topic.aspects.map((aspect) => ({
+      id: aspect.id,
+      mainSlotId: topic.id,
+      label: aspect.label,
+      description: `「${topic.title}」の中で、${aspect.label}について本人の考え・希望・保留・拒否が話されているかを確認する。`,
+      completeCriteria:
+        aspect.priority === "core"
+          ? `${aspect.label}について、本人の希望・価値観・理由・条件のいずれかが根拠発話から明確に読み取れる。`
+          : `${aspect.label}について、本人の考えまたは明確な該当なしが根拠発話から読み取れる。`,
+      partialCriteria:
+        `${aspect.label}に関連する発話はあるが、本人の希望・理由・条件としては曖昧、または追加確認が必要である。`,
+      exclusionCriteria:
+        "発話に含まれない内容、介護者だけの推測、本人同意のない代弁、別サブスロットの内容は含めない。",
+    })),
+  );
+}
+
+export function resolveSubSlotDefinition(
+  mainSlotId: string,
+  subSlotId: string,
+) {
+  return getSubSlotDefinitions().find(
+    (definition) =>
+      definition.mainSlotId === mainSlotId && definition.id === subSlotId,
+  );
+}
+
+export function getSubSlotDefinitionsForTopic(mainSlotId: string) {
+  return getSubSlotDefinitions().filter(
+    (definition) => definition.mainSlotId === mainSlotId,
+  );
+}
+
+export function createEmptySubSlotStates(now = new Date().toISOString()) {
+  return getSubSlotDefinitions().map((definition) => ({
+    mainSlotId: definition.mainSlotId,
+    subSlotId: definition.id,
+    completion: "none" as SlotCompletion,
+    responseState: "no_response" as SlotClassificationResponseState,
+    reasonCode: "not_discussed" as SlotReasonCode,
+    evidenceUtteranceIds: [],
+    canAskAgain: true,
+    isDeferred: true,
+    lastUpdatedTopicId: null,
+    updatedAt: now,
+  }));
+}
+
+export function isSlotCompletion(value: unknown): value is SlotCompletion {
+  return SLOT_COMPLETIONS.includes(value as SlotCompletion);
+}
+
+export function isSlotClassificationResponseState(
+  value: unknown,
+): value is SlotClassificationResponseState {
+  return SLOT_CLASSIFICATION_RESPONSE_STATES.includes(
+    value as SlotClassificationResponseState,
+  );
+}
+
+export function isSlotReasonCode(value: unknown): value is SlotReasonCode {
+  return SLOT_REASON_CODES.includes(value as SlotReasonCode);
+}
+
+export function getSlotResolution(input: {
+  completion: SlotCompletion;
+  responseState: SlotClassificationResponseState;
+}): SlotResolution {
+  if (input.responseState === "answered") {
+    return {
+      hasContent:
+        input.completion === "partial" || input.completion === "complete",
+      hasResponse: true,
+    };
+  }
+
+  if (input.responseState === "no_response") {
+    return { hasContent: false, hasResponse: false };
+  }
+
+  return { hasContent: false, hasResponse: true };
+}
+
+export function canAskAgainSubSlotState(
+  state: Pick<
+    StoredSubSlotState,
+    "completion" | "responseState" | "reasonCode"
+  >,
+) {
+  if (state.completion === "complete") return false;
+  if (state.responseState === "explicit_none") return false;
+  if (state.responseState === "declined") return false;
+  if (state.responseState === "not_considered") return false;
+  if (state.responseState === "unable_to_verbalize") return false;
+
+  return (
+    state.responseState === "no_response" ||
+    state.responseState === "answered" ||
+    state.responseState === "ambiguous" ||
+    state.responseState === "conflicting" ||
+    state.reasonCode === "insufficient_detail" ||
+    state.reasonCode === "topic_changed" ||
+    state.reasonCode === "time_limit"
+  );
+}
+
+export function isDeferredSubSlotState(
+  state: Pick<
+    StoredSubSlotState,
+    "completion" | "responseState" | "reasonCode"
+  >,
+) {
+  if (!canAskAgainSubSlotState(state)) return false;
+
+  return (
+    state.completion === "none" ||
+    state.completion === "partial" ||
+    state.responseState === "ambiguous" ||
+    state.responseState === "conflicting"
+  );
+}
+
+export function canTransitionSubSlotState(
+  current: StoredSubSlotState | undefined,
+  next: Pick<
+    StoredSubSlotState,
+    "completion" | "responseState" | "evidenceUtteranceIds"
+  >,
+) {
+  if (!current) return true;
+  if (next.evidenceUtteranceIds.length === 0) return false;
+  if (current.responseState === "declined" && next.responseState !== "declined") {
+    return false;
+  }
+  if (current.completion === "complete" && next.responseState === "no_response") {
+    return false;
+  }
+  if (
+    current.responseState !== "no_response" &&
+    next.responseState === "no_response"
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 export function getCoreAspects(topic: (typeof DISCUSSION_TOPICS)[number]) {
   return topic.aspects.filter((aspect) => aspect.priority === "core");
 }
@@ -729,6 +940,7 @@ export function buildSlotControlDebugState(input: {
   currentTopic?: string;
   includeBeforeSessionEnd?: boolean;
   subSlotOverrides?: SubSlotControlOverride[];
+  subSlotStates?: StoredSubSlotState[];
 }): SlotControlDebugState {
   const currentTopic = resolveDiscussionTopic(input.currentTopic);
   const overrideMap = new Map(
@@ -738,7 +950,13 @@ export function buildSlotControlDebugState(input: {
     ]),
   );
   const mainSlots = DISCUSSION_TOPICS.map((topic) =>
-    buildMainSlotControlState(topic, input.slots, currentTopic.id, overrideMap),
+    buildMainSlotControlState(
+      topic,
+      input.slots,
+      currentTopic.id,
+      overrideMap,
+      input.subSlotStates ?? [],
+    ),
   );
   const deferredSlotQueue = mainSlots
     .flatMap((mainSlot) => buildDeferredItemsForMainSlot(mainSlot, currentTopic.id))
@@ -766,6 +984,7 @@ export function buildSlotControlDebugState(input: {
 export function getCurrentTopicQuestionScope(input: {
   slots: SlotControlInputSlot[];
   currentTopic?: string;
+  subSlotStates?: StoredSubSlotState[];
 }) {
   const debugState = buildSlotControlDebugState(input);
   const currentMainSlot = debugState.mainSlots.find((slot) => slot.isCurrentTopic);
@@ -794,6 +1013,7 @@ function buildMainSlotControlState(
   slots: SlotControlInputSlot[],
   currentTopicId: string,
   overrideMap: Map<string, SubSlotControlOverride>,
+  storedSubSlotStates: StoredSubSlotState[],
 ): MainSlotControlState {
   const slot = slots.find((item) => item.slot_name === topic.slot_name);
   const status = toScopedSlotStatus(slot?.status);
@@ -801,21 +1021,34 @@ function buildMainSlotControlState(
   const value = slot ? joinUniqueText("", slot.summary, slot.evidence_utterance) : "";
   const subSlots = topic.aspects.map((aspect) => {
     const override = overrideMap.get(`${topic.id}:${aspect.id}`);
+    const stored = storedSubSlotStates.find(
+      (state) => state.mainSlotId === topic.id && state.subSlotId === aspect.id,
+    );
     const aspectStatus =
-      override?.status ?? getAspectScopedStatus(aspect, status, value);
+      override?.status ?? getStoredSubSlotScopedStatus(stored) ??
+      getAspectScopedStatus(aspect, status, value);
     const aspectReason = getUnansweredReason(aspectStatus);
     return {
       id: aspect.id,
       label: aspect.label,
       priority: aspect.priority,
       status: aspectStatus,
+      completion: stored?.completion,
+      responseState: stored?.responseState,
+      reasonCode: stored?.reasonCode,
+      evidenceUtteranceCount: stored?.evidenceUtteranceIds.length,
       value: override?.value ?? (aspectMatchesText(aspect.label, value) ? value : undefined),
-      unansweredReason: override?.unansweredReason ?? aspectReason,
-      lastUpdatedAt: override?.lastUpdatedAt ?? slot?.updated_at,
+      unansweredReason:
+        override?.unansweredReason ??
+        mapReasonCodeToUnansweredReason(stored?.reasonCode) ??
+        aspectReason,
+      lastUpdatedAt: override?.lastUpdatedAt ?? stored?.updatedAt ?? slot?.updated_at,
       lastUpdatedTopicId:
-        override?.lastUpdatedTopicId ?? (slot?.updated_at ? topic.id : undefined),
-      inDeferredQueue: canDeferSlotStatus(aspectStatus),
-      canAskAgain: canAskAgainStatus(aspectStatus),
+        override?.lastUpdatedTopicId ??
+        stored?.lastUpdatedTopicId ??
+        (slot?.updated_at ? topic.id : undefined),
+      inDeferredQueue: stored?.isDeferred ?? canDeferSlotStatus(aspectStatus),
+      canAskAgain: stored?.canAskAgain ?? canAskAgainStatus(aspectStatus),
     };
   });
 
@@ -874,6 +1107,45 @@ function toScopedSlotStatus(status: unknown): ScopedSlotStatus {
       return "unable_to_verbalize";
     default:
       return "unanswered";
+  }
+}
+
+function getStoredSubSlotScopedStatus(
+  state: StoredSubSlotState | undefined,
+): ScopedSlotStatus | undefined {
+  if (!state) return undefined;
+
+  if (state.completion === "complete") return "answered";
+  if (state.responseState === "answered" && state.completion === "partial") {
+    return "partially_answered";
+  }
+  if (state.responseState === "explicit_none") return "not_applicable";
+  if (state.responseState === "declined") return "declined";
+  if (state.responseState === "unable_to_verbalize") return "unable_to_verbalize";
+  if (state.responseState === "not_considered") return "unable_to_verbalize";
+  if (state.responseState === "ambiguous" || state.responseState === "conflicting") {
+    return "needs_follow_up";
+  }
+
+  return "unanswered";
+}
+
+function mapReasonCodeToUnansweredReason(
+  reasonCode: SlotReasonCode | null | undefined,
+): UnansweredReason | undefined {
+  switch (reasonCode) {
+    case "not_discussed":
+    case "time_limit":
+    case "topic_changed":
+    case "not_considered":
+    case "insufficient_detail":
+    case "ambiguous":
+    case "conflicting":
+    case "declined":
+    case "unable_to_verbalize":
+      return reasonCode;
+    default:
+      return undefined;
   }
 }
 
