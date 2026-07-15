@@ -36,7 +36,6 @@ import {
   isTerminalSlotStatus,
   mergeSlotStates,
   normalizeSlotName,
-  normalizeSlotStatus,
   recentUtterances,
   renderTranscript,
   resolveDiscussionTopic,
@@ -136,30 +135,6 @@ const SYSTEM_NEXT_QUESTION = [
   '{"question":"...","transition_phrase":"...","target_slot":"...","targetMainSlotId":"...","targetSubSlotId":"...","reason":"...","sensitivity":"low | medium | high"}',
 ].join("\n");
 
-const SYSTEM_UPDATE_SLOTS = [
-  "あなたはACP対話の研究用記録を整理するAIです。",
-  "会話ログを読み、Theme単位のACPスロット状態を更新してください。",
-  "研究上の評価単位は research_themes の6Themeです。optional_research_themes は必要時だけ扱い、6Themeの網羅率分母には含めません。",
-  "current_topic.aspects と available_topics[].aspects はEvidence整理の観点です。Aspectが未充足でもスロットをemptyに戻さないでください。",
-  "statusは unanswered / partial / answered / no_preference / not_considered / cannot_verbalize / prefer_not_to_answer のいずれかです。",
-  "answeredは本人の希望・価値観・理由・条件が根拠発話とともに表明された状態です。",
-  "partialは関連発話はあるが、本人の考えとしてはまだ弱い状態です。",
-  "本人が質問に対して「特にない」「今はない」「わからない」「言えない」「思いつかない」「話したくない」などと明示した場合、それは無回答ではなく有効なresponseStateです。summaryには「明示回答: ...」として記録してください。",
-  "わからない・決められないは not_considered か partial、言語化困難は cannot_verbalize、特に希望がない／任せたいは no_preference、答えたくないは prefer_not_to_answer を使ってください。",
-  "ただし、その後の別話題で同じスロットに関係する本人発話が出た場合は、明示回答だけで固定せず、後から出た根拠発話でsummaryを更新してください。",
-  "本人発話を最優先してください。ただし対話として、介護者が本人の発言を要約・解釈し、その直後または近接する本人発話で明確に同意している場合は、本人の意思として扱えます。",
-  "介護者の要約・解釈を根拠にする場合、summaryまたはevidence_utteranceの先頭に必ず「介護者解釈に同意: 」を付け、介護者の要約発話と本人の同意発話の両方を含めてください。",
-  "本人の同意がない介護者だけの推測・代弁・解釈は、本人の意思として answered にしないでください。",
-  "他のThemeの発言からスロットを補う場合は、本人発話を根拠にし、summaryまたはevidence_utteranceの先頭に「(AI推測)」を付けてください。AI推測だけでansweredにしないでください。",
-  "未解決課題・次回確認事項はACPスロットではありません。slotsには絶対に「未解決課題」を出力しないでください。",
-  "明示的な「ない」を、AIの推測で別の希望や価値観に置き換えないでください。",
-  "本人の発話を根拠として優先し、根拠のない想像では埋めないでください。",
-  "出力はJSONのみとしてください。",
-  "",
-  "出力形式:",
-  '{"slots":[{"slot_name":"今の生活で大切にしていること","status":"unanswered | partial | answered | no_preference | not_considered | cannot_verbalize | prefer_not_to_answer","summary":"...","evidence_utterance":"..."}]}',
-].join("\n");
-
 const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
   "あなたはACP対話ログの発話を、固定されたメインスロット・サブスロット定義へ分類するAIです。",
   "あなたの役割は意味分類だけです。スロット状態の確定、保存可否、状態遷移、再質問可否はコード側が行います。",
@@ -177,27 +152,6 @@ const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
   "",
   "出力形式:",
   '{"classifications":[{"mainSlotId":"...","subSlotId":"...","completion":"none | partial | complete","responseState":"answered | no_response | explicit_none | not_considered | unable_to_verbalize | declined | ambiguous | conflicting","reasonCode":"not_discussed | time_limit | topic_changed | explicit_none | not_considered | unable_to_verbalize | declined | insufficient_detail | ambiguous | conflicting | null","evidenceUtteranceIds":["..."],"classificationNote":"任意"}],"unmatchedUtteranceIds":["..."]}',
-].join("\n");
-
-const SYSTEM_TOPIC_SWITCH = [
-  "あなたはACP対話を支援するAIです。",
-  "あなたの役割は、今の話題を終えて次へ進んでよいかを判定し、介護者が自然に話題を運べる一文を1つだけ生成することです。",
-  "target_slot と next_topic には、acp_slots に含まれるACPスロットだけを指定してください。「未解決課題」は指定してはいけません。",
-  "まず current_topic が十分に話されたかを、current_topic に関係する発話とスロット状態から判断してください。",
-  "研究上の評価単位は research_themes の6Themeですが、話題転換の出力では画面遷移用の available_topics に含まれるACPスロットを使ってください。",
-  "本人が current_topic について「特にない」「今はない」「わからない」「言えない」「思いつかない」などと答えている場合、それを有効な回答として扱い、同じ直接質問を繰り返さないでください。",
-  "明示的に言語化できない回答が出ており、まだ一度も別角度で確認していない場合だけ、should_switch=false として、具体的経験・嫌だったこと・避けたいこと・最近の過ごし方などから1つだけ別角度で確認してください。",
-  "すでに別角度でも確認した、または本人がこれ以上話しにくそうな場合は、その明示回答を尊重して should_switch=true とし、次の話題へ進んでください。",
-  "current_topic がまだ empty または partial なら、should_switch=false とし、同じ話題をもう少し深める自然な追加質問を返してください。",
-  "should_switch=false の場合でも、直前に明示的な「ない」があるなら、同じ「ありますか」形式ではなく、具体的経験・嫌だったこと・避けたいことなど別角度の確認にしてください。",
-  "current_topic が filled に近い場合だけ、should_switch=true とし、next_topic へ移る短い前置きと最初の質問を返してください。",
-  "ACP全体の未充足スロットは補助情報です。今の話題と無関係な領域へ急に飛ばないでください。",
-  "Aspectは質問ノルマではありません。optional_aspectsが未充足でも、core_aspectsまたは本人のresponseStateが確認できていれば話題転換を妨げないでください。",
-  "高齢者を責めず、介護者がそのまま読み上げられる日本語にしてください。",
-  "出力はJSONのみとしてください。",
-  "",
-  "出力形式:",
-  '{"should_switch":false,"message":"...","target_slot":"...","next_topic":"...","reason":"...","sensitivity":"low | medium | high"}',
 ].join("\n");
 
 const SYSTEM_END_CHECK = [
@@ -1108,71 +1062,6 @@ function getClient(apiKey: string) {
   return client;
 }
 
-function normalizeSlotUpdateResult(
-  value: unknown,
-  fallback: AcpSlotState[],
-  currentSlots: AcpSlotState[],
-  utterances: ConversationUtterance[],
-): AcpSlotState[] {
-  if (!Array.isArray(value)) return fallback;
-
-  const currentByName = new Map(currentSlots.map((slot) => [slot.slot_name, slot]));
-  const fallbackByName = new Map(fallback.map((slot) => [slot.slot_name, slot]));
-  const updatesByName = new Map<string, AcpSlotState>();
-
-  value.forEach((item) => {
-    if (!item || typeof item !== "object") return;
-
-    const raw = item as Record<string, unknown>;
-    const rawSlotName = typeof raw.slot_name === "string" ? raw.slot_name.trim() : "";
-    const slotName = normalizeSlotName(rawSlotName);
-    if (!slotName) return;
-    const baseSlot = fallbackByName.get(slotName) ?? currentByName.get(slotName);
-    const status = normalizeSlotStatus(raw.status);
-    const summary = nonEmpty(raw.summary, baseSlot?.summary ?? "");
-    const evidence = nonEmpty(
-      raw.evidence_utterance,
-      baseSlot?.evidence_utterance ?? "",
-    );
-
-    if (status !== "unanswered" && !slotUpdateHasValidEvidence(evidence, utterances)) {
-      if (baseSlot) updatesByName.set(slotName, baseSlot);
-      return;
-    }
-
-    updatesByName.set(slotName, {
-      slot_name: slotName,
-      status,
-      summary,
-      evidence_utterance: evidence,
-      updated_at:
-        typeof raw.updated_at === "string"
-          ? raw.updated_at
-          : baseSlot?.updated_at,
-    });
-  });
-
-  return ACP_SLOT_NAMES.map((slotName) => {
-    return (
-      updatesByName.get(slotName) ??
-      fallbackByName.get(slotName) ??
-      currentByName.get(slotName) ?? {
-        slot_name: slotName,
-        status: "unanswered",
-        summary: "",
-        evidence_utterance: "",
-      }
-    );
-  });
-}
-
-function slotUpdateHasValidEvidence(
-  evidence: string,
-  utterances: ConversationUtterance[],
-) {
-  return evidenceMatchesTranscript(normalizeEvidenceText(evidence), utterances);
-}
-
 function normalizeNextQuestionResult(
   result: Partial<NextQuestionResult>,
   fallback: NextQuestionResult,
@@ -1235,34 +1124,6 @@ function normalizeNextQuestionResult(
     target_slot: shouldUseFallbackQuestion ? fallback.target_slot : targetSlot,
     targetMainSlotId: shouldUseFallbackQuestion ? undefined : targetMainSlotId || undefined,
     targetSubSlotId: shouldUseFallbackQuestion ? undefined : targetSubSlotId || undefined,
-    reason: nonEmpty(result.reason, fallback.reason),
-    sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
-  };
-}
-
-function normalizeTopicSwitchResult(
-  result: Partial<TopicSwitchResult>,
-  fallback: TopicSwitchResult,
-  context: ConversationContext,
-): TopicSwitchResult {
-  const requestedNextTopic = context.nextTopic
-    ? resolveTopic(context.nextTopic).slot_name
-    : fallback.next_topic;
-  const nextTopic = normalizeTopicName(requestedNextTopic, fallback.next_topic);
-  const targetSlot = normalizeAcpTargetSlot(result.target_slot, nextTopic);
-  const shouldSwitch =
-    typeof result.should_switch === "boolean"
-      ? result.should_switch
-      : fallback.should_switch;
-  const isValidSwitch = !shouldSwitch || Boolean(context.nextTopic);
-
-  if (!isValidSwitch) return fallback;
-
-  return {
-    message: nonEmpty(result.message, fallback.message),
-    target_slot: targetSlot,
-    should_switch: shouldSwitch,
-    next_topic: shouldSwitch ? nextTopic : fallback.next_topic,
     reason: nonEmpty(result.reason, fallback.reason),
     sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
   };
@@ -1959,15 +1820,6 @@ function normalizeAcpTargetSlot(value: unknown, fallback: string) {
   if (normalizedFallback) return normalizedFallback;
 
   return ACP_SLOT_NAMES[0];
-}
-
-function normalizeTopicName(value: unknown, fallback: string) {
-  const text = typeof value === "string" ? value.trim() : "";
-
-  if (DISCUSSION_TOPICS.some((topic) => topic.slot_name === text)) return text;
-  if (DISCUSSION_TOPICS.some((topic) => topic.slot_name === fallback)) return fallback;
-
-  return DISCUSSION_TOPICS[0].slot_name;
 }
 
 function normalizeRemainingSlots(value: unknown, fallback: string[]) {
