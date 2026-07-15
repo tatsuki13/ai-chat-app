@@ -148,6 +148,7 @@ const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
   "完全回答は complete + answered、部分回答は partial + answered、曖昧は partial + ambiguous、矛盾は partial + conflicting としてください。",
   "「特にない」は none + explicit_none + explicit_none、「まだ考えていない」は none + not_considered + not_considered、「言葉にできない」は none + unable_to_verbalize + unable_to_verbalize、「話したくない」は none + declined + declined としてください。",
   "介護者の解釈だけを本人意思にしないでください。介護者要約に本人が明確に同意した場合のみ、介護者要約発話IDと本人同意発話IDを両方 evidenceUtteranceIds に含めてください。",
+  "Do not classify caregiver speech alone as the elder's preference. If caregiver speech is used as evidence, evidenceUtteranceIds must also include a nearby later elder agreement or elaboration utterance.",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
@@ -273,6 +274,7 @@ type SlotCandidateValidationResult =
         | "invalid_reason_code"
         | "missing_evidence"
         | "unknown_evidence_utterance"
+        | "non_elder_evidence"
         | "invalid_transition";
     };
 
@@ -364,12 +366,14 @@ function buildSlotClassificationPayload(
         })),
     })),
     currentSubSlotStates: subSlotStates,
-    conversation_log: context.utterances.map((utterance) => ({
-      id: utterance.id,
-      speaker: utterance.speaker,
-      text: utterance.text,
-      created_at: utterance.created_at ?? utterance.createdAt ?? null,
-    })),
+    conversation_log: context.utterances
+      .filter((utterance) => utterance.id)
+      .map((utterance) => ({
+        id: utterance.id,
+        speaker: isCaregiverSpeaker(utterance.speaker) ? "caregiver" : "elder",
+        text: utterance.text,
+        created_at: utterance.created_at ?? utterance.createdAt ?? null,
+      })),
     maxClassificationsPerUtterance: 3,
   };
 }
@@ -402,6 +406,7 @@ function applySlotClassifications(input: {
       candidate,
       evidenceIds,
       utteranceIds,
+      input.utterances,
     );
 
     if (validation.accepted === false) {
@@ -479,6 +484,7 @@ function validateSlotClassificationCandidate(
   candidate: SlotClassification,
   evidenceIds: string[],
   utteranceIds: Set<string>,
+  utterances: ConversationUtterance[],
 ): SlotCandidateValidationResult {
   const mainSlotId = typeof candidate.mainSlotId === "string" ? candidate.mainSlotId : "";
   const subSlotId = typeof candidate.subSlotId === "string" ? candidate.subSlotId : "";
@@ -511,8 +517,39 @@ function validateSlotClassificationCandidate(
   if (evidenceIds.some((id) => !utteranceIds.has(id))) {
     return { accepted: false, reason: "unknown_evidence_utterance" };
   }
+  if (!evidenceIdsHaveValidSpeakerConsent(evidenceIds, utterances)) {
+    return { accepted: false, reason: "non_elder_evidence" };
+  }
 
   return { accepted: true };
+}
+
+function evidenceIdsHaveValidSpeakerConsent(
+  evidenceIds: string[],
+  utterances: ConversationUtterance[],
+) {
+  if (evidenceIds.length === 0) return true;
+
+  const evidenceIdSet = new Set(evidenceIds);
+  const indexedEvidence = utterances
+    .map((utterance, index) => ({ utterance, index }))
+    .filter(({ utterance }) => utterance.id && evidenceIdSet.has(utterance.id));
+
+  if (indexedEvidence.every(({ utterance }) => isElderSpeaker(utterance.speaker))) {
+    return true;
+  }
+
+  return indexedEvidence.every(({ utterance, index }) => {
+    if (isElderSpeaker(utterance.speaker)) return true;
+    if (!isCaregiverSpeaker(utterance.speaker)) return false;
+
+    return indexedEvidence.some(({ utterance: candidate, index: candidateIndex }) => {
+      if (!isElderSpeaker(candidate.speaker)) return false;
+      if (candidateIndex <= index || candidateIndex - index > 4) return false;
+
+      return isAgreementUtterance(candidate.text) || hasSubstantiveElderEvidence(candidate.text);
+    });
+  });
 }
 
 function mergeSubSlotState(
@@ -564,13 +601,22 @@ function deriveMainSlotStatesFromSubSlots(
       .filter((utterance): utterance is ConversationUtterance => Boolean(utterance))
       .map((utterance) => formatSpeakerEvidence(utterance))
       .join("\n");
-    const summary = evidenceText || currentByName.get(topic.slot_name)?.summary || "未確認";
+    const hasCaregiverEvidence = evidenceIds.some((id) => {
+      const utterance = utteranceById.get(id);
+      return utterance ? isCaregiverSpeaker(utterance.speaker) : false;
+    });
+    const evidenceWithContext =
+      hasCaregiverEvidence && evidenceText
+        ? `${CAREGIVER_INTERPRETATION_AGREEMENT_PREFIX}${evidenceText}`
+        : evidenceText;
+    const summary =
+      evidenceWithContext || currentByName.get(topic.slot_name)?.summary || "Unconfirmed";
 
     return {
       slot_name: topic.slot_name,
       status: strongest,
       summary,
-      evidence_utterance: evidenceText,
+      evidence_utterance: evidenceWithContext,
       updated_at:
         topicStates
           .map((state) => state.updatedAt)
@@ -968,9 +1014,11 @@ function evidencePieceMatchesUtterance(piece: string, utteranceText: string) {
 function isAgreementUtterance(text: string) {
   const normalized = normalizeForEvidenceMatch(text);
 
-  return /^(はい|うん|そう|そうです|それでいい|それでいいです|それで大丈夫|その通り|そのとおり|合っています|あっています|間違いない|まちがいない|いいです|大丈夫です)$/.test(
-    normalized,
-  );
+  return /^(?:\u306f\u3044|\u3046\u3093|\u305d\u3046|\u305d\u3046\u3067\u3059|\u305d\u308c\u3067\u3044\u3044|\u305d\u308c\u3067\u5927\u4e08\u592b|\u305d\u306e\u901a\u308a|\u5408\u3063\u3066\u3044\u307e\u3059|\u5408\u3063\u3066\u307e\u3059|\u9593\u9055\u3044\u306a\u3044|\u3044\u3044\u3067\u3059|\u5927\u4e08\u592b\u3067\u3059)$/.test(normalized);
+}
+
+function hasSubstantiveElderEvidence(text: string) {
+  return normalizeForEvidenceMatch(text).length >= 6;
 }
 
 function normalizeForEvidenceMatch(value: string) {
@@ -1624,11 +1672,8 @@ function fallbackEndCheck(slotStates: AcpSlotState[]): EndCheckResult {
   };
 }
 
-function resolveTopic(slotName: string | undefined) {
-  return (
-    DISCUSSION_TOPICS.find((topic) => topic.slot_name === slotName) ??
-    DISCUSSION_TOPICS[0]
-  );
+function resolveTopic(value: string | undefined) {
+  return resolveDiscussionTopic(value);
 }
 
 function findSlotState(slotStates: AcpSlotState[], slotName: string) {
@@ -1899,12 +1944,7 @@ function isLegacyDialogueMode() {
 }
 
 function formatSpeakerEvidence(utterance: ConversationUtterance) {
-  const speaker =
-    isElderSpeaker(utterance.speaker)
-      ? "本人"
-      : utterance.speaker === "caregiver"
-        ? "介護者"
-        : "家族";
+  const speaker = isCaregiverSpeaker(utterance.speaker) ? "介護者" : "本人";
 
   return `${speaker}: ${truncate(utterance.text, 160)}`;
 }

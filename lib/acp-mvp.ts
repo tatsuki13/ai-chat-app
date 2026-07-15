@@ -30,6 +30,9 @@ export const DISCUSSION_TOPICS = [
       { id: "role", label: "家族や地域での役割", priority: "optional" },
       { id: "attachment", label: "自宅や地域への愛着", priority: "optional" },
       { id: "reason", label: "なぜ大切なのか", priority: "core" },
+      { id: "cross_connection", label: "人とのつながり", priority: "cross_topic" },
+      { id: "cross_living_environment", label: "生活環境", priority: "cross_topic" },
+      { id: "cross_selfhood", label: "自分らしさ", priority: "cross_topic" },
     ],
     coreSlots: ["大切にしている日課", "趣味や楽しみ", "なぜ大切なのか"],
     optionalSlots: ["大切な人間関係", "家族や地域での役割", "自宅や地域への愛着"],
@@ -53,6 +56,9 @@ export const DISCUSSION_TOPICS = [
       { id: "acceptable_change", label: "変わっても受け入れられること", priority: "optional" },
       { id: "not_want_to_lose", label: "失いたくないこと", priority: "core" },
       { id: "reason", label: "続けたい理由", priority: "core" },
+      { id: "cross_selfhood", label: "自分らしさ", priority: "cross_topic" },
+      { id: "cross_support", label: "支援", priority: "cross_topic" },
+      { id: "cross_secure_living", label: "安心できる過ごし方", priority: "cross_topic" },
     ],
     coreSlots: ["続けたい活動", "自分で続けたいこと", "失いたくないこと", "続けたい理由"],
     optionalSlots: ["続けたい人間関係", "維持したい生活環境", "変わっても受け入れられること"],
@@ -76,6 +82,9 @@ export const DISCUSSION_TOPICS = [
       { id: "comfort", label: "心身の快適さ", priority: "optional" },
       { id: "purpose_or_role", label: "生きがいや役割", priority: "core" },
       { id: "lifestyle", label: "自分らしい生活様式", priority: "core" },
+      { id: "cross_values", label: "価値観", priority: "cross_topic" },
+      { id: "cross_living_environment", label: "生活環境", priority: "cross_topic" },
+      { id: "cross_support", label: "支援", priority: "cross_topic" },
     ],
     coreSlots: ["自分で決めたいこと", "尊重してほしいこと", "生きがいや役割", "自分らしい生活様式"],
     optionalSlots: ["プライバシー", "人とのつながり", "心身の快適さ"],
@@ -168,6 +177,9 @@ export const RESEARCH_THEMES = [
       { id: "role", label: "家族や地域での役割", priority: "optional" },
       { id: "attachment", label: "自宅や地域への愛着", priority: "optional" },
       { id: "reason", label: "なぜ大切なのか", priority: "core" },
+      { id: "cross_connection", label: "人とのつながり", priority: "cross_topic" },
+      { id: "cross_living_environment", label: "生活環境", priority: "cross_topic" },
+      { id: "cross_selfhood", label: "自分らしさ", priority: "cross_topic" },
     ],
     maxFollowUpQuestions: 1,
   },
@@ -186,6 +198,9 @@ export const RESEARCH_THEMES = [
       { id: "acceptable_change", label: "変わっても受け入れられること", priority: "optional" },
       { id: "not_want_to_lose", label: "失いたくないこと", priority: "core" },
       { id: "reason", label: "続けたい理由", priority: "core" },
+      { id: "cross_selfhood", label: "自分らしさ", priority: "cross_topic" },
+      { id: "cross_support", label: "支援", priority: "cross_topic" },
+      { id: "cross_secure_living", label: "安心できる過ごし方", priority: "cross_topic" },
     ],
     maxFollowUpQuestions: 1,
   },
@@ -204,6 +219,9 @@ export const RESEARCH_THEMES = [
       { id: "comfort", label: "心身の快適さ", priority: "optional" },
       { id: "purpose_or_role", label: "生きがいや役割", priority: "core" },
       { id: "lifestyle", label: "自分らしい生活様式", priority: "core" },
+      { id: "cross_values", label: "価値観", priority: "cross_topic" },
+      { id: "cross_living_environment", label: "生活環境", priority: "cross_topic" },
+      { id: "cross_support", label: "支援", priority: "cross_topic" },
     ],
     maxFollowUpQuestions: 1,
   },
@@ -476,7 +494,7 @@ type SlotControlInputSlot = {
   evidence_utterance: string;
   updated_at?: string;
 };
-export type Speaker = "caregiver" | "elder" | "family";
+export type Speaker = "caregiver" | "elder";
 export type Sensitivity = "low" | "medium" | "high";
 
 export type ConversationUtterance = {
@@ -589,16 +607,12 @@ export type AuxiliaryMinutesItem = {
 };
 
 export const SPEAKER_LABELS: Record<string, string> = {
-  A: "本人",
-  B: "介護者",
   caregiver: "介護者",
   elder: "本人",
-  family: "家族",
 };
 
 export function normalizeConversationSpeaker(value: string): Speaker {
   if (value === "B" || value === "caregiver") return "caregiver";
-  if (value === "family") return "family";
   return "elder";
 }
 
@@ -1079,7 +1093,7 @@ function buildDeferredItemsForMainSlot(
   return mainSlot.subSlots
     .filter((subSlot) => subSlot.inDeferredQueue && subSlot.canAskAgain)
     .map((subSlot, index) => ({
-      mainSlotId: mainSlot.id,
+      mainSlotId: mainSlot.topicId,
       mainSlotLabel: mainSlot.label,
       subSlotId: subSlot.id,
       subSlotLabel: subSlot.label,
@@ -1301,9 +1315,16 @@ export function calculateThemeCompletenessMetrics(
   };
 }
 
-export function resolveDiscussionTopic(slotName: string | undefined) {
+export function resolveDiscussionTopic(value: string | undefined) {
+  const text = typeof value === "string" ? value.trim() : "";
+
   return (
-    DISCUSSION_TOPICS.find((topic) => topic.slot_name === slotName) ??
+    DISCUSSION_TOPICS.find(
+      (topic) =>
+        topic.id === text ||
+        topic.slot_name === text ||
+        topic.title === text,
+    ) ??
     DISCUSSION_TOPICS[0]
   );
 }

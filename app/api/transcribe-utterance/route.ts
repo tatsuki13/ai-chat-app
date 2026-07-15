@@ -128,11 +128,6 @@ function normalizeSpeaker(value: string) {
   return normalizeConversationSpeaker(value);
 }
 
-function isSpeaker(value: string): value is "A" | "B" | "elder" | "caregiver" {
-  return (
-    value === "A" ||
-    value === "B" ||
-    value === "elder" ||
-    value === "caregiver"
-  );
+function isSpeaker(value: string): value is "elder" | "caregiver" {
+  return value === "elder" || value === "caregiver";
 }

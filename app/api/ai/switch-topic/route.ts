@@ -6,6 +6,7 @@ import { generateTopicSwitch } from "../../../../lib/llm";
 import {
   buildSlotControlDebugState,
   DISCUSSION_TOPICS,
+  resolveDiscussionTopic,
 } from "../../../../lib/acp-mvp";
 
 export const runtime = "nodejs";
@@ -76,10 +77,10 @@ function optionalString(value: unknown) {
 }
 
 function createForcedTopicSwitch(nextTopic: string, nextTopicTitle?: string) {
-  const topic = DISCUSSION_TOPICS.find((item) => item.slot_name === nextTopic);
-  const resolvedTopic = topic ?? DISCUSSION_TOPICS[0];
+  const resolvedTopic = resolveDiscussionTopic(nextTopic);
+  const topic = DISCUSSION_TOPICS.find((item) => item.id === resolvedTopic.id);
   const resolvedSlotName = resolvedTopic.slot_name;
-  const title = topic ? nextTopicTitle || topic.title : resolvedTopic.title;
+  const title = nextTopicTitle || resolvedTopic.title;
   const openingPrompt =
     topic?.opening_prompt ??
     `${resolvedTopic.title}について少し伺ってもよいですか。`;

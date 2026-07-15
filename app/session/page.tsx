@@ -1284,9 +1284,7 @@ export default function SessionPage() {
               loading={developerSlotLoading}
               error={developerSlotError}
               onRefresh={() => {
-                if (session?.id) {
-                  void refreshDeveloperSlotStates(session.id);
-                }
+                void handleAction("update_slots");
               }}
             />
 
@@ -1377,7 +1375,7 @@ function DeveloperDialogueTopics(props: {
               onClick={props.onRefresh}
               className="min-h-8 rounded-md border border-stone-300 bg-stone-50 px-2 text-[11px] font-black text-stone-700 active:scale-[0.99]"
             >
-              Refresh
+              Update slots
             </button>
           </div>
 
