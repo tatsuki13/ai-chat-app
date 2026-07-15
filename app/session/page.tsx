@@ -1645,7 +1645,7 @@ function SessionCompletionPanel(props: {
             <button
               type="button"
               onClick={() =>
-                downloadFinalMinutesPdf(props.finalMinutes, pdfFileName)
+                void downloadFinalMinutesPdf(props.finalMinutes, pdfFileName)
               }
               className="min-h-9 self-end rounded-md bg-emerald-700 px-3 text-[12px] font-black text-white active:scale-[0.99]"
             >
@@ -2310,7 +2310,7 @@ function getTransitionProposalReason(input: {
   utterances: Utterance[];
 }): ProposalReason | null {
   if (input.maxTimeElapsed) return "max_time_elapsed";
-  if (isTerminalSlotStatus(input.currentTopicSlot?.status)) {
+  if (input.baseTimeElapsed && isTerminalSlotStatus(input.currentTopicSlot?.status)) {
     return "core_slots_completed";
   }
 
@@ -2370,14 +2370,14 @@ function createDefaultPdfFileName() {
   return `ACP議事録-${year}-${month}-${day}`;
 }
 
-function downloadFinalMinutesPdf(
+async function downloadFinalMinutesPdf(
   finalMinutes: { markdown: string; created_at: string } | null,
   rawFileName: string,
 ) {
   if (!finalMinutes) return;
 
   const fileName = sanitizePdfFileName(rawFileName || createDefaultPdfFileName());
-  const pdfBlob = createSimplePdfBlob(
+  const pdfBlob = await createCanvasPdfBlob(
     `${fileName}\nPDF作成日時: ${formatDateTime(finalMinutes.created_at)}\n\n${finalMinutes.markdown}`,
   );
   if (pdfBlob.size === 0) return;
@@ -2395,50 +2395,40 @@ function downloadFinalMinutesPdf(
   }, 1000);
 }
 
-function createSimplePdfBlob(markdown: string) {
-  const lines = markdownToPdfLines(markdown);
-  const pageCapacity = 44;
-  const pages = Array.from(
-    { length: Math.max(1, Math.ceil(lines.length / pageCapacity)) },
-    (_, index) => lines.slice(index * pageCapacity, (index + 1) * pageCapacity),
-  );
-  const objects: string[] = [];
-  const addObject = (body: string) => {
+async function createCanvasPdfBlob(markdown: string) {
+  const pages = renderMinutesToPageImages(markdown);
+  const objects: Array<Array<string | ArrayBuffer>> = [];
+  const addObject = (...body: Array<string | ArrayBuffer>) => {
     objects.push(body);
     return objects.length;
   };
   const catalogId = addObject("<< /Type /Catalog /Pages 2 0 R >>");
   const pagesId = addObject("");
-  const fontId = addObject("<< /Type /Font /Subtype /Type0 /BaseFont /HeiseiKakuGo-W5 /Encoding /UniJIS-UCS2-H /DescendantFonts [4 0 R] >>");
-  addObject("<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HeiseiKakuGo-W5 /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 5 >> >>");
   const pageIds: number[] = [];
 
-  pages.forEach((pageLines) => {
-    const content = [
-      "BT",
-      "/F1 10 Tf",
-      "14 TL",
-      "50 790 Td",
-      ...pageLines.flatMap((line, index) => [
-        index === 0 ? "" : "T*",
-        `<${toUtf16BeHex(line)}> Tj`,
-      ]).filter(Boolean),
-      "ET",
-    ].join("\n");
+  pages.forEach((image) => {
+    const imageId = addObject(
+      `<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${image.bytes.byteLength} >>\nstream\n`,
+      image.bytes,
+      "\nendstream",
+    );
+    const content = `q\n595 0 0 842 0 0 cm\n/Im1 Do\nQ`;
     const contentId = addObject(`<< /Length ${byteLength(content)} >>\nstream\n${content}\nendstream`);
-    const pageId = addObject(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`);
+    const pageId = addObject(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /XObject << /Im1 ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`);
     pageIds.push(pageId);
   });
 
-  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
+  objects[pagesId - 1] = [
+    `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`,
+  ];
 
-  const parts = ["%PDF-1.4\n"];
+  const parts: Array<string | ArrayBuffer> = ["%PDF-1.4\n"];
   const offsets: number[] = [0];
   objects.forEach((body, index) => {
-    offsets.push(byteLength(parts.join("")));
-    parts.push(`${index + 1} 0 obj\n${body}\nendobj\n`);
+    offsets.push(partsByteLength(parts));
+    parts.push(`${index + 1} 0 obj\n`, ...body, "\nendobj\n");
   });
-  const xrefOffset = byteLength(parts.join(""));
+  const xrefOffset = partsByteLength(parts);
   parts.push(`xref\n0 ${objects.length + 1}\n`);
   parts.push("0000000000 65535 f \n");
   offsets.slice(1).forEach((offset) => {
@@ -2449,33 +2439,89 @@ function createSimplePdfBlob(markdown: string) {
   return new Blob(parts, { type: "application/pdf" });
 }
 
-function markdownToPdfLines(markdown: string) {
-  return markdown
+function renderMinutesToPageImages(markdown: string) {
+  const pageWidth = 1240;
+  const pageHeight = 1754;
+  const margin = 92;
+  const lineHeight = 34;
+  const lines = markdown
     .replace(/^#{1,3}\s+/gm, "")
     .split(/\r?\n/)
-    .flatMap((line) => wrapPdfLine(line.trim() || " ", 42))
-    .slice(0, 400);
+    .flatMap((line) => wrapByCanvasWidth(line.trim() || " ", pageWidth - margin * 2))
+    .slice(0, 520);
+  const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight);
+  const chunks = Array.from(
+    { length: Math.max(1, Math.ceil(lines.length / linesPerPage)) },
+    (_, index) => lines.slice(index * linesPerPage, (index + 1) * linesPerPage),
+  );
+
+  return chunks.map((pageLines) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = pageWidth;
+    canvas.height = pageHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return { bytes: new ArrayBuffer(0), width: pageWidth, height: pageHeight };
+    }
+
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, pageWidth, pageHeight);
+    context.fillStyle = "#1c1917";
+    context.font = '24px "Yu Gothic", "Meiryo", "Noto Sans JP", sans-serif';
+    context.textBaseline = "top";
+    pageLines.forEach((line, index) => {
+      context.fillText(line, margin, margin + index * lineHeight);
+    });
+
+    return {
+      bytes: dataUrlToBytes(canvas.toDataURL("image/jpeg", 0.92)),
+      width: pageWidth,
+      height: pageHeight,
+    };
+  });
 }
 
-function wrapPdfLine(line: string, maxLength: number) {
-  const chunks: string[] = [];
-  for (let index = 0; index < line.length; index += maxLength) {
-    chunks.push(line.slice(index, index + maxLength));
+function wrapByCanvasWidth(line: string, maxWidth: number) {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) return [line];
+  context.font = '24px "Yu Gothic", "Meiryo", "Noto Sans JP", sans-serif';
+
+  const wrapped: string[] = [];
+  let current = "";
+  for (const char of line) {
+    const next = `${current}${char}`;
+    if (current && context.measureText(next).width > maxWidth) {
+      wrapped.push(current);
+      current = char;
+    } else {
+      current = next;
+    }
   }
-  return chunks.length ? chunks : [" "];
+  wrapped.push(current || " ");
+  return wrapped;
 }
 
-function toUtf16BeHex(value: string) {
-  const bytes = [0xfe, 0xff];
-  for (const char of value) {
-    const code = char.charCodeAt(0);
-    bytes.push((code >> 8) & 0xff, code & 0xff);
+function dataUrlToBytes(dataUrl: string) {
+  const base64 = dataUrl.split(",", 2)[1] ?? "";
+  const binary = window.atob(base64);
+  const buffer = new ArrayBuffer(binary.length);
+  const bytes = new Uint8Array(buffer);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
   }
-  return bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return buffer;
 }
 
 function byteLength(value: string) {
   return new TextEncoder().encode(value).length;
+}
+
+function partsByteLength(parts: Array<string | ArrayBuffer>) {
+  return parts.reduce(
+    (total, part) => total + (typeof part === "string" ? byteLength(part) : part.byteLength),
+    0,
+  );
 }
 
 function sanitizePdfFileName(value: string) {

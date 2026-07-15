@@ -57,6 +57,7 @@ import {
   type StoredSubSlotState,
   type SubSlotControlOverride,
   type TopicSwitchResult,
+  type ThemeMinutesItem,
   type UnansweredReason,
 } from "./acp-mvp";
 
@@ -149,6 +150,7 @@ const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
   "「特にない」は none + explicit_none + explicit_none、「まだ考えていない」は none + not_considered + not_considered、「言葉にできない」は none + unable_to_verbalize + unable_to_verbalize、「話したくない」は none + declined + declined としてください。",
   "介護者の解釈だけを本人意思にしないでください。介護者要約に本人が明確に同意した場合のみ、介護者要約発話IDと本人同意発話IDを両方 evidenceUtteranceIds に含めてください。",
   "Do not classify caregiver speech alone as the elder's preference. If caregiver speech is used as evidence, evidenceUtteranceIds must also include a nearby later elder agreement or elaboration utterance.",
+  "A single elder utterance may support multiple aspects or themes. Return every supported classification, up to maxClassificationsPerUtterance, instead of forcing a single best aspect.",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
@@ -169,27 +171,15 @@ const SYSTEM_END_CHECK = [
   '{"can_end":true,"message":"...","reason":"...","remaining_slots":["..."]}',
 ].join("\n");
 
-const SYSTEM_FINAL_MINUTES = [
-  "あなたはACP対話の実験用議事録を作成するAIです。",
-  "会話ログとACPスロット状態から、研究者が確認しやすいMarkdown議事録とJSON要約を作ってください。",
-  "固定のお題とTheme -> Aspect -> Evidenceの対応を意識して議事録に含めてください。",
-  "slot_states と sub_slot_states はコード側で確定済みの状態です。議事録生成時にスロット状態を変更・補完・再判定してはいけません。",
-  "sub_slot_states の completion / responseState / reasonCode / evidenceUtteranceIds をそのまま尊重してください。",
-  "AIが表示した質問や話題転換文は介入ログであり、会話ログや本人の根拠発話として扱わないでください。",
-  "本人の希望と根拠発話を区別し、推測で断定しないでください。",
-  "介護者の要約・解釈に本人が明確に同意した内容を本人意思として記録する場合は、「介護者解釈に同意: 」を付け、介護者発話と本人同意発話を併記してください。",
-  "本人の同意が確認できない介護者解釈だけを本人意思として記録しないでください。",
-  "本人が「ない」「わからない」「言えない」と答えた項目は、欠落ではなく明示回答として記録してください。",
-  "他の話題の発言から補った内容は「(AI推測)」を付け、根拠発話を併記してください。",
-  "本人発話にない内容を補完せず、関連発話はあるが明示確認されていない内容は本人の意思として断定しないでください。",
-  "未解決課題・次回確認事項はACPスロットに含めず、json.auxiliary_items とMarkdownの補助項目に分けて記録してください。",
-  "not_discussed は「今回の対話では話題に上がらなかった」と記載し、「考えていない」と解釈しないでください。",
-  "declined は「今回は話さない意向」と記載し、「希望なし」と解釈しないでください。",
-  "ambiguous / conflicting は曖昧さや矛盾を残して記載し、一方だけに統合しないでください。",
-  "出力はJSONのみとしてください。",
-  "",
-  "出力形式:",
-  '{"markdown":"# ACP対話 議事録\\n...","json":{"generated_at":"...","session":{"id":"...","participant_code":"..."},"summary":"...","themes":[{"theme_id":"future_life_continuity","title":"...","level":2,"response_state":"expressed","summary":"...","evidence_utterance":"...","aspects":[{"aspect_id":"continued_activity","label":"...","status":"partial | filled | empty","evidence":[...]}]}],"theme_metrics":{"themeReachRate":0,"responseStateCoverage":0,"valueExpressionRate":0,"evidenceCoverage":0},"slots":[...],"auxiliary_items":[{"item_name":"未解決課題・次回確認事項","summary":"...","evidence_utterance":"..."}],"utterances":[...]}}',
+const SYSTEM_FINAL_MINUTES_FROM_STRUCTURED = [
+  "You write Japanese ACP minutes for medical and care professionals.",
+  "Use only the validated structured slot data in the input. Do not re-classify the raw transcript and do not invent facts.",
+  "The visible markdown is clinical-facing documentation, not debug output. Do not include internal IDs, JSON keys, response_state names, completion labels, metrics, or raw slot status words.",
+  "Write concise natural Japanese. Organize by ACP theme and mention only themes/aspects that have confirmed evidence or clear follow-up needs.",
+  "If a caregiver paraphrase is used, state it only when the structured evidence also includes elder agreement or elaboration. Do not treat caregiver-only content as the elder's preference.",
+  "Separate confirmed elder wishes/values from items that require confirmation at the next conversation.",
+  "Do not add medical treatment recommendations, legal advice, diagnoses, family names, genders, or relationships unless present in the structured input.",
+  "Return JSON only with this shape: {\"markdown\":\"...\"}.",
 ].join("\n");
 
 const SYSTEM_SLOT_CONTROL_DEBUG = [
@@ -374,7 +364,7 @@ function buildSlotClassificationPayload(
         text: utterance.text,
         created_at: utterance.created_at ?? utterance.createdAt ?? null,
       })),
-    maxClassificationsPerUtterance: 3,
+    maxClassificationsPerUtterance: 8,
   };
 }
 
@@ -421,7 +411,7 @@ function applySlotClassifications(input: {
 
     const primaryEvidenceId = evidenceIds[0];
     const currentCount = perEvidenceCount.get(primaryEvidenceId) ?? 0;
-    if (currentCount >= 3) {
+    if (currentCount >= 8) {
       rejected.push({
         candidate,
         reason: "missing_evidence",
@@ -761,7 +751,52 @@ export async function generateFinalMinutes(
     getSessionMetadata(context),
     context.subSlotStates ?? [],
   );
-  return ensureFinalMinutesIncludeTopic(fallback, context);
+  const result = await requestJson<{ markdown?: unknown }>(
+    SYSTEM_FINAL_MINUTES_FROM_STRUCTURED,
+    buildStructuredMinutesPayload(fallback),
+    { markdown: fallback.markdown },
+  );
+  const markdown =
+    typeof result.markdown === "string" && result.markdown.trim()
+      ? result.markdown.trim()
+      : fallback.markdown;
+
+  return ensureFinalMinutesIncludeTopic(
+    {
+      markdown,
+      json: fallback.json,
+    },
+    context,
+  );
+}
+
+function buildStructuredMinutesPayload(minutes: FinalMinutesResult) {
+  return {
+    session: minutes.json.session,
+    generated_at: minutes.json.generated_at,
+    themes: summarizeStructuredThemes(minutes.json.themes ?? []),
+    optional_themes: summarizeStructuredThemes(minutes.json.optional_themes ?? []),
+    follow_up_items: minutes.json.auxiliary_items ?? [],
+    summary: minutes.json.summary,
+  };
+}
+
+function summarizeStructuredThemes(themes: ThemeMinutesItem[] = []) {
+  return themes.map((theme) => ({
+    title: theme.title,
+    level: theme.level,
+    summary: theme.summary,
+    aspects: theme.aspects.map((aspect) => ({
+      label: aspect.label,
+      priority: aspect.priority,
+      status: aspect.status,
+      evidence: aspect.evidence.map((evidence) => ({
+        speaker: evidence.speaker,
+        text: evidence.evidenceText,
+        source_topic_id: evidence.sourceTopicId,
+      })),
+    })),
+  }));
 }
 
 type SemanticSlotControlResult = {
