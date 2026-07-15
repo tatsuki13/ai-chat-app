@@ -234,14 +234,10 @@ const FALLBACK_QUESTIONS: Record<AcpSlotName, string> = {
     "もし自分で医療や介護について決めることが難しくなったとき、誰に相談してほしいと思いますか？",
 };
 
-const UNCERTAINTY_SUMMARY_PREFIX =
-  "\u660e\u793a\u7684\u306a\u4fdd\u7559\u56de\u7b54: ";
 const UNCERTAINTY_REASON_PROMPT =
   "\u4eca\u3059\u3050\u7b54\u3048\u3092\u6c7a\u3081\u306a\u304f\u3066\u5927\u4e08\u592b\u3067\u3059\u3002\u308f\u304b\u3089\u306a\u3044\u611f\u3058\u306f\u3001\u8003\u3048\u305f\u3053\u3068\u304c\u306a\u3044\u304b\u3089\u8fd1\u3044\u3067\u3059\u304b\u3001\u305d\u308c\u3068\u3082\u8a00\u8449\u306b\u3059\u308b\u306e\u304c\u96e3\u3057\u3044\u611f\u3058\u3067\u3059\u304b\uff1f";
 const UNCERTAINTY_MOVE_ON_PROMPT =
   "\u7b54\u3048\u3092\u6025\u304c\u306a\u304f\u3066\u5927\u4e08\u592b\u3067\u3059\u3002\u4eca\u306f\u8a00\u8449\u306b\u3057\u306b\u304f\u3044\u3053\u3068\u3068\u3057\u3066\u53d7\u3051\u6b62\u3081\u307e\u3059\u3002\u3044\u3063\u305f\u3093\u5225\u306e\u8a71\u984c\u306b\u79fb\u3063\u3066\u3082\u3088\u308d\u3057\u3044\u3067\u3059\u304b\uff1f";
-const UNCERTAINTY_SLOT_SUMMARY =
-  "\u660e\u793a\u7684\u306a\u4fdd\u7559\u56de\u7b54: \u672c\u4eba\u306f\u4eca\u306f\u7b54\u3048\u304c\u5b9a\u307e\u3063\u3066\u3044\u306a\u3044\u3001\u307e\u305f\u306f\u8a00\u8a9e\u5316\u304c\u96e3\u3057\u3044\u3068\u8a71\u3057\u3066\u3044\u308b\u3002";
 const UNCERTAINTY_REASON =
   "\u4e0d\u660e\u30fb\u4fdd\u7559\u306e\u7406\u7531\u3092\u78ba\u8a8d\u3059\u308b\u305f\u3081";
 const UNCERTAINTY_SWITCH_REASON =
@@ -294,14 +290,6 @@ type SlotStateBundle = {
     unmatchedUtteranceIds: string[];
   };
 };
-
-export async function updateSlotsFromConversation(
-  context: ConversationContext,
-): Promise<AcpSlotState[]> {
-  const bundle = await updateSlotStateBundleFromConversation(context);
-
-  return bundle.slotStates;
-}
 
 export async function updateSlotStateBundleFromConversation(
   context: ConversationContext,
@@ -1499,140 +1487,6 @@ function insertAfterMarkdownTitle(markdown: string, insertion: string) {
   return `${insertion}\n${trimmed}`;
 }
 
-function fallbackUpdateSlots(
-  utterances: ConversationUtterance[],
-  currentSlots: AcpSlotState[],
-  currentTopic?: string,
-): AcpSlotState[] {
-  const currentByName = new Map(currentSlots.map((slot) => [slot.slot_name, slot]));
-
-  return ACP_SLOT_NAMES.map((slotName) => {
-    const explicitNone = findExplicitNoneResponseRecordForSlot(
-      utterances,
-      slotName,
-      currentTopic,
-    );
-
-    const evidence = utterances
-      .map((utterance, index) => ({ utterance, index }))
-      .reverse()
-      .find(({ utterance, index }) => {
-        if (!hasKeyword(utterance.text, SLOT_KEYWORDS[slotName])) return false;
-        return !explicitNone || index > explicitNone.index;
-      });
-    const current = currentByName.get(slotName);
-
-    if (explicitNone && !evidence) {
-      return createExplicitNoneSlotState(slotName, explicitNone.utterance);
-    }
-
-    if (!evidence) {
-      return (
-        current ?? {
-          slot_name: slotName,
-          status: "unanswered",
-          summary: "未確認",
-          evidence_utterance: "",
-        }
-      );
-    }
-
-    const status =
-      isElderSpeaker(evidence.utterance.speaker) &&
-      evidence.utterance.text.replace(/\s/g, "").length >= 18
-        ? "answered"
-        : "partial";
-    const speaker = isElderSpeaker(evidence.utterance.speaker) ? "本人" : "介護者";
-    const inferredPrefix =
-      explicitNone && evidence.index > explicitNone.index ? "(AI推測) " : "";
-
-    return {
-      slot_name: slotName,
-      status,
-      summary:
-        status === "answered"
-          ? `${inferredPrefix}${truncate(evidence.utterance.text, 120)}`
-          : "話題は出ているが、本人の希望・理由・条件の確認がまだ十分ではありません。",
-      evidence_utterance: `${inferredPrefix}${speaker}: ${truncate(evidence.utterance.text, 160)}`,
-    };
-  });
-}
-
-function applyExplicitNoneResponses(
-  context: ConversationContext,
-  slots: AcpSlotState[],
-): AcpSlotState[] {
-  const responses = detectExplicitNoneResponses(context);
-  if (responses.length === 0) return slots;
-
-  const byName = new Map(slots.map((slot) => [slot.slot_name, slot]));
-
-  responses.forEach((response) => {
-    const current = byName.get(response.slotName);
-    const hasNewerEvidence =
-      current?.evidence_utterance &&
-      !isExplicitNoneSummary(current.summary) &&
-      !isExplicitNoneSummary(current.evidence_utterance);
-
-    if (hasNewerEvidence) return;
-
-    byName.set(
-      response.slotName,
-      createExplicitNoneSlotState(response.slotName, response.utterance),
-    );
-  });
-
-  return ACP_SLOT_NAMES.map((slotName) => {
-    return (
-      byName.get(slotName) ??
-      findSlotState(context.slotStates, slotName) ?? {
-        slot_name: slotName,
-        status: "unanswered",
-        summary: "未確認",
-        evidence_utterance: "",
-      }
-    );
-  });
-}
-
-function applyUncertainResponses(
-  context: ConversationContext,
-  slots: AcpSlotState[],
-): AcpSlotState[] {
-  const responses = detectUncertainResponses(context);
-  if (responses.length === 0) return slots;
-
-  const byName = new Map(slots.map((slot) => [slot.slot_name, slot]));
-
-  responses.forEach((response) => {
-    const current = byName.get(response.slotName);
-    if (
-      isTerminalSlotStatus(current?.status) &&
-      !isUncertaintySummary(current.summary) &&
-      !isUncertaintySummary(current.evidence_utterance)
-    ) {
-      return;
-    }
-
-    byName.set(
-      response.slotName,
-      createUncertainSlotState(response.slotName, response.utterance, response.kind),
-    );
-  });
-
-  return ACP_SLOT_NAMES.map((slotName) => {
-    return (
-      byName.get(slotName) ??
-      findSlotState(context.slotStates, slotName) ?? {
-        slot_name: slotName,
-        status: "unanswered",
-        summary: "Unconfirmed",
-        evidence_utterance: "",
-      }
-    );
-  });
-}
-
 function applyUncertaintyNextQuestionPolicy(
   context: ConversationContext,
   result: NextQuestionResult,
@@ -1661,30 +1515,6 @@ function applyUncertaintyNextQuestionPolicy(
     target_slot: targetSlot,
     reason: UNCERTAINTY_SWITCH_REASON,
     sensitivity: getSlotSensitivity(targetSlot as AcpSlotName),
-  };
-}
-
-function applyUncertaintyTopicSwitchPolicy(
-  context: ConversationContext,
-  result: TopicSwitchResult,
-): TopicSwitchResult {
-  const response = getLatestUncertainResponse(context);
-  const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
-  if (!response || !nextTopic) return result;
-
-  const promptCount = countPromptsForSlot(context.utterances, response.slotName);
-  if (promptCount <= 1) return result;
-
-  const nextSlot = nextTopic.slot_name as AcpSlotName;
-
-  return {
-    ...result,
-    should_switch: true,
-    message: `${UNCERTAINTY_MOVE_ON_PROMPT}\n${nextTopic.opening_prompt}`,
-    target_slot: nextSlot,
-    next_topic: nextSlot,
-    reason: UNCERTAINTY_SWITCH_REASON,
-    sensitivity: getSlotSensitivity(nextSlot),
   };
 }
 
@@ -1943,18 +1773,6 @@ function getLatestUncertainResponse(
   return hasNewerElderUtterance ? undefined : latest;
 }
 
-function findExplicitNoneResponseRecordForSlot(
-  utterances: ConversationUtterance[],
-  slotName: AcpSlotName,
-  currentTopic?: string,
-) {
-  return detectExplicitNoneResponses({
-    utterances,
-    slotStates: [],
-    currentTopic,
-  }).find((response) => response.slotName === slotName);
-}
-
 function findPromptedSlotBeforeAnswer(
   utterances: ConversationUtterance[],
   answerIndex: number,
@@ -2060,56 +1878,10 @@ function isUncertaintyOnlyAnswer(normalized: string) {
   );
 }
 
-function isExplicitNoneSummary(text: string) {
-  return /明示回答|思い当たるものはない|思い当たることはない|わからない|分からない|言えない/.test(
-    text,
-  );
-}
-
 function normalizeAnswerText(text: string) {
   return text
     .toLowerCase()
     .replace(/[\s　。、．.！!？?「」『』"'`]/g, "");
-}
-
-function createExplicitNoneSlotState(
-  slotName: AcpSlotName,
-  utterance: ConversationUtterance,
-): AcpSlotState {
-  return {
-    slot_name: slotName,
-    status: "no_preference",
-    summary:
-      slotName === "今の生活で大切にしていること"
-        ? "明示回答: 本人は、今は特に大切にしていることとして思い当たるものはない／言語化しにくいと話している。"
-        : `明示回答: 本人は「${slotName}」について、今は特に思い当たることはない／言語化しにくいと話している。`,
-    evidence_utterance: formatSpeakerEvidence(utterance),
-  };
-}
-
-function createUncertainSlotState(
-  slotName: AcpSlotName,
-  utterance: ConversationUtterance,
-  kind: UncertainResponseKind,
-): AcpSlotState {
-  return {
-    slot_name: slotName,
-    status: getUncertainSlotStatus(kind),
-    summary: `${UNCERTAINTY_SLOT_SUMMARY} reason_hint=${kind}`,
-    evidence_utterance: formatSpeakerEvidence(utterance),
-  };
-}
-
-function getUncertainSlotStatus(kind: UncertainResponseKind): AcpSlotState["status"] {
-  if (kind === "language_gap" || kind === "emotional_load") {
-    return "cannot_verbalize";
-  }
-
-  if (kind === "not_considered" || kind === "knowledge_gap") {
-    return "not_considered";
-  }
-
-  return "not_considered";
 }
 
 function countPromptsForSlot(
@@ -2124,10 +1896,6 @@ function countPromptsForSlot(
 
 function isLegacyDialogueMode() {
   return process.env.ACP_DIALOGUE_MODE === "legacy";
-}
-
-function isUncertaintySummary(text: string) {
-  return text.includes(UNCERTAINTY_SUMMARY_PREFIX) || /reason_hint=/.test(text);
 }
 
 function formatSpeakerEvidence(utterance: ConversationUtterance) {
