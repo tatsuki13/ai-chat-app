@@ -1344,36 +1344,44 @@ function DeveloperDialogueTopics(props: {
   const filledCount = props.slotStates.filter(
     (slot) => isTerminalSlotStatus(slot.status),
   ).length;
+  const summaryText = props.loading
+    ? "Loading"
+    : props.slotStates.length
+      ? `${filledCount}/${props.slotStates.length} filled`
+      : "No slots";
 
   return (
-    <aside className="rounded-md border border-stone-300 bg-white px-3 py-3 shadow-sm">
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <div className="text-[11px] font-black uppercase tracking-[0.08em] text-stone-500">
-            Dev Tool
+    <aside className="rounded-md border border-stone-300 bg-white shadow-sm">
+      <details>
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 marker:hidden">
+          <div>
+            <div className="text-[11px] font-black uppercase tracking-[0.08em] text-stone-500">
+              Dev Tool
+            </div>
+            <h2 className="mt-1 text-[14px] font-black leading-tight text-stone-950">
+              Topic Slots
+            </h2>
           </div>
-          <h2 className="mt-1 text-[14px] font-black leading-tight text-stone-950">
-            対話トピックス
-          </h2>
-        </div>
-        <button
-          type="button"
-          onClick={props.onRefresh}
-          className="min-h-8 rounded-md border border-stone-300 bg-stone-50 px-2 text-[11px] font-black text-stone-700 active:scale-[0.99]"
-        >
-          更新
-        </button>
-      </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-bold text-stone-500">{summaryText}</span>
+            <span className="rounded-md border border-stone-300 bg-stone-50 px-2 py-1 text-[11px] font-black text-stone-700">
+              Open
+            </span>
+          </div>
+        </summary>
 
-      <div className="mt-2 text-[11px] font-bold text-stone-500">
-        {props.loading
-          ? "読み込み中"
-          : props.slotStates.length
-            ? `${filledCount}/${props.slotStates.length} filled`
-            : "初期トピック"}
-      </div>
+        <div className="border-t border-stone-200 px-3 pb-3 pt-3">
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={props.onRefresh}
+              className="min-h-8 rounded-md border border-stone-300 bg-stone-50 px-2 text-[11px] font-black text-stone-700 active:scale-[0.99]"
+            >
+              Refresh
+            </button>
+          </div>
 
-      {props.error ? (
+          {props.error ? (
         <p className="mt-2 rounded-md border border-red-100 bg-red-50 px-2 py-1.5 text-[11px] font-bold text-red-700">
           {props.error}
         </p>
@@ -1442,6 +1450,8 @@ function DeveloperDialogueTopics(props: {
           <div>保留キュー: {slotControl.deferredSlotQueue.length}件</div>
           <div>終了前確認対象: {slotControl.beforeSessionEndTargets.length}件</div>
           <div>{slotControl.selectionReason}</div>
+        </div>
+      </details>
         </div>
       </details>
     </aside>
