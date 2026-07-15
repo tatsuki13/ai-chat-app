@@ -2,8 +2,13 @@ import { NextResponse } from "next/server";
 import {
   getSessionContext,
   saveFinalMinutes,
+  saveSlotStates,
+  saveSubSlotStates,
 } from "../../../../lib/acp-store";
-import { generateFinalMinutes } from "../../../../lib/llm";
+import {
+  generateFinalMinutes,
+  updateSlotStateBundleFromConversation,
+} from "../../../../lib/llm";
 import { prisma } from "../../../../lib/prisma";
 
 export const runtime = "nodejs";
@@ -21,6 +26,15 @@ export async function POST(request: Request) {
     const currentTopicTitle = optionalString(
       body.current_topic_title ?? body.currentTopicTitle,
     );
+    const initialContext = await getSessionContext(sessionId);
+    const bundle = await updateSlotStateBundleFromConversation({
+      ...initialContext,
+      currentTopic,
+      currentTopicTitle,
+    });
+    await saveSlotStates(sessionId, bundle.slotStates);
+    await saveSubSlotStates(sessionId, bundle.subSlotStates);
+
     const context = await getSessionContext(sessionId);
     const minutes = await generateFinalMinutes({
       ...context,

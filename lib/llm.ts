@@ -759,26 +759,9 @@ export async function generateFinalMinutes(
     context.utterances,
     context.slotStates,
     getSessionMetadata(context),
+    context.subSlotStates ?? [],
   );
-  const result = await requestJson<Partial<FinalMinutesResult>>(
-    SYSTEM_FINAL_MINUTES,
-    buildConversationPayload(context),
-    fallback,
-  );
-
-  if (!result.markdown || !result.json || typeof result.json !== "object") {
-    return fallback;
-  }
-
-  return {
-    ...ensureFinalMinutesIncludeTopic(
-      {
-        markdown: result.markdown,
-        json: result.json as FinalMinutesResult["json"],
-      },
-      context,
-    ),
-  };
+  return ensureFinalMinutesIncludeTopic(fallback, context);
 }
 
 type SemanticSlotControlResult = {
@@ -1469,24 +1452,15 @@ function ensureFinalMinutesIncludeTopic(
     context.utterances,
     context.slotStates,
     getSessionMetadata(context),
+    context.subSlotStates ?? [],
   );
-  const topicBlock = [
-    "## 話し合ったお題",
-    "",
-    `### ${DISCUSSION_TOPIC.title}`,
-    DISCUSSION_TOPIC.description,
-    "",
-  ].join("\n");
-  const markdown = minutes.markdown.includes(DISCUSSION_TOPIC.title)
-    ? minutes.markdown
-    : insertAfterMarkdownTitle(minutes.markdown, topicBlock);
   const rawJson =
     minutes.json && typeof minutes.json === "object"
       ? (minutes.json as Record<string, unknown>)
       : {};
 
   return {
-    markdown,
+    markdown: minutes.markdown,
     json: {
       generated_at:
         typeof rawJson.generated_at === "string"
@@ -1522,17 +1496,6 @@ function getSessionMetadata(context: ConversationContext) {
     id: context.sessionId,
     participant_code: context.participantCode ?? null,
   };
-}
-
-function insertAfterMarkdownTitle(markdown: string, insertion: string) {
-  const trimmed = markdown.trim();
-  const lines = trimmed.split("\n");
-
-  if (lines[0]?.startsWith("# ")) {
-    return [lines[0], "", insertion, ...lines.slice(1)].join("\n");
-  }
-
-  return `${insertion}\n${trimmed}`;
 }
 
 function applyUncertaintyNextQuestionPolicy(

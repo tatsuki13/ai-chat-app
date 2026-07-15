@@ -1645,7 +1645,7 @@ function SessionCompletionPanel(props: {
             <button
               type="button"
               onClick={() =>
-                printFinalMinutesPdf(props.finalMinutes, pdfFileName)
+                downloadFinalMinutesPdf(props.finalMinutes, pdfFileName)
               }
               className="min-h-9 self-end rounded-md bg-emerald-700 px-3 text-[12px] font-black text-white active:scale-[0.99]"
             >
@@ -2370,77 +2370,112 @@ function createDefaultPdfFileName() {
   return `ACP議事録-${year}-${month}-${day}`;
 }
 
-function printFinalMinutesPdf(
+function downloadFinalMinutesPdf(
   finalMinutes: { markdown: string; created_at: string } | null,
   rawFileName: string,
 ) {
   if (!finalMinutes) return;
 
   const fileName = sanitizePdfFileName(rawFileName || createDefaultPdfFileName());
-  const printWindow = window.open("", "_blank", "noopener,noreferrer");
-  if (!printWindow) return;
-
-  printWindow.document.write(
-    createPrintableMinutesHtml({
-      title: fileName,
-      markdown: finalMinutes.markdown,
-      createdAt: finalMinutes.created_at,
-    }),
+  const pdfBlob = createSimplePdfBlob(
+    `${fileName}\nPDF作成日時: ${formatDateTime(finalMinutes.created_at)}\n\n${finalMinutes.markdown}`,
   );
-  printWindow.document.close();
-  printWindow.focus();
+  if (pdfBlob.size === 0) return;
+
+  const objectUrl = URL.createObjectURL(pdfBlob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = `${fileName}.pdf`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+
   window.setTimeout(() => {
-    printWindow.print();
-  }, 250);
+    URL.revokeObjectURL(objectUrl);
+  }, 1000);
 }
 
-function createPrintableMinutesHtml(input: {
-  title: string;
-  markdown: string;
-  createdAt: string;
-}) {
-  const body = markdownToPrintableHtml(input.markdown);
-  const createdAt = escapeHtml(formatDateTime(input.createdAt));
+function createSimplePdfBlob(markdown: string) {
+  const lines = markdownToPdfLines(markdown);
+  const pageCapacity = 44;
+  const pages = Array.from(
+    { length: Math.max(1, Math.ceil(lines.length / pageCapacity)) },
+    (_, index) => lines.slice(index * pageCapacity, (index + 1) * pageCapacity),
+  );
+  const objects: string[] = [];
+  const addObject = (body: string) => {
+    objects.push(body);
+    return objects.length;
+  };
+  const catalogId = addObject("<< /Type /Catalog /Pages 2 0 R >>");
+  const pagesId = addObject("");
+  const fontId = addObject("<< /Type /Font /Subtype /Type0 /BaseFont /HeiseiKakuGo-W5 /Encoding /UniJIS-UCS2-H /DescendantFonts [4 0 R] >>");
+  addObject("<< /Type /Font /Subtype /CIDFontType0 /BaseFont /HeiseiKakuGo-W5 /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 5 >> >>");
+  const pageIds: number[] = [];
 
-  return `<!doctype html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8" />
-  <title>${escapeHtml(input.title)}</title>
-  <style>
-    @page { size: A4; margin: 18mm; }
-    body {
-      color: #1c1917;
-      font-family: "Yu Gothic", "Meiryo", "Noto Sans JP", sans-serif;
-      font-size: 12px;
-      line-height: 1.75;
-    }
-    h1 { font-size: 22px; margin: 0 0 14px; }
-    h2 { border-bottom: 1px solid #d6d3d1; font-size: 17px; margin: 22px 0 10px; padding-bottom: 4px; }
-    h3 { font-size: 14px; margin: 16px 0 6px; }
-    p { margin: 0 0 7px; }
-    .meta { color: #57534e; font-size: 10px; margin-bottom: 18px; }
-    .page-break { break-before: page; }
-  </style>
-</head>
-<body>
-  <div class="meta">PDF作成日時: ${createdAt}</div>
-  ${body}
-</body>
-</html>`;
+  pages.forEach((pageLines) => {
+    const content = [
+      "BT",
+      "/F1 10 Tf",
+      "14 TL",
+      "50 790 Td",
+      ...pageLines.flatMap((line, index) => [
+        index === 0 ? "" : "T*",
+        `<${toUtf16BeHex(line)}> Tj`,
+      ]).filter(Boolean),
+      "ET",
+    ].join("\n");
+    const contentId = addObject(`<< /Length ${byteLength(content)} >>\nstream\n${content}\nendstream`);
+    const pageId = addObject(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`);
+    pageIds.push(pageId);
+  });
+
+  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
+
+  const parts = ["%PDF-1.4\n"];
+  const offsets: number[] = [0];
+  objects.forEach((body, index) => {
+    offsets.push(byteLength(parts.join("")));
+    parts.push(`${index + 1} 0 obj\n${body}\nendobj\n`);
+  });
+  const xrefOffset = byteLength(parts.join(""));
+  parts.push(`xref\n0 ${objects.length + 1}\n`);
+  parts.push("0000000000 65535 f \n");
+  offsets.slice(1).forEach((offset) => {
+    parts.push(`${String(offset).padStart(10, "0")} 00000 n \n`);
+  });
+  parts.push(`trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`);
+
+  return new Blob(parts, { type: "application/pdf" });
 }
 
-function markdownToPrintableHtml(markdown: string) {
+function markdownToPdfLines(markdown: string) {
   return markdown
+    .replace(/^#{1,3}\s+/gm, "")
     .split(/\r?\n/)
-    .map((line) => {
-      if (line.startsWith("### ")) return `<h3>${escapeHtml(line.slice(4))}</h3>`;
-      if (line.startsWith("## ")) return `<h2>${escapeHtml(line.slice(3))}</h2>`;
-      if (line.startsWith("# ")) return `<h1>${escapeHtml(line.slice(2))}</h1>`;
-      if (line.trim() === "") return "<p>&nbsp;</p>";
-      return `<p>${escapeHtml(line)}</p>`;
-    })
-    .join("\n");
+    .flatMap((line) => wrapPdfLine(line.trim() || " ", 42))
+    .slice(0, 400);
+}
+
+function wrapPdfLine(line: string, maxLength: number) {
+  const chunks: string[] = [];
+  for (let index = 0; index < line.length; index += maxLength) {
+    chunks.push(line.slice(index, index + maxLength));
+  }
+  return chunks.length ? chunks : [" "];
+}
+
+function toUtf16BeHex(value: string) {
+  const bytes = [0xfe, 0xff];
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    bytes.push((code >> 8) & 0xff, code & 0xff);
+  }
+  return bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function byteLength(value: string) {
+  return new TextEncoder().encode(value).length;
 }
 
 function sanitizePdfFileName(value: string) {

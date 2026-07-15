@@ -1349,85 +1349,79 @@ export function buildFallbackMinutes(
   utterances: ConversationUtterance[],
   slots: AcpSlotState[],
   session?: { id?: string; participant_code?: string | null },
+  subSlotStates: StoredSubSlotState[] = [],
 ): FinalMinutesResult {
   const generatedAt = new Date().toISOString();
   const acpSlots = slots.filter((slot) =>
     ACP_SLOT_NAMES.includes(slot.slot_name as AcpSlotName),
   );
-  const themes = buildThemeMinutesItems(RESEARCH_THEMES, acpSlots);
-  const optionalThemes = buildThemeMinutesItems(OPTIONAL_RESEARCH_THEMES, acpSlots);
+  const themes = buildThemeMinutesItems(RESEARCH_THEMES, acpSlots, subSlotStates, utterances);
+  const optionalThemes = buildThemeMinutesItems(
+    OPTIONAL_RESEARCH_THEMES,
+    acpSlots,
+    subSlotStates,
+    utterances,
+  );
   const themeMetrics = calculateThemeCompletenessMetrics(acpSlots);
   const auxiliaryItems = [buildUnresolvedAuxiliaryItem(utterances)];
+  const statedThemes = themes.filter((theme) =>
+    theme.aspects.some((aspect) => aspect.evidence.length > 0),
+  );
+  const followUpItems = themes.flatMap((theme) =>
+    theme.aspects
+      .filter((aspect) => aspect.status !== "filled")
+      .slice(0, 3)
+      .map((aspect) => `${theme.title}: ${aspect.label}`),
+  );
   const lines = [
-    "# ACP対話 議事録",
+    "# ACP・今後の暮らしに関する話し合い 要約",
     "",
-    `生成日時: ${generatedAt}`,
-    `参加者ID: ${session?.participant_code || "-"}`,
-    `内部ID: ${session?.id || "-"}`,
-    `発話数: ${utterances.length}`,
+    `話し合い日: ${formatJapaneseDate(generatedAt)}`,
+    `参加者: ${session?.participant_code || "-"}`,
+    `文書の位置付け: この文書は、話し合い時点における本人の考えを整理したものです。体調、生活状況、家族状況などによって希望は変化する可能性があります。重要な状況変化があった場合は、本人へ再確認してください。`,
     "",
-    "## 話し合ったお題",
+    "## 本人の考えの概要",
     "",
-    `### ${DISCUSSION_TOPIC.title}`,
-    DISCUSSION_TOPIC.description,
+    buildPersonCenteredOverview(statedThemes),
     "",
-    "## Theme / Aspect / Evidence",
+    "## テーマ別の整理",
     "",
   ];
 
   themes.forEach((theme) => {
     lines.push(`### ${theme.title}`);
-    lines.push(`- level: ${theme.level}`);
-    lines.push(`- response_state: ${theme.response_state ?? "未確認"}`);
-    lines.push(`- summary: ${theme.summary}`);
-    lines.push(`- evidence_utterance: ${theme.evidence_utterance || "なし"}`);
+    lines.push(`- 確認状況: ${formatResponseState(theme.response_state)}`);
+    lines.push(`- 要約: ${theme.summary}`);
     lines.push("");
-    lines.push("#### Aspects");
     theme.aspects.forEach((aspect) => {
       const evidenceText =
         aspect.evidence.length > 0
           ? aspect.evidence.map((evidence) => evidence.evidenceText).join(" / ")
-          : "なし";
-      lines.push(
-        `- ${aspect.label}: ${aspect.status} / evidence: ${evidenceText}`,
-      );
+          : "次回確認";
+      lines.push(`- ${aspect.label}: ${formatAspectStatus(aspect.status)}。${evidenceText}`);
     });
     lines.push("");
   });
 
-  lines.push("## 任意Theme");
+  lines.push("## 今後確認が必要なこと");
   lines.push("");
-  optionalThemes.forEach((theme) => {
-    lines.push(`### ${theme.title}`);
-    lines.push(`- response_state: ${theme.response_state ?? "未確認"}`);
-    lines.push(`- summary: ${theme.summary}`);
-    lines.push(`- evidence_utterance: ${theme.evidence_utterance || "なし"}`);
-    lines.push("");
-  });
-
-  lines.push("## 網羅性指標");
-  lines.push("");
-  lines.push(`- themeReachRate: ${themeMetrics.themeReachRate}`);
-  lines.push(`- responseStateCoverage: ${themeMetrics.responseStateCoverage}`);
-  lines.push(`- valueExpressionRate: ${themeMetrics.valueExpressionRate}`);
-  lines.push(`- evidenceCoverage: ${themeMetrics.evidenceCoverage}`);
+  if (followUpItems.length > 0) {
+    followUpItems.slice(0, 12).forEach((item) => lines.push(`- ${item}`));
+  } else {
+    lines.push("- 現時点で大きな未確認事項は整理されていません。");
+  }
   lines.push("");
 
-  lines.push("## 補助項目");
+  lines.push("## 根拠となる代表的な発話");
   lines.push("");
-  auxiliaryItems.forEach((item) => {
-    lines.push(`### ${item.item_name}`);
-    lines.push(`- summary: ${item.summary}`);
-    lines.push(`- evidence_utterance: ${item.evidence_utterance || "なし"}`);
-    lines.push("");
+  collectRepresentativeEvidence(themes).forEach((evidence) => {
+    lines.push(`- ${evidence}`);
   });
-
-  lines.push("## 発話ログ");
   lines.push("");
-  utterances.forEach((utterance) => {
-    const speaker = SPEAKER_LABELS[utterance.speaker] ?? utterance.speaker;
-    lines.push(`- ${speaker}: ${utterance.text}`);
-  });
+  lines.push("## 補足");
+  lines.push("");
+  lines.push("- 具体的な医療処置の希望は、本人が明確に述べた内容と、まだ確認が必要な内容を区別して扱ってください。");
+  lines.push("- 介護者による要約は、本人の同意が確認できた場合のみ本人の考えとして整理しています。");
 
   return {
     markdown: lines.join("\n"),
@@ -1441,7 +1435,7 @@ export function buildFallbackMinutes(
       optional_themes: optionalThemes,
       theme_metrics: themeMetrics,
       auxiliary_items: auxiliaryItems,
-      summary: "会話ログとTheme単位のACPスロット状態から生成した議事録です。",
+      summary: "保存済みのTheme/Aspect/根拠発話から生成した医療・介護者向け要約です。",
     },
   };
 }
@@ -1449,11 +1443,38 @@ export function buildFallbackMinutes(
 function buildThemeMinutesItems(
   themes: readonly (typeof ALL_RESEARCH_THEMES)[number][],
   slots: AcpSlotState[],
+  subSlotStates: StoredSubSlotState[],
+  utterances: ConversationUtterance[],
 ): ThemeMinutesItem[] {
+  const utteranceById = new Map(
+    utterances
+      .filter((utterance) => utterance.id)
+      .map((utterance) => [utterance.id as string, utterance]),
+  );
+
   return themes.map((theme) => {
-    const responseState = getResearchThemeResponseState(theme, slots);
-    const summary = getResearchThemeSummary(theme, slots) || "未確認";
-    const evidence = getResearchThemeEvidence(theme, slots);
+    const aspectItems = theme.aspects.map((aspect) => {
+      const stored = subSlotStates.find(
+        (state) => state.mainSlotId === theme.id && state.subSlotId === aspect.id,
+      );
+      const aspectEvidence = buildAspectEvidence(theme, aspect, stored, utteranceById);
+      const status = getAspectStatusFromSubSlot(stored, aspectEvidence);
+
+      return {
+        aspect_id: aspect.id,
+        label: aspect.label,
+        priority: aspect.priority,
+        status,
+        evidence: aspectEvidence,
+      };
+    });
+    const responseState = getThemeResponseStateFromAspects(aspectItems, theme, slots);
+    const evidence = aspectItems
+      .flatMap((aspect) => aspect.evidence.map((item) => item.evidenceText))
+      .filter(Boolean)
+      .slice(0, 4)
+      .join("\n");
+    const summary = buildThemeSummaryFromAspects(theme, aspectItems, slots);
 
     return {
       theme_id: theme.id,
@@ -1462,19 +1483,7 @@ function buildThemeMinutesItems(
       response_state: responseState,
       summary,
       evidence_utterance: evidence,
-      aspects: theme.aspects.map((aspect) => {
-        const aspectEvidence = buildAspectEvidence(theme, aspect, slots);
-        const status: AspectStatus =
-          aspectEvidence.length > 0 ? "partial" : "empty";
-
-        return {
-          aspect_id: aspect.id,
-          label: aspect.label,
-          priority: aspect.priority,
-          status,
-          evidence: aspectEvidence,
-        };
-      }),
+      aspects: aspectItems,
     };
   });
 }
@@ -1482,23 +1491,121 @@ function buildThemeMinutesItems(
 function buildAspectEvidence(
   theme: (typeof ALL_RESEARCH_THEMES)[number],
   aspect: (typeof ALL_RESEARCH_THEMES)[number]["aspects"][number],
-  slots: AcpSlotState[],
+  stored: StoredSubSlotState | undefined,
+  utteranceById: Map<string, ConversationUtterance>,
 ): EvidenceReference[] {
-  return getResearchThemeSourceSlots(theme, slots)
-    .filter((slot) => {
-      const text = `${slot.summary} ${slot.evidence_utterance}`;
-      return Boolean(slot.evidence_utterance.trim()) && aspectMatchesText(aspect.label, text);
-    })
-    .map((slot) => ({
+  if (!stored || stored.evidenceUtteranceIds.length === 0) return [];
+
+  return stored.evidenceUtteranceIds
+    .map((id) => utteranceById.get(id))
+    .filter((utterance): utterance is ConversationUtterance => Boolean(utterance))
+    .map((utterance) => ({
       themeId: theme.id,
       aspectId: aspect.id,
-      evidenceText: slot.evidence_utterance,
-      speaker: slot.evidence_utterance.startsWith("本人:") ? "elder" : undefined,
-      sourceTopicId: String(slot.slot_name),
-      inferred: !theme.sourceSlotNames.some(
-        (sourceSlotName) => sourceSlotName === slot.slot_name,
-      ),
+      evidenceUtteranceId: utterance.id,
+      evidenceText: `${SPEAKER_LABELS[utterance.speaker] ?? utterance.speaker}: ${truncate(utterance.text, 160)}`,
+      speaker: utterance.speaker,
+      sourceTopicId: stored.lastUpdatedTopicId ?? theme.id,
+      inferred: false,
     }));
+}
+
+function getAspectStatusFromSubSlot(
+  stored: StoredSubSlotState | undefined,
+  evidence: EvidenceReference[],
+): AspectStatus {
+  if (!stored) return "empty";
+  if (stored.completion === "complete" && evidence.length > 0) return "filled";
+  if (stored.completion === "partial" || evidence.length > 0) return "partial";
+  return "empty";
+}
+
+function getThemeResponseStateFromAspects(
+  aspects: ThemeMinutesItem["aspects"],
+  theme: (typeof ALL_RESEARCH_THEMES)[number],
+  slots: AcpSlotState[],
+): ResponseState {
+  if (aspects.some((aspect) => aspect.status === "filled" || aspect.status === "partial")) {
+    return "expressed";
+  }
+
+  return getResearchThemeResponseState(theme, slots);
+}
+
+function buildThemeSummaryFromAspects(
+  theme: (typeof ALL_RESEARCH_THEMES)[number],
+  aspects: ThemeMinutesItem["aspects"],
+  slots: AcpSlotState[],
+) {
+  const expressed = aspects
+    .filter((aspect) => aspect.evidence.length > 0)
+    .map((aspect) => aspect.label);
+
+  if (expressed.length > 0) {
+    return `${expressed.slice(0, 5).join("、")}について本人の発言または本人同意のある要約が確認されています。`;
+  }
+
+  return getResearchThemeSummary(theme, slots) || "現時点では明確な確認ができていません。";
+}
+
+function buildPersonCenteredOverview(themes: ThemeMinutesItem[]) {
+  const evidence = collectRepresentativeEvidence(themes).slice(0, 4);
+
+  if (evidence.length === 0) {
+    return "今回の記録からは、本人の価値観や意思決定方針として確定できる発言はまだ限定的です。次回、本人へ具体的に確認してください。";
+  }
+
+  return evidence.join("\n");
+}
+
+function collectRepresentativeEvidence(themes: ThemeMinutesItem[]) {
+  const values = themes.flatMap((theme) =>
+    theme.aspects.flatMap((aspect) =>
+      aspect.evidence.map((evidence) => `${theme.title} / ${aspect.label}: ${evidence.evidenceText}`),
+    ),
+  );
+
+  return [...new Set(values)].slice(0, 12);
+}
+
+function formatAspectStatus(status: AspectStatus) {
+  switch (status) {
+    case "filled":
+      return "本人が明確に表明";
+    case "partial":
+      return "部分的に確認";
+    default:
+      return "未確認";
+  }
+}
+
+function formatResponseState(state: ResponseState) {
+  switch (state) {
+    case "expressed":
+      return "本人の考えを確認";
+    case "no_preference":
+      return "特に希望なしと確認";
+    case "not_considered":
+      return "現時点では未決定";
+    case "difficulty_verbalizing":
+      return "言語化が難しい";
+    case "declined":
+      return "今は話したくない";
+    case "uncertain":
+      return "部分的に確認";
+    default:
+      return "未確認";
+  }
+}
+
+function formatJapaneseDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return new Intl.DateTimeFormat("ja-JP", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 function aspectMatchesText(label: string, text: string) {
