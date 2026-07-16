@@ -106,6 +106,7 @@ const MAX_TOPIC_DURATION_MS = BASE_TOPIC_DURATION_MS + MAX_EXTENSION_DURATION_MS
 const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const EXTENSION_STEP_MS = 2 * 60 * 1000;
 const TIMER_TICK_MS = 1000;
+const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
 
@@ -164,6 +165,11 @@ export default function SessionPage() {
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
+  const promptPanelRef = useRef<PromptPanelState | null>(null);
+  const restorablePromptPanelRef = useRef<PromptPanelState | null>(
+    createOpeningPrompt(),
+  );
+  const promptRestoreTimeoutRef = useRef<number | null>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
   const speakerRef = useRef<Speaker>("elder");
   const pushToTalkPressedRef = useRef(false);
@@ -267,6 +273,20 @@ export default function SessionPage() {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    promptPanelRef.current = promptPanel;
+
+    if (isRestorablePrompt(promptPanel)) {
+      restorablePromptPanelRef.current = promptPanel;
+    }
+  }, [promptPanel]);
+
+  useEffect(() => {
+    return () => {
+      clearPromptRestoreTimeout();
+    };
+  }, []);
 
   useEffect(() => {
     if (!session?.id) {
@@ -651,8 +671,37 @@ export default function SessionPage() {
     }
   }
 
+  function clearPromptRestoreTimeout() {
+    if (promptRestoreTimeoutRef.current === null) return;
+
+    window.clearTimeout(promptRestoreTimeoutRef.current);
+    promptRestoreTimeoutRef.current = null;
+  }
+
+  function schedulePromptRestore(
+    visiblePrompt: PromptPanelState,
+    restorePrompt: PromptPanelState | null,
+  ) {
+    clearPromptRestoreTimeout();
+    if (!restorePrompt) return;
+
+    promptRestoreTimeoutRef.current = window.setTimeout(() => {
+      promptRestoreTimeoutRef.current = null;
+
+      if (promptPanelRef.current !== visiblePrompt) return;
+
+      setPromptPanel(restorePrompt);
+    }, PROMPT_STATUS_RESTORE_DELAY_MS);
+  }
+
   async function handleAction(buttonType: ButtonType) {
     if (!session || busyAction) return;
+
+    clearPromptRestoreTimeout();
+    const promptToRestore =
+      isRestorablePrompt(promptPanel)
+        ? promptPanel
+        : restorablePromptPanelRef.current;
 
     setBusyAction(buttonType);
     setStatusText("保存中");
@@ -727,11 +776,14 @@ export default function SessionPage() {
           current_topic_title: currentTopic.title,
         });
 
-        setPromptPanel({
+        const updatedPrompt = {
           title: "議事録更新",
           body: "議事録を更新しました。",
           tone: "status",
-        });
+        } satisfies PromptPanelState;
+
+        setPromptPanel(updatedPrompt);
+        schedulePromptRestore(updatedPrompt, promptToRestore);
       }
 
       await refreshDeveloperSlotStates(session.id);
@@ -1782,6 +1834,16 @@ function getPendingPrompt(buttonType: ButtonType): PromptPanelState {
     body: "会話ログから議事録を更新しています。",
     tone: "status",
   };
+}
+
+function isRestorablePrompt(
+  prompt: PromptPanelState | null,
+): prompt is PromptPanelState {
+  return (
+    prompt?.tone === "question" ||
+    prompt?.tone === "switch" ||
+    prompt?.tone === "end"
+  );
 }
 
 function EmptyState(props: { text: string }) {
