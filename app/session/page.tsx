@@ -762,11 +762,32 @@ export default function SessionPage() {
           current_topic_title: currentTopic.title,
         });
 
-        setPromptPanel({
-          title: data.suggestion.can_end ? "全体終了確認" : "全体としてもう少し確認",
-          body: data.suggestion.message,
-          tone: "end",
-        });
+        if (!data.suggestion.can_end) {
+          const questionData = await postJson<NextQuestionResponse>(
+            "/api/ai/next-question",
+            {
+              session_id: session.id,
+              current_topic: currentTopic.slot_name,
+              current_topic_title: currentTopic.title,
+            },
+          );
+          const body = joinPrompt(
+            questionData.suggestion.transition_phrase,
+            questionData.suggestion.question,
+          );
+
+          setPromptPanel({
+            title: "全体としてもう少し確認",
+            body,
+            tone: "question",
+          });
+        } else {
+          setPromptPanel({
+            title: "全体終了確認",
+            body: data.suggestion.message,
+            tone: "end",
+          });
+        }
       }
 
       if (buttonType === "update_slots") {
