@@ -1488,15 +1488,6 @@ function DeveloperDialogueTopics(props: {
                     {subSlot.inDeferredQueue ? <MiniPill text="保留" tone="amber" /> : null}
                     {subSlot.canAskAgain ? <MiniPill text="再質問可" tone="stone" /> : null}
                   </div>
-                  <div className="mt-1 text-[10px] font-bold text-stone-500">
-                    completion: {subSlot.completion ?? "-"} / responseState:{" "}
-                    {subSlot.responseState ?? "-"} / reasonCode:{" "}
-                    {subSlot.reasonCode ?? subSlot.unansweredReason ?? "-"}
-                  </div>
-                  <div className="mt-0.5 text-[10px] font-bold text-stone-500">
-                    根拠数: {subSlot.evidenceUtteranceCount ?? 0} / 更新テーマ:{" "}
-                    {subSlot.lastUpdatedTopicId ?? "-"}
-                  </div>
                 </div>
               ))}
             </div>
