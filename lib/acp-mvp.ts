@@ -354,8 +354,22 @@ export type SubSlotDefinition = {
   completeCriteria: string;
   partialCriteria: string;
   exclusionCriteria?: string;
+  completionRule: SubSlotCompletionRule;
 };
 export type SlotCompletion = "none" | "partial" | "complete";
+export type AnswerDepth = "none" | "minimal" | "elaborated";
+export type SubSlotCompletionField =
+  | "specificContentPresent"
+  | "reasonPresent"
+  | "conditionPresent"
+  | "examplePresent";
+export type SubSlotCompletionRule = {
+  completeWhen: SubSlotCompletionField[];
+  elaboratedWhenAny?: Extract<
+    SubSlotCompletionField,
+    "reasonPresent" | "conditionPresent" | "examplePresent"
+  >[];
+};
 export type SlotClassificationResponseState =
   | "answered"
   | "no_response"
@@ -385,6 +399,9 @@ export type StoredSubSlotState = {
   evidenceUtteranceIds: string[];
   canAskAgain: boolean;
   isDeferred: boolean;
+  depth?: AnswerDepth;
+  needsOptionalFollowUp?: boolean;
+  hasConflict?: boolean;
   lastUpdatedTopicId: string | null;
   updatedAt: string;
 };
@@ -794,6 +811,7 @@ export function getSubSlotDefinitions(): SubSlotDefinition[] {
       id: aspect.id,
       mainSlotId: topic.id,
       label: aspect.label,
+      completionRule: getSubSlotCompletionRule(aspect.id),
       description: `「${topic.title}」の中で、${aspect.label}について本人の考え・希望・保留・拒否が話されているかを確認する。`,
       completeCriteria:
         aspect.priority === "core"
@@ -817,6 +835,23 @@ export function resolveSubSlotDefinition(
   );
 }
 
+function getSubSlotCompletionRule(subSlotId: string): SubSlotCompletionRule {
+  if (/reason|why|trust/.test(subSlotId)) {
+    return { completeWhen: ["reasonPresent"] };
+  }
+  if (/condition|timing|acceptable_change|involvement/.test(subSlotId)) {
+    return { completeWhen: ["conditionPresent"] };
+  }
+  if (/example/.test(subSlotId)) {
+    return { completeWhen: ["examplePresent"] };
+  }
+
+  return {
+    completeWhen: ["specificContentPresent"],
+    elaboratedWhenAny: ["reasonPresent", "conditionPresent", "examplePresent"],
+  };
+}
+
 export function getSubSlotDefinitionsForTopic(mainSlotId: string) {
   return getSubSlotDefinitions().filter(
     (definition) => definition.mainSlotId === mainSlotId,
@@ -833,6 +868,8 @@ export function createEmptySubSlotStates(now = new Date().toISOString()) {
     evidenceUtteranceIds: [],
     canAskAgain: true,
     isDeferred: true,
+    depth: "none" as AnswerDepth,
+    needsOptionalFollowUp: false,
     lastUpdatedTopicId: null,
     updatedAt: now,
   }));
@@ -921,9 +958,6 @@ export function canTransitionSubSlotState(
 ) {
   if (!current) return true;
   if (next.evidenceUtteranceIds.length === 0) return false;
-  if (current.responseState === "declined" && next.responseState !== "declined") {
-    return false;
-  }
   if (current.completion === "complete" && next.responseState === "no_response") {
     return false;
   }

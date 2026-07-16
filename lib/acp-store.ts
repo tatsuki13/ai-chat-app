@@ -68,6 +68,9 @@ export async function getSessionContext(sessionId: string) {
         evidenceUtteranceIds: normalizeEvidenceIds(state.evidenceUtteranceIds),
         canAskAgain: state.canAskAgain,
         isDeferred: state.isDeferred,
+        depth: inferLegacyDepth(state.completion, state.responseState),
+        needsOptionalFollowUp: false,
+        hasConflict: state.responseState === "conflicting",
         lastUpdatedTopicId: state.lastUpdatedTopicId,
         updatedAt: state.updatedAt.toISOString(),
       })),
@@ -203,4 +206,10 @@ function normalizeEvidenceIds(value: unknown) {
   if (!Array.isArray(value)) return [];
 
   return [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))];
+}
+
+function inferLegacyDepth(completion: string, responseState: string) {
+  if (responseState === "no_response") return "none";
+  if (completion === "complete" || completion === "partial") return "minimal";
+  return "none";
 }

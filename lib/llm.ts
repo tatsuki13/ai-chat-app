@@ -30,9 +30,6 @@ import {
   isCaregiverSpeaker,
   isElderSpeaker,
   isDeferredSubSlotState,
-  isSlotClassificationResponseState,
-  isSlotCompletion,
-  isSlotReasonCode,
   isTerminalSlotStatus,
   mergeSlotStates,
   normalizeSlotName,
@@ -42,6 +39,7 @@ import {
   resolveSubSlotDefinition,
   resolveResearchThemeForSlot,
   type AcpSlotName,
+  type AnswerDepth,
   type AuxiliaryMinutesItem,
   type AcpSlotState,
   type ConversationUtterance,
@@ -55,6 +53,7 @@ import {
   type SlotReasonCode,
   type SlotControlDebugState,
   type StoredSubSlotState,
+  type SubSlotCompletionRule,
   type SubSlotControlOverride,
   type TopicSwitchResult,
   type ThemeMinutesItem,
@@ -151,6 +150,13 @@ const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
   "介護者の解釈だけを本人意思にしないでください。介護者要約に本人が明確に同意した場合のみ、介護者要約発話IDと本人同意発話IDを両方 evidenceUtteranceIds に含めてください。",
   "Do not classify caregiver speech alone as the elder's preference. If caregiver speech is used as evidence, evidenceUtteranceIds must also include a nearby later elder agreement or elaboration utterance.",
   "A single elder utterance may support multiple aspects or themes. Return every supported classification, up to maxClassificationsPerUtterance, instead of forcing a single best aspect.",
+  "Do not decide final slot completion or stored response state. Extract only observable evidence facts from this conversation turn.",
+  "Set specificContentPresent true when the requested sub-slot content itself is clearly stated, even if reasons or conditions are not stated.",
+  "Do not confuse answer depth with whether the person answered the question. A short clear preference is still specific content.",
+  "Ignore currentSubSlotStates when extracting evidence. Use only the conversation_log evidence for this classification pass.",
+  "For caregiver-only reports, return evidenceType caregiver_report_only, but do not treat it as confirmed elder preference.",
+  'Use this output shape: {"classifications":[{"mainSlotId":"...","subSlotId":"...","relevantMentionPresent":true,"responsePresent":true,"specificContentPresent":true,"reasonPresent":false,"conditionPresent":false,"examplePresent":false,"ambiguityPresent":false,"conflictPresent":false,"responseMeaning":"preference_expressed | explicit_none | not_considered | unable_to_verbalize | declined | other_response | unknown","evidenceType":"direct_elder_statement | elder_confirmation | caregiver_report_with_elder_confirmation | caregiver_report_only | shared_statement | unknown","evidenceUtteranceIds":["..."],"classificationNote":"optional"}],"unmatchedUtteranceIds":["..."]}',
+  "Ignore any legacy output example that contains completion, responseState, or reasonCode.",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
@@ -241,14 +247,46 @@ type SlotClassificationResult = {
   unmatchedUtteranceIds?: string[];
 };
 
+type SlotResponseMeaning =
+  | "preference_expressed"
+  | "explicit_none"
+  | "not_considered"
+  | "unable_to_verbalize"
+  | "declined"
+  | "other_response"
+  | "unknown";
+
+type SlotEvidenceType =
+  | "direct_elder_statement"
+  | "elder_confirmation"
+  | "caregiver_report_with_elder_confirmation"
+  | "caregiver_report_only"
+  | "shared_statement"
+  | "unknown";
+
 type SlotClassification = {
   mainSlotId?: string;
   subSlotId?: string;
-  completion?: string;
-  responseState?: string;
-  reasonCode?: string | null;
+  relevantMentionPresent?: boolean;
+  responsePresent?: boolean;
+  specificContentPresent?: boolean;
+  reasonPresent?: boolean;
+  conditionPresent?: boolean;
+  examplePresent?: boolean;
+  ambiguityPresent?: boolean;
+  conflictPresent?: boolean;
+  responseMeaning?: string;
+  evidenceType?: string;
   evidenceUtteranceIds?: unknown;
   classificationNote?: string;
+};
+
+type DerivedSlotClassificationState = {
+  completion: SlotCompletion;
+  responseState: SlotClassificationResponseState;
+  reasonCode: SlotReasonCode | null;
+  depth: AnswerDepth;
+  needsOptionalFollowUp: boolean;
 };
 
 type SlotCandidateValidationResult =
@@ -259,9 +297,8 @@ type SlotCandidateValidationResult =
         | "unknown_main_slot"
         | "unknown_sub_slot"
         | "invalid_sub_slot_parent"
-        | "invalid_completion"
-        | "invalid_response_state"
-        | "invalid_reason_code"
+        | "invalid_response_meaning"
+        | "invalid_evidence_type"
         | "missing_evidence"
         | "unknown_evidence_utterance"
         | "non_elder_evidence"
@@ -280,6 +317,14 @@ type SlotStateBundle = {
       utteranceIds: string[];
     }>;
     unmatchedUtteranceIds: string[];
+    summary: {
+      llmCandidateCount: number;
+      acceptedCount: number;
+      rejectedCount: number;
+      rejectionReasons: Record<string, number>;
+      derivedStateCount: number;
+      transitionBlockedCount: number;
+    };
   };
 };
 
@@ -305,6 +350,7 @@ export async function updateSlotStateBundleFromConversation(
         accepted: [],
         rejected: [],
         unmatchedUtteranceIds: [],
+        summary: createSlotClassificationDebugSummary([], [], []),
       },
     };
   }
@@ -336,12 +382,17 @@ export async function updateSlotStateBundleFromConversation(
 
 function buildSlotClassificationPayload(
   context: ConversationContext,
-  subSlotStates: StoredSubSlotState[],
+  _subSlotStates: StoredSubSlotState[],
 ) {
+  const currentTopic = resolveDiscussionTopic(context.currentTopic);
+  const topicsForClassification = DISCUSSION_TOPICS.filter(
+    (topic) => topic.id === currentTopic.id,
+  );
+
   return {
     session: getSessionMetadata(context),
-    currentTopic: resolveDiscussionTopic(context.currentTopic),
-    slotDefinitions: DISCUSSION_TOPICS.map((topic) => ({
+    currentTopic,
+    slotDefinitions: topicsForClassification.map((topic) => ({
       mainSlotId: topic.id,
       mainSlotLabel: topic.title,
       subSlots: getSubSlotDefinitions()
@@ -353,9 +404,9 @@ function buildSlotClassificationPayload(
           completeCriteria: definition.completeCriteria,
           partialCriteria: definition.partialCriteria,
           exclusionCriteria: definition.exclusionCriteria,
+          completionRule: definition.completionRule,
         })),
     })),
-    currentSubSlotStates: subSlotStates,
     conversation_log: context.utterances
       .filter((utterance) => utterance.id)
       .map((utterance) => ({
@@ -426,16 +477,30 @@ function applySlotClassifications(input: {
     const subSlotId = candidate.subSlotId as string;
     const key = `${mainSlotId}:${subSlotId}`;
     const current = byKey.get(key);
+    const definition = resolveSubSlotDefinition(mainSlotId, subSlotId);
+    if (!definition) {
+      rejected.push({
+        candidate,
+        reason: "invalid_sub_slot_parent",
+        utteranceIds: evidenceIds,
+      });
+      logRejectedSlotCandidate(candidate, "invalid_sub_slot_parent", evidenceIds, input.sessionId);
+      continue;
+    }
+    const derived = deriveStoredSlotState(candidate, definition.completionRule);
     const nextBase = {
       mainSlotId,
       subSlotId,
-      completion: candidate.completion as SlotCompletion,
-      responseState: candidate.responseState as SlotClassificationResponseState,
-      reasonCode: (candidate.reasonCode ?? null) as SlotReasonCode | null,
+      completion: derived.completion,
+      responseState: derived.responseState,
+      reasonCode: derived.reasonCode,
       evidenceUtteranceIds: mergeEvidenceIds(
         current?.evidenceUtteranceIds ?? [],
         evidenceIds,
       ),
+      depth: derived.depth,
+      needsOptionalFollowUp: derived.needsOptionalFollowUp,
+      hasConflict: derived.responseState === "conflicting",
       lastUpdatedTopicId: currentTopicId,
       updatedAt: now,
     };
@@ -466,7 +531,32 @@ function applySlotClassifications(input: {
       accepted,
       rejected,
       unmatchedUtteranceIds: normalizeEvidenceIds(input.result.unmatchedUtteranceIds),
+      summary: createSlotClassificationDebugSummary(
+        input.result.classifications ?? [],
+        accepted,
+        rejected,
+      ),
     },
+  };
+}
+
+function createSlotClassificationDebugSummary(
+  candidates: SlotClassification[],
+  accepted: SlotClassification[],
+  rejected: SlotStateBundle["debug"]["rejected"],
+) {
+  const rejectionReasons = rejected.reduce<Record<string, number>>((accumulator, item) => {
+    accumulator[item.reason] = (accumulator[item.reason] ?? 0) + 1;
+    return accumulator;
+  }, {});
+
+  return {
+    llmCandidateCount: candidates.length,
+    acceptedCount: accepted.length,
+    rejectedCount: rejected.length,
+    rejectionReasons,
+    derivedStateCount: accepted.length,
+    transitionBlockedCount: rejectionReasons.invalid_transition ?? 0,
   };
 }
 
@@ -490,28 +580,154 @@ function validateSlotClassificationCandidate(
   if (!resolveSubSlotDefinition(mainSlotId, subSlotId)) {
     return { accepted: false, reason: "invalid_sub_slot_parent" };
   }
-  if (!isSlotCompletion(candidate.completion)) {
-    return { accepted: false, reason: "invalid_completion" };
+  if (!isSlotResponseMeaning(candidate.responseMeaning)) {
+    return { accepted: false, reason: "invalid_response_meaning" };
   }
-  if (!isSlotClassificationResponseState(candidate.responseState)) {
-    return { accepted: false, reason: "invalid_response_state" };
+  if (!isSlotEvidenceType(candidate.evidenceType)) {
+    return { accepted: false, reason: "invalid_evidence_type" };
   }
-  if (candidate.reasonCode !== null && candidate.reasonCode !== undefined) {
-    if (!isSlotReasonCode(candidate.reasonCode)) {
-      return { accepted: false, reason: "invalid_reason_code" };
-    }
-  }
-  if (candidate.responseState !== "no_response" && evidenceIds.length === 0) {
+  if (
+    (candidate.relevantMentionPresent ||
+      candidate.responsePresent ||
+      candidate.responseMeaning !== "unknown") &&
+    evidenceIds.length === 0
+  ) {
     return { accepted: false, reason: "missing_evidence" };
   }
   if (evidenceIds.some((id) => !utteranceIds.has(id))) {
     return { accepted: false, reason: "unknown_evidence_utterance" };
+  }
+  if (candidate.evidenceType === "caregiver_report_only") {
+    return { accepted: false, reason: "non_elder_evidence" };
   }
   if (!evidenceIdsHaveValidSpeakerConsent(evidenceIds, utterances)) {
     return { accepted: false, reason: "non_elder_evidence" };
   }
 
   return { accepted: true };
+}
+
+function deriveStoredSlotState(
+  classification: SlotClassification,
+  rule: SubSlotCompletionRule,
+): DerivedSlotClassificationState {
+  const responseMeaning = normalizeResponseMeaning(classification.responseMeaning);
+  const responsePresent = classification.responsePresent === true;
+  const depth = deriveAnswerDepth(classification);
+
+  if (!classification.relevantMentionPresent) {
+    return buildDerivedSlotState("none", "no_response", "not_discussed", depth);
+  }
+
+  if (responseMeaning === "declined") {
+    return buildDerivedSlotState("none", "declined", "declined", depth);
+  }
+
+  if (responseMeaning === "unable_to_verbalize") {
+    return buildDerivedSlotState(
+      "none",
+      "unable_to_verbalize",
+      "unable_to_verbalize",
+      depth,
+    );
+  }
+
+  if (responseMeaning === "not_considered") {
+    return buildDerivedSlotState("none", "not_considered", "not_considered", depth);
+  }
+
+  if (responseMeaning === "explicit_none") {
+    return buildDerivedSlotState("none", "explicit_none", "explicit_none", depth);
+  }
+
+  if (classification.conflictPresent) {
+    return buildDerivedSlotState("partial", "conflicting", "conflicting", depth);
+  }
+
+  if (classification.ambiguityPresent) {
+    return buildDerivedSlotState("partial", "ambiguous", "ambiguous", depth);
+  }
+
+  if (!responsePresent) {
+    return buildDerivedSlotState("none", "no_response", "not_discussed", depth);
+  }
+
+  const completed = rule.completeWhen.every(
+    (requiredField) => classification[requiredField] === true,
+  );
+
+  if (completed) {
+    return buildDerivedSlotState("complete", "answered", null, depth);
+  }
+
+  return buildDerivedSlotState(
+    "partial",
+    "answered",
+    "insufficient_detail",
+    depth,
+  );
+}
+
+function buildDerivedSlotState(
+  completion: SlotCompletion,
+  responseState: SlotClassificationResponseState,
+  reasonCode: SlotReasonCode | null,
+  depth: AnswerDepth,
+): DerivedSlotClassificationState {
+  return {
+    completion,
+    responseState,
+    reasonCode,
+    depth,
+    needsOptionalFollowUp:
+      completion === "complete" &&
+      depth === "minimal" &&
+      ![
+        "explicit_none",
+        "not_considered",
+        "unable_to_verbalize",
+        "declined",
+      ].includes(responseState),
+  };
+}
+
+function deriveAnswerDepth(classification: SlotClassification): AnswerDepth {
+  if (!classification.responsePresent) return "none";
+  if (
+    classification.reasonPresent ||
+    classification.conditionPresent ||
+    classification.examplePresent
+  ) {
+    return "elaborated";
+  }
+  return "minimal";
+}
+
+function isSlotResponseMeaning(value: unknown): value is SlotResponseMeaning {
+  return (
+    value === "preference_expressed" ||
+    value === "explicit_none" ||
+    value === "not_considered" ||
+    value === "unable_to_verbalize" ||
+    value === "declined" ||
+    value === "other_response" ||
+    value === "unknown"
+  );
+}
+
+function normalizeResponseMeaning(value: unknown): SlotResponseMeaning {
+  return isSlotResponseMeaning(value) ? value : "unknown";
+}
+
+function isSlotEvidenceType(value: unknown): value is SlotEvidenceType {
+  return (
+    value === "direct_elder_statement" ||
+    value === "elder_confirmation" ||
+    value === "caregiver_report_with_elder_confirmation" ||
+    value === "caregiver_report_only" ||
+    value === "shared_statement" ||
+    value === "unknown"
+  );
 }
 
 function evidenceIdsHaveValidSpeakerConsent(
@@ -554,6 +770,11 @@ function mergeSubSlotState(
         current.evidenceUtteranceIds,
         next.evidenceUtteranceIds,
       ),
+      hasConflict:
+        current.hasConflict === true || next.responseState === "conflicting",
+      needsOptionalFollowUp:
+        current.needsOptionalFollowUp === true ||
+        next.responseState === "conflicting",
       updatedAt: next.updatedAt,
     };
   }
