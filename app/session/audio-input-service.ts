@@ -36,6 +36,7 @@ export type AudioInputStartOptions = {
 
 export type SingleMicInputStartOptions = {
   deviceId?: string;
+  stream?: MediaStream;
 };
 
 const AUDIO_INPUT_CONFIG_STORAGE_KEY = "acp-audio-input-config-v1";
@@ -174,7 +175,9 @@ export function createSingleMicInputService(): SingleMicInputService {
       throw new Error("Web Audio API is not available in this browser");
     }
 
-    const stream = await startSingleMicStream(options?.deviceId || "");
+    const stream = options?.stream
+      ? new MediaStream(options.stream.getAudioTracks().map((track) => track.clone()))
+      : await startSingleMicStream(options?.deviceId || "");
     const track = stream.getAudioTracks()[0];
     console.log("single mic settings:", track?.getSettings());
 

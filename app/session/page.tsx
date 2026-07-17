@@ -15,8 +15,36 @@ import {
   type SingleMicInputService,
   type StereoSpeaker,
 } from "./audio-input-service";
+import {
+  detectSpeakerFromLipActivity,
+  summarizeLipActivity,
+  toStoredConversationSpeaker,
+  type SpeakerDetectionResult,
+} from "./active-speaker-detector";
+import {
+  createLipActivityService,
+  type LipActivityFrame,
+} from "./lip-activity-service";
+import {
+  createSessionClock,
+  DEFAULT_PARTICIPANT_LAYOUT,
+  monotonicToSessionOffsetMs,
+  startSharedMediaStream,
+  stopMediaStream,
+  type ParticipantLayout,
+  type SessionClock,
+} from "./media-session-service";
+import {
+  createSessionRecordingService,
+  type RecordingMetadata,
+} from "./session-recording-service";
+import {
+  createVoiceActivityDetector,
+  type VoiceActivitySegment,
+} from "./voice-activity-detector";
 
 type Speaker = "caregiver" | "elder";
+type SpeakerWithUnknown = Speaker | "unknown";
 type ButtonType = "next_question" | "switch_topic" | "check_end" | "update_slots";
 type PromptTone = "question" | "switch" | "end" | "status" | "error";
 
@@ -157,6 +185,17 @@ export default function SessionPage() {
   const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState("");
   const [audioInputLoading, setAudioInputLoading] = useState(false);
   const [pushToTalkActive, setPushToTalkActive] = useState(false);
+  const [mediaSessionRunning, setMediaSessionRunning] = useState(false);
+  const [mediaSessionError, setMediaSessionError] = useState("");
+  const [participantLayout, setParticipantLayout] = useState<ParticipantLayout>(
+    DEFAULT_PARTICIPANT_LAYOUT,
+  );
+  const [autoVoiceDetectionEnabled, setAutoVoiceDetectionEnabled] = useState(false);
+  const [lipActivityFrame, setLipActivityFrame] = useState<LipActivityFrame | null>(null);
+  const [speakerDetection, setSpeakerDetection] =
+    useState<SpeakerDetectionResult | null>(null);
+  const [recordingMetadata, setRecordingMetadata] =
+    useState<RecordingMetadata | null>(null);
   const [developerSlotStates, setDeveloperSlotStates] = useState<SlotState[]>([]);
   const [developerSlotControl, setDeveloperSlotControl] =
     useState<SlotControlDebugState | null>(null);
@@ -180,6 +219,15 @@ export default function SessionPage() {
   const timerRunningRef = useRef(false);
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
+  const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
+  const sharedMediaStreamRef = useRef<MediaStream | null>(null);
+  const sessionClockRef = useRef<SessionClock | null>(null);
+  const lipActivityServiceRef = useRef<ReturnType<typeof createLipActivityService> | null>(null);
+  const lipActivityFramesRef = useRef<LipActivityFrame[]>([]);
+  const speakerDetectionRef = useRef<SpeakerDetectionResult | null>(null);
+  const participantLayoutRef = useRef<ParticipantLayout>(DEFAULT_PARTICIPANT_LAYOUT);
+  const voiceActivityDetectorRef = useRef<ReturnType<typeof createVoiceActivityDetector> | null>(null);
+  const recordingServiceRef = useRef<ReturnType<typeof createSessionRecordingService> | null>(null);
 
   const participantCode = session?.participant_code || "未設定";
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
@@ -312,6 +360,10 @@ export default function SessionPage() {
   }, [sttEnabled]);
 
   useEffect(() => {
+    participantLayoutRef.current = participantLayout;
+  }, [participantLayout]);
+
+  useEffect(() => {
     void refreshAudioInputDevices();
   }, []);
 
@@ -325,12 +377,26 @@ export default function SessionPage() {
     });
 
     voiceInputServiceRef.current = service;
+    recordingServiceRef.current = createSessionRecordingService();
+    voiceActivityDetectorRef.current = createVoiceActivityDetector({
+      onSpeechStart: (segmentStartedAtMs) => {
+        handleVoiceActivityStart(segmentStartedAtMs);
+      },
+      onSpeechEnd: (segment) => {
+        handleVoiceActivityEnd(segment);
+      },
+    });
 
     return () => {
       unsubscribeChunk();
       unsubscribeLevel();
       service.stopVoiceInput();
+      lipActivityServiceRef.current?.stop();
+      void recordingServiceRef.current?.stop();
+      stopMediaStream(sharedMediaStreamRef.current);
       voiceInputServiceRef.current = null;
+      recordingServiceRef.current = null;
+      voiceActivityDetectorRef.current = null;
     };
   }, []);
 
@@ -520,6 +586,7 @@ export default function SessionPage() {
 
     if (!audioInputRunning) return;
 
+    await stopMediaSession();
     stopVoiceAudioInput();
     await startVoiceAudioInput(deviceId);
   }
@@ -532,6 +599,7 @@ export default function SessionPage() {
     try {
       await voiceInputServiceRef.current.startVoiceInput({
         deviceId,
+        stream: sharedMediaStreamRef.current ?? undefined,
       });
       setAudioInputRunning(true);
     } catch (error) {
@@ -539,6 +607,73 @@ export default function SessionPage() {
       setAudioInputRunning(false);
       setAudioInputError("音声入力を確認してください。");
     }
+  }
+
+  async function startMediaSession() {
+    if (!sessionRef.current || mediaSessionRunning) return;
+
+    setMediaSessionError("");
+
+    try {
+      const stream = await startSharedMediaStream();
+      const clock = createSessionClock();
+
+      sharedMediaStreamRef.current = stream;
+      sessionClockRef.current = clock;
+      lipActivityFramesRef.current = [];
+
+      if (videoPreviewRef.current) {
+        videoPreviewRef.current.srcObject = stream;
+        await videoPreviewRef.current.play().catch(() => {});
+      }
+
+      if (videoPreviewRef.current) {
+        const service = createLipActivityService(videoPreviewRef.current, clock);
+        lipActivityServiceRef.current = service;
+        service.onFrame((frame) => {
+          lipActivityFramesRef.current = [...lipActivityFramesRef.current, frame].slice(-900);
+          setLipActivityFrame(frame);
+        });
+        service.start();
+      }
+
+      await voiceInputServiceRef.current?.startVoiceInput({ stream });
+      setAudioInputRunning(Boolean(voiceInputServiceRef.current?.isRunning()));
+
+      const metadata = await recordingServiceRef.current?.start(
+        sessionRef.current.id,
+        stream.clone(),
+      );
+      setRecordingMetadata(metadata ?? null);
+      setMediaSessionRunning(true);
+      setAutoVoiceDetectionEnabled(true);
+      startTopicTimerIfNeeded();
+    } catch (error) {
+      console.warn("Media session failed", error);
+      setMediaSessionRunning(false);
+      setAutoVoiceDetectionEnabled(false);
+      setMediaSessionError("Camera/microphone session could not be started.");
+      void stopMediaSession();
+    }
+  }
+
+  async function stopMediaSession() {
+    setAutoVoiceDetectionEnabled(false);
+    voiceActivityDetectorRef.current?.forceEnd(getCurrentSessionOffsetMs());
+    endPushToTalk();
+    voiceInputServiceRef.current?.stopVoiceInput();
+    setAudioInputRunning(false);
+    lipActivityServiceRef.current?.stop();
+    lipActivityServiceRef.current = null;
+    if (videoPreviewRef.current) {
+      videoPreviewRef.current.srcObject = null;
+    }
+    const metadata = await recordingServiceRef.current?.stop();
+    setRecordingMetadata(metadata ?? recordingMetadata);
+    stopMediaStream(sharedMediaStreamRef.current);
+    sharedMediaStreamRef.current = null;
+    setMediaSessionRunning(false);
+    setAudioInputLevels({ A: 0, B: 0 });
   }
 
   async function beginPushToTalk() {
@@ -582,15 +717,75 @@ export default function SessionPage() {
   }
 
   function updateVoiceInputLevel(level: SingleMicInputLevel) {
-    if (!pushToTalkActiveRef.current) return;
-
-    const activeSpeaker = toAudioSpeaker(speakerRef.current);
     const normalizedLevel = Math.min(1, Math.max(level.rms * 8, level.peak));
+    const activeSpeaker = pushToTalkActiveRef.current
+      ? toAudioSpeaker(speakerRef.current)
+      : toAudioSpeaker(resolveDetectedSpeakerFallback());
 
     setAudioInputLevels({
       A: activeSpeaker === "A" ? normalizedLevel : 0,
       B: activeSpeaker === "B" ? normalizedLevel : 0,
     });
+
+    if (autoVoiceDetectionEnabled && !pushToTalkActiveRef.current) {
+      voiceActivityDetectorRef.current?.update(
+        normalizedLevel,
+        getCurrentSessionOffsetMs(level.at),
+      );
+    }
+  }
+
+  function handleVoiceActivityStart(segmentStartedAtMs: number) {
+    if (!voiceInputServiceRef.current || pushToTalkActiveRef.current) return;
+
+    const detection = detectSpeakerForSegment(segmentStartedAtMs, segmentStartedAtMs);
+    const storedSpeaker = toStoredConversationSpeaker(detection.detectedSpeaker);
+    const captureSpeaker = toAudioSpeaker(
+      storedSpeaker === "unknown" ? speakerRef.current : storedSpeaker,
+    );
+
+    speakerDetectionRef.current = detection;
+    setSpeakerDetection(detection);
+    startTopicTimerIfNeeded();
+    voiceInputServiceRef.current.startCapture(captureSpeaker);
+  }
+
+  function handleVoiceActivityEnd(segment: VoiceActivitySegment) {
+    if (!voiceInputServiceRef.current || pushToTalkActiveRef.current) return;
+
+    const detection = detectSpeakerForSegment(segment.startedAtMs, segment.endedAtMs);
+    speakerDetectionRef.current = detection;
+    setSpeakerDetection(detection);
+    voiceInputServiceRef.current.stopCapture();
+  }
+
+  function detectSpeakerForSegment(startedAtMs: number, endedAtMs: number) {
+    const summary = summarizeLipActivity(
+      lipActivityFramesRef.current,
+      startedAtMs,
+      Math.max(endedAtMs, startedAtMs + 1),
+    );
+
+    return detectSpeakerFromLipActivity(summary, participantLayoutRef.current);
+  }
+
+  function resolveDetectedSpeakerFallback(): Speaker {
+    return resolveStoredSpeaker(
+      toStoredConversationSpeaker(
+        speakerDetectionRef.current?.detectedSpeaker ?? "unknown",
+      ),
+      speakerRef.current,
+    );
+  }
+
+  function getCurrentSessionOffsetMs(atEpochMs?: number) {
+    const clock = sessionClockRef.current;
+    if (!clock) return Date.now();
+    if (typeof atEpochMs === "number") {
+      return Math.max(0, atEpochMs - clock.sessionStartedAtEpochMs);
+    }
+
+    return monotonicToSessionOffsetMs(clock);
   }
 
   async function handleVoiceAudioChunk(chunk: SingleMicAudioChunk) {
@@ -1278,6 +1473,123 @@ export default function SessionPage() {
               </div>
             </section>
 
+            <section className="rounded-md border border-stone-200 bg-white p-3 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-[14px] font-black leading-tight">
+                    Camera / visual speaker detection
+                  </h2>
+                  <p className="mt-0.5 text-[11px] font-bold text-stone-500">
+                    Single mic audio is segmented by voice activity. Speaker labels are inferred from left/right lip activity.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (mediaSessionRunning) {
+                      void stopMediaSession();
+                    } else {
+                      void startMediaSession();
+                    }
+                  }}
+                  disabled={!session || busyAction === "start"}
+                  className="min-h-9 rounded-md bg-stone-950 px-3 text-[12px] font-black text-white disabled:bg-stone-200 disabled:text-stone-400"
+                >
+                  {mediaSessionRunning ? "Stop camera" : "Start camera"}
+                </button>
+              </div>
+              {mediaSessionError ? (
+                <p className="mt-2 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[12px] font-bold text-red-700">
+                  {mediaSessionError}
+                </p>
+              ) : null}
+              <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_240px]">
+                <div className="relative overflow-hidden rounded-md border border-stone-200 bg-stone-950">
+                  <video
+                    ref={videoPreviewRef}
+                    muted
+                    playsInline
+                    className="aspect-video w-full scale-x-[-1] bg-stone-950 object-cover"
+                  />
+                  <div className="pointer-events-none absolute inset-y-0 left-1/2 w-px bg-white/70" />
+                  <div className="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-[11px] font-black text-white">
+                    L: {speakerLabel(participantLayout.leftSpeaker)}
+                  </div>
+                  <div className="absolute right-2 top-2 rounded bg-black/60 px-2 py-1 text-[11px] font-black text-white">
+                    R: {speakerLabel(participantLayout.rightSpeaker)}
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setParticipantLayout({
+                          leftSpeaker: "elder",
+                          rightSpeaker: "caregiver",
+                        })
+                      }
+                      disabled={mediaSessionRunning}
+                      className={`min-h-10 rounded-md border px-2 text-[11px] font-black ${
+                        participantLayout.leftSpeaker === "elder"
+                          ? "border-emerald-700 bg-emerald-50 text-emerald-900"
+                          : "border-stone-200 bg-white text-stone-600"
+                      } disabled:opacity-60`}
+                    >
+                      L elder / R caregiver
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setParticipantLayout({
+                          leftSpeaker: "caregiver",
+                          rightSpeaker: "elder",
+                        })
+                      }
+                      disabled={mediaSessionRunning}
+                      className={`min-h-10 rounded-md border px-2 text-[11px] font-black ${
+                        participantLayout.leftSpeaker === "caregiver"
+                          ? "border-sky-700 bg-sky-50 text-sky-900"
+                          : "border-stone-200 bg-white text-stone-600"
+                      } disabled:opacity-60`}
+                    >
+                      L caregiver / R elder
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setAutoVoiceDetectionEnabled((current) => !current)}
+                    disabled={!mediaSessionRunning}
+                    className={`min-h-9 w-full rounded-md border px-2 text-[12px] font-black ${
+                      autoVoiceDetectionEnabled
+                        ? "border-emerald-700 bg-emerald-700 text-white"
+                        : "border-stone-300 bg-white text-stone-700"
+                    } disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400`}
+                  >
+                    {autoVoiceDetectionEnabled ? "Auto VAD on" : "Auto VAD off"}
+                  </button>
+                  <LipMeter
+                    label="Left lip"
+                    value={lipActivityFrame?.leftSpeakingLikelihood ?? 0}
+                    visible={lipActivityFrame?.leftFaceVisible ?? false}
+                  />
+                  <LipMeter
+                    label="Right lip"
+                    value={lipActivityFrame?.rightSpeakingLikelihood ?? 0}
+                    visible={lipActivityFrame?.rightFaceVisible ?? false}
+                  />
+                  <div className="rounded-md border border-stone-200 bg-stone-50 px-3 py-2 text-[11px] font-bold text-stone-600">
+                    Detected: {speakerDetection ? speakerLabel(toStoredConversationSpeaker(speakerDetection.detectedSpeaker)) : "-"}
+                    {speakerDetection ? ` / ${Math.round(speakerDetection.confidence * 100)}% / ${speakerDetection.detectionReason}` : ""}
+                  </div>
+                  <div className="rounded-md border border-stone-200 bg-stone-50 px-3 py-2 text-[11px] font-bold text-stone-600">
+                    Recording: {recordingMetadata?.status ?? "idle"}
+                    {recordingMetadata ? ` / chunks ${recordingMetadata.chunkCount}` : ""}
+                  </div>
+                </div>
+              </div>
+            </section>
+
             <form onSubmit={handleSubmit}>
               {audioInputError ? (
                 <p className="mb-2 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[12px] font-bold text-red-700">
@@ -1866,6 +2178,25 @@ function EmptyState(props: { text: string }) {
   );
 }
 
+function LipMeter(props: { label: string; value: number; visible: boolean }) {
+  const width = `${Math.round(Math.min(1, Math.max(0, props.value)) * 100)}%`;
+
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-[11px] font-black text-stone-600">
+        <span>{props.label}</span>
+        <span>{props.visible ? width : "not visible"}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-stone-100">
+        <div
+          className={`h-full ${props.visible ? "bg-emerald-600" : "bg-stone-300"}`}
+          style={{ width: props.visible ? width : "4%" }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function SpeakerButton(props: {
   active: boolean;
   label: string;
@@ -2251,6 +2582,16 @@ function getAudioFileExtension(mimeType: string) {
 
 function normalizeSpeaker(value: string): Speaker {
   return value === "B" || value === "caregiver" ? "caregiver" : "elder";
+}
+
+function speakerLabel(value: SpeakerWithUnknown) {
+  if (value === "elder") return "本人";
+  if (value === "caregiver") return "介護者";
+  return "unknown";
+}
+
+function resolveStoredSpeaker(value: SpeakerWithUnknown, fallback: Speaker): Speaker {
+  return value === "unknown" ? fallback : value;
 }
 
 function toAudioSpeaker(speaker: Speaker): StereoSpeaker {
