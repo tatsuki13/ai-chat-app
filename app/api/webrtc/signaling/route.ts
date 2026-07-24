@@ -1,4 +1,8 @@
 import { NextResponse } from "next/server";
+import {
+  isMicrophoneRole,
+  validatePairingToken,
+} from "../../../../lib/microphone-pairing";
 import { prisma } from "../../../../lib/prisma";
 
 export const runtime = "nodejs";
@@ -30,12 +34,23 @@ export async function GET(request: Request) {
     const role = parseRole(params.get("role"));
     const recipient = parsePeer(params.get("recipient"));
     const since = parseDate(params.get("since"));
+    const token = requiredString(params.get("token"));
 
     if (!sessionId || !role || !recipient || !isValidSessionId(sessionId)) {
       return NextResponse.json(
         { error: "sessionId, role, and recipient are required" },
         { status: 400 },
       );
+    }
+
+    if (recipient === "phone") {
+      const validToken = await validatePairingToken({ sessionId, role, token });
+      if (!validToken) {
+        return NextResponse.json(
+          { error: "Invalid microphone pairing token" },
+          { status: 403 },
+        );
+      }
     }
 
     const session = await findOpenSession(sessionId);
@@ -92,6 +107,7 @@ export async function POST(request: Request) {
     const recipient = parsePeer(body?.recipient);
     const messageType = parseMessageType(body?.messageType ?? body?.message_type);
     const payload = body?.payload;
+    const token = requiredString(body?.token);
 
     if (
       !sessionId ||
@@ -112,6 +128,16 @@ export async function POST(request: Request) {
         { error: "sender and recipient must differ" },
         { status: 400 },
       );
+    }
+
+    if (sender === "phone") {
+      const validToken = await validatePairingToken({ sessionId, role, token });
+      if (!validToken) {
+        return NextResponse.json(
+          { error: "Invalid microphone pairing token" },
+          { status: 403 },
+        );
+      }
     }
 
     if (!isSafePayload(payload)) {
@@ -218,7 +244,7 @@ function requiredString(value: unknown) {
 }
 
 function parseRole(value: unknown): SpeakerRole | null {
-  return value === "caregiver" || value === "elder" ? value : null;
+  return isMicrophoneRole(value) ? value : null;
 }
 
 function parsePeer(value: unknown): SignalPeer | null {

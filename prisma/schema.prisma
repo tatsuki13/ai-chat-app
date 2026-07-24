@@ -16,11 +16,29 @@ model Session {
   subSlotStates    SlotSubState[]
   slotStates      SlotState[]
   utterances      SessionUtterance[]
+  microphonePairingTokens MicrophonePairingToken[]
   webRtcSignals   WebRtcSignal[]
 
   @@index([startedAt])
   @@index([participantCode])
   @@map("sessions")
+}
+
+model MicrophonePairingToken {
+  id         String    @id @default(cuid())
+  sessionId  String    @map("session_id")
+  role       String
+  tokenHash  String    @map("token_hash")
+  expiresAt  DateTime  @map("expires_at")
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  session    Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, role])
+  @@index([tokenHash])
+  @@index([expiresAt])
+  @@map("microphone_pairing_tokens")
 }
 
 model WebRtcSignal {

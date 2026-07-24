@@ -21,6 +21,7 @@ type MicInputState = "停止中" | "取得中" | "送信中";
 export default function MicrophoneClient(props: MicrophoneClientProps) {
   const searchParams = useSearchParams();
   const sessionId = searchParams.get("sessionId")?.trim() ?? "";
+  const token = searchParams.get("token")?.trim() ?? "";
   const [permissionState, setPermissionState] =
     useState<PermissionStateText>("未確認");
   const [micInputState, setMicInputState] = useState<MicInputState>("停止中");
@@ -36,7 +37,8 @@ export default function MicrophoneClient(props: MicrophoneClientProps) {
   const stopLevelMeterRef = useRef<(() => void) | null>(null);
 
   const roleLabel = props.role === "caregiver" ? "介護者用マイク" : "高齢者用マイク";
-  const canStart = props.validRole && Boolean(sessionId) && micInputState === "停止中";
+  const canStart =
+    props.validRole && Boolean(sessionId) && Boolean(token) && micInputState === "停止中";
 
   useEffect(() => {
     return () => {
@@ -46,7 +48,7 @@ export default function MicrophoneClient(props: MicrophoneClientProps) {
 
   async function start(force = false) {
     if (!force && !canStart) return;
-    if (!props.validRole || !sessionId) return;
+    if (!props.validRole || !sessionId || !token) return;
 
     setError("");
     setPermissionState("未確認");
@@ -70,6 +72,7 @@ export default function MicrophoneClient(props: MicrophoneClientProps) {
       const sender = createRemoteMicrophoneSender({
         sessionId,
         role: props.role,
+        token,
         stream,
         onState: setConnectionState,
       });
@@ -130,6 +133,11 @@ export default function MicrophoneClient(props: MicrophoneClientProps) {
         {!props.validRole ? (
           <p className="mt-4 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[13px] font-bold text-red-700">
             URLの役割が正しくありません。
+          </p>
+        ) : null}
+        {!token ? (
+          <p className="mt-4 rounded-md border border-amber-100 bg-amber-50 px-3 py-2 text-[13px] font-bold text-amber-800">
+            接続用トークンがありません。PC画面のQRコードから開いてください。
           </p>
         ) : null}
         {!sessionId ? (

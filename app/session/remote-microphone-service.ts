@@ -38,6 +38,7 @@ type ReceiverOptions = {
 type SenderOptions = {
   sessionId: string;
   role: SpeakerRole;
+  token: string;
   stream: MediaStream;
   onState: (state: RemoteMicrophoneState) => void;
 };
@@ -235,6 +236,7 @@ export function createRemoteMicrophoneSender(options: SenderOptions) {
       void postSignal({
         sessionId: options.sessionId,
         role: options.role,
+        token: options.token,
         sender: "phone",
         recipient: "pc",
         messageType: "ice",
@@ -250,6 +252,7 @@ export function createRemoteMicrophoneSender(options: SenderOptions) {
     await postSignal({
       sessionId: options.sessionId,
       role: options.role,
+      token: options.token,
       sender: "phone",
       recipient: "pc",
       messageType: "offer",
@@ -267,6 +270,7 @@ export function createRemoteMicrophoneSender(options: SenderOptions) {
     await postSignal({
       sessionId: options.sessionId,
       role: options.role,
+      token: options.token,
       sender: "phone",
       recipient: "pc",
       messageType: "bye",
@@ -289,6 +293,7 @@ export function createRemoteMicrophoneSender(options: SenderOptions) {
       const messages = await pollSignals({
         sessionId: options.sessionId,
         role: options.role,
+        token: options.token,
         recipient: "phone",
         since,
       });
@@ -389,6 +394,7 @@ export function createStreamLevelMeter(
 async function postSignal(input: {
   sessionId: string;
   role: SpeakerRole;
+  token?: string;
   sender: SignalPeer;
   recipient: SignalPeer;
   messageType: SignalMessageType;
@@ -408,6 +414,7 @@ async function postSignal(input: {
 async function pollSignals(input: {
   sessionId: string;
   role: SpeakerRole;
+  token?: string;
   recipient: SignalPeer;
   since: string;
 }) {
@@ -417,6 +424,9 @@ async function pollSignals(input: {
     recipient: input.recipient,
     since: input.since,
   });
+  if (input.token) {
+    params.set("token", input.token);
+  }
   const response = await fetch(`/api/webrtc/signaling?${params.toString()}`, {
     cache: "no-store",
   });
