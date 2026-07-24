@@ -15,6 +15,14 @@ import {
   type SingleMicInputService,
   type StereoSpeaker,
 } from "./audio-input-service";
+import {
+  createInitialRemoteMicrophoneState,
+  createRemoteMicrophoneReceiver,
+  createStreamLevelMeter,
+  type RemoteMicrophoneState,
+  type RemoteMicrophoneStreams,
+  type SpeakerRole,
+} from "./remote-microphone-service";
 
 type Speaker = "caregiver" | "elder";
 type SpeakerWithUnknown = Speaker | "unknown";
@@ -158,6 +166,24 @@ export default function SessionPage() {
   const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState("");
   const [audioInputLoading, setAudioInputLoading] = useState(false);
   const [pushToTalkActive, setPushToTalkActive] = useState(false);
+  const [remoteMicrophoneStreams, setRemoteMicrophoneStreams] =
+    useState<RemoteMicrophoneStreams>({
+      caregiver: null,
+      elder: null,
+    });
+  const [remoteMicrophoneStates, setRemoteMicrophoneStates] = useState<
+    Record<SpeakerRole, RemoteMicrophoneState>
+  >({
+    caregiver: createInitialRemoteMicrophoneState(),
+    elder: createInitialRemoteMicrophoneState(),
+  });
+  const [remoteMicrophoneLevels, setRemoteMicrophoneLevels] = useState<
+    Record<SpeakerRole, number>
+  >({
+    caregiver: 0,
+    elder: 0,
+  });
+  const [browserOrigin, setBrowserOrigin] = useState("");
   const [developerSlotStates, setDeveloperSlotStates] = useState<SlotState[]>([]);
   const [developerSlotControl, setDeveloperSlotControl] =
     useState<SlotControlDebugState | null>(null);
@@ -181,6 +207,9 @@ export default function SessionPage() {
   const timerRunningRef = useRef(false);
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
+  const remoteMicrophoneReceiverRef = useRef<ReturnType<
+    typeof createRemoteMicrophoneReceiver
+  > | null>(null);
 
   const participantCode = session?.participant_code || "未設定";
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
@@ -315,6 +344,84 @@ export default function SessionPage() {
   useEffect(() => {
     void refreshAudioInputDevices();
   }, []);
+
+  useEffect(() => {
+    setBrowserOrigin(window.location.origin);
+  }, []);
+
+  useEffect(() => {
+    remoteMicrophoneReceiverRef.current?.stop();
+    remoteMicrophoneReceiverRef.current = null;
+    setRemoteMicrophoneStreams({ caregiver: null, elder: null });
+    setRemoteMicrophoneLevels({ caregiver: 0, elder: 0 });
+    setRemoteMicrophoneStates({
+      caregiver: createInitialRemoteMicrophoneState(),
+      elder: createInitialRemoteMicrophoneState(),
+    });
+
+    if (!session?.id || session.ended_at) return;
+
+    const receiver = createRemoteMicrophoneReceiver({
+      sessionId: session.id,
+      onStream(role, stream) {
+        setRemoteMicrophoneStreams((current) => ({
+          ...current,
+          [role]: stream,
+        }));
+      },
+      onState(role, state) {
+        setRemoteMicrophoneStates((current) => ({
+          ...current,
+          [role]: state,
+        }));
+      },
+    });
+
+    remoteMicrophoneReceiverRef.current = receiver;
+    receiver.start();
+
+    return () => {
+      receiver.stop();
+      if (remoteMicrophoneReceiverRef.current === receiver) {
+        remoteMicrophoneReceiverRef.current = null;
+      }
+    };
+  }, [session?.id, session?.ended_at]);
+
+  useEffect(() => {
+    const stops: Array<() => void> = [];
+
+    (["caregiver", "elder"] as SpeakerRole[]).forEach((role) => {
+      const stream = remoteMicrophoneStreams[role];
+      if (!stream) {
+        setRemoteMicrophoneLevels((current) => ({ ...current, [role]: 0 }));
+        return;
+      }
+
+      try {
+        stops.push(
+          createStreamLevelMeter(stream, (level) => {
+            setRemoteMicrophoneLevels((current) => ({
+              ...current,
+              [role]: level,
+            }));
+          }),
+        );
+      } catch (error) {
+        setRemoteMicrophoneStates((current) => ({
+          ...current,
+          [role]: {
+            ...current[role],
+            error: error instanceof Error ? error.message : "音量監視エラー",
+          },
+        }));
+      }
+    });
+
+    return () => {
+      stops.forEach((stop) => stop());
+    };
+  }, [remoteMicrophoneStreams.caregiver, remoteMicrophoneStreams.elder]);
 
   useEffect(() => {
     const service = createSingleMicInputService();
@@ -1349,6 +1456,14 @@ export default function SessionPage() {
           </div>
 
           <div className="space-y-3">
+            <RemoteMicrophonePanel
+              sessionId={session?.id ?? ""}
+              origin={browserOrigin}
+              streams={remoteMicrophoneStreams}
+              states={remoteMicrophoneStates}
+              levels={remoteMicrophoneLevels}
+            />
+
             <DeveloperDialogueTopics
               slotStates={developerSlotStates}
               slotControl={developerSlotControl}
@@ -1395,6 +1510,136 @@ export default function SessionPage() {
       </section>
     </main>
   );
+}
+
+function RemoteMicrophonePanel(props: {
+  sessionId: string;
+  origin: string;
+  streams: RemoteMicrophoneStreams;
+  states: Record<SpeakerRole, RemoteMicrophoneState>;
+  levels: Record<SpeakerRole, number>;
+}) {
+  const caregiverUrl = buildRemoteMicrophoneUrl(
+    props.origin,
+    "caregiver",
+    props.sessionId,
+  );
+  const elderUrl = buildRemoteMicrophoneUrl(props.origin, "elder", props.sessionId);
+
+  return (
+    <aside className="rounded-md border border-stone-300 bg-white p-3 shadow-sm">
+      <div>
+        <div className="text-[11px] font-black uppercase tracking-[0.08em] text-stone-500">
+          Network Mic
+        </div>
+        <h2 className="mt-0.5 text-[14px] font-black leading-tight">
+          スマートフォンマイク
+        </h2>
+      </div>
+
+      <div className="mt-3 space-y-3">
+        <RemoteMicrophoneStatus
+          label="介護者マイク"
+          role="caregiver"
+          stream={props.streams.caregiver}
+          state={props.states.caregiver}
+          level={props.levels.caregiver}
+          url={caregiverUrl}
+        />
+        <RemoteMicrophoneStatus
+          label="高齢者マイク"
+          role="elder"
+          stream={props.streams.elder}
+          state={props.states.elder}
+          level={props.levels.elder}
+          url={elderUrl}
+        />
+      </div>
+    </aside>
+  );
+}
+
+function RemoteMicrophoneStatus(props: {
+  label: string;
+  role: SpeakerRole;
+  stream: MediaStream | null;
+  state: RemoteMicrophoneState;
+  level: number;
+  url: string;
+}) {
+  const track = props.stream?.getAudioTracks()[0] ?? null;
+  const inputActive = Boolean(track && track.readyState === "live" && props.level > 0.01);
+  const status = props.stream
+    ? inputActive
+      ? "接続済み・入力あり"
+      : "接続済み・待機中"
+    : remoteConnectionLabel(props.state);
+
+  return (
+    <div className="rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[12px] font-black text-stone-900">
+          {props.label}
+        </div>
+        <div
+          className={`rounded-full px-2 py-0.5 text-[10px] font-black ${
+            props.stream
+              ? "bg-emerald-100 text-emerald-900"
+              : "bg-stone-200 text-stone-600"
+          }`}
+        >
+          {status}
+        </div>
+      </div>
+      <div className="mt-2">
+        <div className="mb-1 flex items-center justify-between text-[10px] font-bold text-stone-500">
+          <span>入力音量</span>
+          <span>{Math.round(props.level * 100)}%</span>
+        </div>
+        <LevelBar value={props.level} tone={props.role === "caregiver" ? "sky" : "emerald"} />
+      </div>
+      <div className="mt-2 break-all rounded border border-stone-200 bg-white px-2 py-1 text-[10px] font-bold leading-snug text-stone-500">
+        {props.url || "セッション準備中"}
+      </div>
+      {props.state.error ? (
+        <p className="mt-2 text-[11px] font-bold text-red-700">
+          {props.state.error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function LevelBar(props: { value: number; tone: "emerald" | "sky" }) {
+  const width = `${Math.round(Math.min(1, Math.max(0, props.value)) * 100)}%`;
+
+  return (
+    <div className="h-2 overflow-hidden rounded-full bg-stone-100">
+      <div
+        className={`h-full ${props.tone === "sky" ? "bg-sky-600" : "bg-emerald-600"}`}
+        style={{ width }}
+      />
+    </div>
+  );
+}
+
+function buildRemoteMicrophoneUrl(
+  origin: string,
+  role: SpeakerRole,
+  sessionId: string,
+) {
+  if (!origin || !sessionId) return "";
+
+  return `${origin}/microphone/${role}?sessionId=${encodeURIComponent(sessionId)}`;
+}
+
+function remoteConnectionLabel(state: RemoteMicrophoneState) {
+  if (state.error) return "通信エラー";
+  if (state.connectionState === "connecting") return "接続中";
+  if (state.connectionState === "disconnected") return "切断";
+  if (state.connectionState === "failed") return "接続失敗";
+  if (state.connectionState === "closed") return "未接続";
+  return "未接続";
 }
 
 function DeveloperDialogueTopics(props: {
