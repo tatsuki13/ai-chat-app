@@ -12,24 +12,12 @@ type SessionInfo = {
   ended_at: string | null;
 };
 
-type PairingToken = {
-  role: "caregiver" | "elder";
-  token: string;
-  expiresAt: string;
-};
-
 const STORAGE_KEY = "acp-hitl-current-session-id";
 
 export default function Home() {
   const router = useRouter();
   const [participantCode, setParticipantCode] = useState("");
   const [session, setSession] = useState<SessionInfo | null>(null);
-  const [pairingTokens, setPairingTokens] = useState<
-    Record<"caregiver" | "elder", PairingToken | null>
-  >({
-    caregiver: null,
-    elder: null,
-  });
   const [origin, setOrigin] = useState("");
   const [microphoneBaseUrl, setMicrophoneBaseUrl] = useState("");
   const [busy, setBusy] = useState(false);
@@ -71,10 +59,8 @@ export default function Home() {
       }
 
       const data = (await response.json()) as { session: SessionInfo };
-      const tokens = await createPairingTokens(data.session.id);
       window.localStorage.setItem(STORAGE_KEY, data.session.id);
       setSession(data.session);
-      setPairingTokens(tokens);
     } catch (submitError) {
       setError(
         submitError instanceof Error
@@ -88,20 +74,10 @@ export default function Home() {
 
   const normalizedMicrophoneBaseUrl = normalizeBaseUrl(microphoneBaseUrl) || origin;
   const caregiverUrl = session
-    ? buildMicrophoneUrl(
-        normalizedMicrophoneBaseUrl,
-        "caregiver",
-        session.id,
-        pairingTokens.caregiver?.token ?? "",
-      )
+    ? buildMicrophoneUrl(normalizedMicrophoneBaseUrl, "caregiver", session.id)
     : "";
   const elderUrl = session
-    ? buildMicrophoneUrl(
-        normalizedMicrophoneBaseUrl,
-        "elder",
-        session.id,
-        pairingTokens.elder?.token ?? "",
-      )
+    ? buildMicrophoneUrl(normalizedMicrophoneBaseUrl, "elder", session.id)
     : "";
   const usingLocalhost =
     normalizedMicrophoneBaseUrl.includes("localhost") ||
@@ -198,13 +174,11 @@ export default function Home() {
                 <QrCard
                   title="介護者用マイク"
                   url={caregiverUrl}
-                  expiresAt={pairingTokens.caregiver?.expiresAt ?? ""}
                   tone="sky"
                 />
                 <QrCard
                   title="高齢者用マイク"
                   url={elderUrl}
-                  expiresAt={pairingTokens.elder?.expiresAt ?? ""}
                   tone="emerald"
                 />
               </div>
@@ -223,7 +197,6 @@ export default function Home() {
 function QrCard(props: {
   title: string;
   url: string;
-  expiresAt: string;
   tone: "sky" | "emerald";
 }) {
   return (
@@ -238,11 +211,6 @@ function QrCard(props: {
       <div className="mt-3 flex justify-center rounded-md border border-stone-200 bg-white p-3">
         <QrCanvas value={props.url} label={`${props.title} 接続QRコード`} />
       </div>
-      {props.expiresAt ? (
-        <div className="mt-2 text-[11px] font-bold text-stone-500">
-          有効期限: {formatDateTime(props.expiresAt)}
-        </div>
-      ) : null}
       <div className="mt-3 break-all rounded border border-stone-200 bg-white px-2 py-2 text-[11px] font-bold leading-snug text-stone-500">
         {props.url}
       </div>
@@ -280,35 +248,13 @@ function QrCanvas(props: { value: string; label: string }) {
   );
 }
 
-async function createPairingTokens(sessionId: string) {
-  const response = await fetch("/api/microphone/pairing", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId }),
-  });
-
-  if (!response.ok) {
-    throw new Error("マイク接続用トークンを作成できませんでした。");
-  }
-
-  const data = (await response.json()) as { tokens?: PairingToken[] };
-  const tokens = data.tokens ?? [];
-
-  return {
-    caregiver: tokens.find((token) => token.role === "caregiver") ?? null,
-    elder: tokens.find((token) => token.role === "elder") ?? null,
-  };
-}
-
 function buildMicrophoneUrl(
   baseUrl: string,
   role: "caregiver" | "elder",
   sessionId: string,
-  token: string,
 ) {
   const params = new URLSearchParams({
     sessionId,
-    token,
   });
 
   return `${normalizeBaseUrl(baseUrl)}/microphone/${role}?${params.toString()}`;
@@ -317,17 +263,6 @@ function buildMicrophoneUrl(
 function normalizeBaseUrl(value: string) {
   return value.trim().replace(/\/+$/, "");
 }
-
-function formatDateTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-
-  return new Intl.DateTimeFormat("ja-JP", {
-    dateStyle: "short",
-    timeStyle: "short",
-  }).format(date);
-}
-
 
 function toUserFacingError(error: string) {
   if (error === "participant_code already exists") {
