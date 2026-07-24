@@ -1,6 +1,14 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import {
+  FormEvent,
+  KeyboardEvent,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { useSearchParams } from "next/navigation";
 import {
   buildSlotControlDebugState,
   DISCUSSION_TOPIC,
@@ -128,6 +136,16 @@ function createOpeningPrompt(topic = DISCUSSION_TOPICS[0]): PromptPanelState {
 }
 
 export default function SessionPage() {
+  return (
+    <Suspense fallback={<SessionPageLoading />}>
+      <SessionPageClient />
+    </Suspense>
+  );
+}
+
+function SessionPageClient() {
+  const searchParams = useSearchParams();
+  const requestedSessionId = searchParams.get("sessionId")?.trim() ?? "";
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [utterances, setUtterances] = useState<Utterance[]>([]);
   const [utteranceTotal, setUtteranceTotal] = useState(0);
@@ -249,13 +267,14 @@ export default function SessionPage() {
 
     async function boot() {
       try {
-        const savedId = window.localStorage.getItem(STORAGE_KEY);
+        const savedId = requestedSessionId || window.localStorage.getItem(STORAGE_KEY);
 
         if (savedId) {
           try {
             const restored = await fetchSessionDetail(savedId);
 
             if (!ignore) {
+              window.localStorage.setItem(STORAGE_KEY, restored.session.id);
               setSession(restored.session);
               setUtterances(restored.utterances);
               setUtteranceTotal(restored.utterance_count);
@@ -298,7 +317,7 @@ export default function SessionPage() {
     return () => {
       ignore = true;
     };
-  }, []);
+  }, [requestedSessionId]);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -1506,6 +1525,18 @@ export default function SessionPage() {
               />
             </div>
           </div>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function SessionPageLoading() {
+  return (
+    <main className="min-h-screen bg-[#f7f4ec] px-4 py-5 text-stone-950">
+      <section className="mx-auto max-w-6xl rounded-md border border-stone-300 bg-white p-4 shadow-sm">
+        <div className="text-[13px] font-black text-stone-600">
+          セッションを準備しています
         </div>
       </section>
     </main>
