@@ -26,11 +26,14 @@ import {
 import {
   createInitialRemoteMicrophoneState,
   createRemoteMicrophoneReceiver,
-  createStreamLevelMeter,
   type RemoteMicrophoneState,
   type RemoteMicrophoneStreams,
   type SpeakerRole,
 } from "./remote-microphone-service";
+import {
+  startRemoteAudioInput,
+  type RemoteAudioChunk,
+} from "./remote-audio-input-service";
 
 type Speaker = "caregiver" | "elder";
 type SpeakerWithUnknown = Speaker | "unknown";
@@ -261,6 +264,9 @@ function SessionPageClient() {
     completionState === "active" &&
     !busyAction &&
     !transitionProposal;
+  const remoteMicrophoneConnected = Boolean(
+    remoteMicrophoneStreams.elder || remoteMicrophoneStreams.caregiver,
+  );
 
   useEffect(() => {
     let ignore = false;
@@ -419,11 +425,28 @@ function SessionPageClient() {
 
       try {
         stops.push(
-          createStreamLevelMeter(stream, (level) => {
-            setRemoteMicrophoneLevels((current) => ({
-              ...current,
-              [role]: level,
-            }));
+          startRemoteAudioInput({
+            role,
+            stream,
+            onChunk(chunk) {
+              void handleVoiceAudioChunk(chunk);
+            },
+            onLevel(nextRole, level) {
+              setRemoteMicrophoneLevels((current) => ({
+                ...current,
+                [nextRole]: level,
+              }));
+            },
+            onError(nextRole, error) {
+              console.warn(`${nextRole} remote audio input failed`, error);
+              setRemoteMicrophoneStates((current) => ({
+                ...current,
+                [nextRole]: {
+                  ...current[nextRole],
+                  error: "リモート音声入力を確認してください。",
+                },
+              }));
+            },
           }),
         );
       } catch (error) {
@@ -441,6 +464,12 @@ function SessionPageClient() {
       stops.forEach((stop) => stop());
     };
   }, [remoteMicrophoneStreams.caregiver, remoteMicrophoneStreams.elder]);
+
+  useEffect(() => {
+    if (!remoteMicrophoneConnected) return;
+
+    stopVoiceAudioInput();
+  }, [remoteMicrophoneConnected]);
 
   useEffect(() => {
     const service = createSingleMicInputService();
@@ -670,6 +699,7 @@ function SessionPageClient() {
 
   async function beginPushToTalk() {
     if (!sessionRef.current || busyAction === "start") return;
+    if (remoteMicrophoneConnected) return;
     if (!voiceInputServiceRef.current || pushToTalkStartingRef.current) return;
     if (pushToTalkActiveRef.current) return;
 
@@ -718,7 +748,7 @@ function SessionPageClient() {
     });
   }
 
-  async function handleVoiceAudioChunk(chunk: SingleMicAudioChunk) {
+  async function handleVoiceAudioChunk(chunk: SingleMicAudioChunk | RemoteAudioChunk) {
     const currentSession = sessionRef.current;
     if (!currentSession || chunk.blob.size < 512 || !sttEnabledRef.current) return;
 
@@ -1409,13 +1439,18 @@ function SessionPageClient() {
                   {audioInputError}
                 </p>
               ) : null}
+              {remoteMicrophoneConnected ? (
+                <p className="mb-2 rounded-md border border-emerald-100 bg-emerald-50 px-3 py-2 text-[12px] font-bold text-emerald-800">
+                  スマートフォンマイク接続中です。PCローカルマイクは停止しています。
+                </p>
+              ) : null}
               <div className="mb-2">
                 <select
                   value={selectedAudioDeviceId}
                   onChange={(event) => {
                     void handleAudioDeviceChange(event.target.value);
                   }}
-                  disabled={audioInputLoading}
+                  disabled={audioInputLoading || remoteMicrophoneConnected}
                   className="min-h-9 w-full rounded-md border border-stone-300 bg-white px-3 text-[12px] font-bold text-stone-700 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100 disabled:text-stone-400"
                 >
                   <option value="">既定のマイク</option>
@@ -1441,7 +1476,9 @@ function SessionPageClient() {
                 />
               </div>
               <p className="mt-1 text-[11px] font-bold text-stone-500">
-                {pushToTalkActive
+                {remoteMicrophoneConnected
+                  ? "本人用・介護者用スマートフォンの音声を自動で文字起こしします。"
+                  : pushToTalkActive
                   ? "録音中です。Spaceを離すと自動で追加されます。"
                   : "Spaceを押している間だけ、選択中の話者として録音します。手入力欄ではSpaceは通常入力・変換に使えます。"}
               </p>
@@ -2480,7 +2517,7 @@ async function deleteUtterance(utteranceId: string) {
 
 async function sendAudioChunkToStt(
   sessionId: string,
-  speaker: StereoSpeaker,
+  speaker: StereoSpeaker | Speaker,
   blob: Blob,
   mimeType: string,
   chunkNumber: number,
