@@ -1577,13 +1577,6 @@ function RemoteMicrophoneStatus(props: {
   const connected = props.roleStatus.status === "connected";
   const waiting = props.roleStatus.status === "waiting";
   const status = remoteMicStatusLabel(props.roleStatus.status);
-  /*
-  const legacyWebRtcStatus = props.stream
-    ? inputActive
-      ? "接続済み・入力あり"
-      : "接続済み・待機中"
-    : remoteConnectionLabel(props.state);
-  */
 
   return (
     <div className="rounded-md border border-stone-200 bg-stone-50 px-3 py-2">

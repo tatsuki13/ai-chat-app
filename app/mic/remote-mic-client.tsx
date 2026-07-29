@@ -15,6 +15,7 @@ const HEARTBEAT_MS = 15_000;
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const MIN_SEND_AVERAGE_LEVEL = 0.008;
 const MIN_SEND_PEAK_LEVEL = 0.03;
+const CLIENT_VERSION = "remote-mic-https-diagnostics-20260729";
 
 export default function RemoteMicClient() {
   const [remoteMic, setRemoteMic] = useState<RemoteMicSession | null>(null);
@@ -297,6 +298,7 @@ export default function RemoteMicClient() {
 
         <div className="mt-4 space-y-3">
           <StatusRow label="サーバー接続" value={serverLabel} />
+          <StatusRow label="画面版" value={CLIENT_VERSION} />
           <StatusRow label="表示URL" value={openUrlLabel} />
           <StatusRow label="ブラウザ" value={browserLabel} />
           <StatusRow label="安全判定" value={getSecureContextLabel(secureContext)} />
@@ -332,6 +334,17 @@ export default function RemoteMicClient() {
             HTTPSで開き直す
           </a>
         ) : null}
+        <button
+          type="button"
+          onClick={() => {
+            const url = new URL(window.location.href);
+            url.searchParams.set("v", String(Date.now()));
+            window.location.replace(url.toString());
+          }}
+          className="mt-2 min-h-10 w-full rounded-md border border-stone-300 bg-white px-3 text-[13px] font-black text-stone-700 active:scale-[0.99]"
+        >
+          画面を更新
+        </button>
 
         <div className="mt-4 grid grid-cols-2 gap-2">
           <button
