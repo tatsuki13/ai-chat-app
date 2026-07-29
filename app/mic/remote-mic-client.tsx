@@ -25,6 +25,7 @@ export default function RemoteMicClient() {
   const [level, setLevel] = useState(0);
   const [sequence, setSequence] = useState(0);
   const [lastSentAt, setLastSentAt] = useState("");
+  const [recorderLabel, setRecorderLabel] = useState("未確認");
   const [error, setError] = useState("");
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -113,17 +114,22 @@ export default function RemoteMicClient() {
         },
         video: false,
       });
-      const mimeType = getSupportedAudioMimeType();
+      const { recorder, mimeType } = createMediaRecorder(stream);
       mimeTypeRef.current = mimeType;
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       streamRef.current = stream;
       recorderRef.current = recorder;
-      levelStopRef.current = startLevelMeter(stream, (nextLevel) => {
-        setLevel(nextLevel);
-        chunkLevelRef.current.sum += nextLevel;
-        chunkLevelRef.current.count += 1;
-        chunkLevelRef.current.peak = Math.max(chunkLevelRef.current.peak, nextLevel);
-      });
+      setRecorderLabel(mimeType || "ブラウザー標準");
+      try {
+        levelStopRef.current = startLevelMeter(stream, (nextLevel) => {
+          setLevel(nextLevel);
+          chunkLevelRef.current.sum += nextLevel;
+          chunkLevelRef.current.count += 1;
+          chunkLevelRef.current.peak = Math.max(chunkLevelRef.current.peak, nextLevel);
+        });
+      } catch {
+        levelStopRef.current = null;
+        setLevel(0);
+      }
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
@@ -184,7 +190,7 @@ export default function RemoteMicClient() {
         blob,
         getAudioFileName(sentSequence, blob.type || mimeTypeRef.current),
       );
-      formData.append("client_chunk_id", crypto.randomUUID());
+      formData.append("client_chunk_id", createClientChunkId());
       formData.append("sequence", String(sentSequence));
       formData.append("captured_at", String(capturedAt));
       formData.append("duration_ms", String(Math.max(1, Date.now() - capturedAt)));
@@ -231,6 +237,7 @@ export default function RemoteMicClient() {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     mimeTypeRef.current = "";
+    setRecorderLabel("未確認");
     setLevel(0);
     setMicState("idle");
 
@@ -256,6 +263,7 @@ export default function RemoteMicClient() {
           <StatusRow label="サーバー接続" value={serverLabel} />
           <StatusRow label="HTTPS" value={secureContext ? "安全な接続" : "HTTPSが必要"} />
           <StatusRow label="マイクAPI" value={mediaSupported ? "利用可能" : "利用不可"} />
+          <StatusRow label="録音形式" value={recorderLabel} />
           <StatusRow label="マイク権限" value={permissionLabel} />
           <StatusRow label="音声送信" value={micState === "streaming" ? "送信中" : "停止中"} />
           <StatusRow label="最終送信" value={lastSentAt || "未送信"} />
@@ -328,7 +336,27 @@ function LevelBar(props: { value: number }) {
   );
 }
 
-function getSupportedAudioMimeType() {
+function createMediaRecorder(stream: MediaStream) {
+  for (const mimeType of getSupportedAudioMimeTypes()) {
+    try {
+      return {
+        recorder: new MediaRecorder(stream, { mimeType }),
+        mimeType,
+      };
+    } catch {}
+  }
+
+  try {
+    return {
+      recorder: new MediaRecorder(stream),
+      mimeType: "",
+    };
+  } catch {
+    throw new Error("このブラウザーでは録音を開始できません。Safariを最新版にするか、別のブラウザーで開いてください。");
+  }
+}
+
+function getSupportedAudioMimeTypes() {
   const candidates = [
     "audio/webm;codecs=opus",
     "audio/webm",
@@ -336,7 +364,9 @@ function getSupportedAudioMimeType() {
     "audio/mp4",
   ];
 
-  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
+  if (typeof MediaRecorder === "undefined") return [];
+
+  return candidates.filter((candidate) => MediaRecorder.isTypeSupported(candidate));
 }
 
 function getAudioFileName(sequence: number, mimeType: string) {
@@ -347,6 +377,15 @@ function getAudioFileName(sequence: number, mimeType: string) {
   if (normalized.includes("mpeg")) return `remote-mic-${sequence}.mp3`;
 
   return `remote-mic-${sequence}.webm`;
+}
+
+function createClientChunkId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+
+  const random = new Uint32Array(4);
+  crypto.getRandomValues(random);
+
+  return Array.from(random, (value) => value.toString(36)).join("-");
 }
 
 function startLevelMeter(stream: MediaStream, onLevel: (level: number) => void) {
