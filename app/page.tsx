@@ -250,7 +250,7 @@ export default function Home() {
               <div className="mt-4">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                   <p className="text-[12px] font-bold text-stone-500">
-                    QRコードは1回限り、短時間のみ有効です。URLは画面に表示しません。
+                    QRコードは1回限り、短時間のみ有効です。URLのトークン部分は表示しません。
                   </p>
                   <button
                     type="button"
@@ -327,6 +327,8 @@ function QrCard(props: {
             <QrCanvas value={props.qr.joinUrl} label={`${props.title} QRコード`} />
           </div>
           <div className="mt-3 rounded border border-stone-200 bg-white px-2 py-2 text-[11px] font-bold leading-snug text-stone-500">
+            接続先: {formatQrUrlPreview(props.qr.joinUrl)}
+            <br />
             有効期限: {formatDateTime(props.qr.expiresAt)}
           </div>
         </>
@@ -429,6 +431,16 @@ function formatDateTime(value: string) {
   if (Number.isNaN(date.getTime())) return "不明";
 
   return date.toLocaleString("ja-JP");
+}
+
+function formatQrUrlPreview(value: string) {
+  try {
+    const url = new URL(value);
+
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return "不明";
+  }
 }
 
 function toUserFacingError(message: string) {

@@ -26,6 +26,9 @@ export default function RemoteMicClient() {
   const [sequence, setSequence] = useState(0);
   const [lastSentAt, setLastSentAt] = useState("");
   const [recorderLabel, setRecorderLabel] = useState("未確認");
+  const [openUrlLabel, setOpenUrlLabel] = useState("確認中");
+  const [httpsUrl, setHttpsUrl] = useState("");
+  const [helpText, setHelpText] = useState("");
   const [error, setError] = useState("");
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -46,6 +49,25 @@ export default function RemoteMicClient() {
   useEffect(() => {
     setSecureContext(window.isSecureContext);
     setMediaSupported(Boolean(navigator.mediaDevices?.getUserMedia));
+    setOpenUrlLabel(`${window.location.protocol}//${window.location.host}`);
+    const maybeHttpsUrl = getHttpsUrl(window.location.href);
+    setHttpsUrl(maybeHttpsUrl);
+
+    if (!window.isSecureContext) {
+      setHelpText(
+        "この画面は安全なHTTPSページとして開かれていません。Safariで https:// から始まるTailscale URLを開いてください。",
+      );
+
+      if (maybeHttpsUrl) {
+        window.setTimeout(() => {
+          window.location.replace(maybeHttpsUrl);
+        }, 800);
+      }
+    } else if (!navigator.mediaDevices?.getUserMedia) {
+      setHelpText(
+        "このブラウザーではマイクAPIが見えていません。Safariで開き直すか、iOSのSafari設定でマイク権限を確認してください。",
+      );
+    }
 
     async function loadSession() {
       try {
@@ -261,6 +283,7 @@ export default function RemoteMicClient() {
 
         <div className="mt-4 space-y-3">
           <StatusRow label="サーバー接続" value={serverLabel} />
+          <StatusRow label="表示URL" value={openUrlLabel} />
           <StatusRow label="HTTPS" value={secureContext ? "安全な接続" : "HTTPSが必要"} />
           <StatusRow label="マイクAPI" value={mediaSupported ? "利用可能" : "利用不可"} />
           <StatusRow label="録音形式" value={recorderLabel} />
@@ -280,6 +303,19 @@ export default function RemoteMicClient() {
           <p className="mt-4 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[13px] font-bold text-red-700">
             {error}
           </p>
+        ) : null}
+        {helpText ? (
+          <p className="mt-3 rounded-md border border-amber-100 bg-amber-50 px-3 py-2 text-[13px] font-bold leading-relaxed text-amber-900">
+            {helpText}
+          </p>
+        ) : null}
+        {httpsUrl && !secureContext ? (
+          <a
+            href={httpsUrl}
+            className="mt-3 block min-h-10 rounded-md border border-amber-300 bg-white px-3 py-2 text-center text-[13px] font-black text-amber-900 active:scale-[0.99]"
+          >
+            HTTPSで開き直す
+          </a>
         ) : null}
 
         <div className="mt-4 grid grid-cols-2 gap-2">
@@ -386,6 +422,19 @@ function createClientChunkId() {
   crypto.getRandomValues(random);
 
   return Array.from(random, (value) => value.toString(36)).join("-");
+}
+
+function getHttpsUrl(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" || !url.hostname.endsWith(".ts.net")) return "";
+
+    url.protocol = "https:";
+
+    return url.toString();
+  } catch {
+    return "";
+  }
 }
 
 function startLevelMeter(stream: MediaStream, onLevel: (level: number) => void) {
