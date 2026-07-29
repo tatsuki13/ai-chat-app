@@ -12,14 +12,15 @@ export const runtime = "nodejs";
 const MAX_AUDIO_BYTES = 6 * 1024 * 1024;
 const MIN_AUDIO_BYTES = 512;
 const MAX_DURATION_MS = 15_000;
-const ALLOWED_AUDIO_TYPES = new Set([
+const ALLOWED_AUDIO_BASE_TYPES = new Set([
   "audio/webm",
-  "audio/webm;codecs=opus",
   "audio/ogg",
-  "audio/ogg;codecs=opus",
   "audio/mp4",
   "audio/mpeg",
   "audio/wav",
+  "audio/x-wav",
+  "audio/aac",
+  "audio/x-m4a",
 ]);
 
 export async function POST(request: Request) {
@@ -59,8 +60,30 @@ export async function POST(request: Request) {
       return NextResponse.json({ skipped: true });
     }
 
+    console.info("[remote-mic chunk received]", {
+      type: audio.type,
+      name: audio.name,
+      size: audio.size,
+      sequence,
+      durationMs,
+    });
+
     if (!isAllowedMime(audio.type)) {
-      return NextResponse.json({ error: "Unsupported audio type" }, { status: 415 });
+      console.warn("[remote-mic unsupported audio type]", {
+        type: audio.type,
+        normalizedType: normalizeAudioMimeType(audio.type),
+        name: audio.name,
+        size: audio.size,
+      });
+
+      return NextResponse.json(
+        {
+          error: "Unsupported audio type",
+          receivedType:
+            process.env.NODE_ENV === "production" ? undefined : audio.type,
+        },
+        { status: 415 },
+      );
     }
 
     if (isRemoteMicDedupEnabled()) {
@@ -173,5 +196,9 @@ function isSafeChunkId(value: string) {
 function isAllowedMime(value: string) {
   if (!value) return true;
 
-  return ALLOWED_AUDIO_TYPES.has(value.toLowerCase());
+  return ALLOWED_AUDIO_BASE_TYPES.has(normalizeAudioMimeType(value));
+}
+
+function normalizeAudioMimeType(value: string) {
+  return value.toLowerCase().split(";")[0].trim();
 }

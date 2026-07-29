@@ -222,11 +222,16 @@ export default function RemoteMicClient() {
     }
 
     try {
+      const actualType =
+        blob.type ||
+        recorderRef.current?.mimeType ||
+        mimeTypeRef.current ||
+        "application/octet-stream";
       const formData = new FormData();
       formData.append(
         "audio",
         blob,
-        getAudioFileName(sentSequence, blob.type || mimeTypeRef.current),
+        getAudioFileName(sentSequence, actualType),
       );
       formData.append("client_chunk_id", createClientChunkId());
       formData.append("sequence", String(sentSequence));
@@ -244,6 +249,12 @@ export default function RemoteMicClient() {
         const detail = await response.json().catch(() => null);
         const message =
           typeof detail?.error === "string" ? detail.error : "音声送信に失敗しました。";
+        if (response.status === 415) {
+          await stop(false);
+          throw new Error(
+            "この端末の録音形式にサーバーが対応していません。録音形式を確認して、もう一度開始してください。",
+          );
+        }
         throw new Error(`${message} (${response.status})`);
       }
 
@@ -421,6 +432,7 @@ function getSupportedAudioMimeTypes() {
     "audio/webm;codecs=opus",
     "audio/webm",
     "audio/ogg;codecs=opus",
+    "audio/mp4;codecs=mp4a.40.2",
     "audio/mp4",
   ];
 
@@ -430,13 +442,30 @@ function getSupportedAudioMimeTypes() {
 }
 
 function getAudioFileName(sequence: number, mimeType: string) {
-  const normalized = mimeType.toLowerCase();
-  if (normalized.includes("mp4")) return `remote-mic-${sequence}.mp4`;
-  if (normalized.includes("ogg")) return `remote-mic-${sequence}.ogg`;
-  if (normalized.includes("wav")) return `remote-mic-${sequence}.wav`;
-  if (normalized.includes("mpeg")) return `remote-mic-${sequence}.mp3`;
+  const extension = extensionForMimeType(mimeType);
 
-  return `remote-mic-${sequence}.webm`;
+  return `remote-mic-${sequence}.${extension}`;
+}
+
+function extensionForMimeType(value: string) {
+  const type = value.toLowerCase().split(";")[0].trim();
+
+  switch (type) {
+    case "audio/mp4":
+    case "audio/x-m4a":
+      return "m4a";
+    case "audio/ogg":
+      return "ogg";
+    case "audio/wav":
+    case "audio/x-wav":
+      return "wav";
+    case "audio/mpeg":
+      return "mp3";
+    case "audio/aac":
+      return "aac";
+    default:
+      return "webm";
+  }
 }
 
 function createClientChunkId() {
