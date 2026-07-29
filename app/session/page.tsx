@@ -45,6 +45,25 @@ type RemoteMicQrInfo = {
   joinUrl: string;
   expiresAt: string;
 };
+type RemoteMicConnectionStatus =
+  | "not-issued"
+  | "waiting"
+  | "connected"
+  | "disconnected"
+  | "expired"
+  | "revoked";
+type RemoteMicRoleStatus = {
+  status: RemoteMicConnectionStatus;
+  expiresAt?: string;
+  usedAt?: string | null;
+  revokedAt?: string | null;
+  lastHeartbeatAt?: string | null;
+  disconnectedAt?: string | null;
+};
+type RemoteMicStatusResponse = {
+  now: string;
+  roles: Record<SpeakerRole, RemoteMicRoleStatus>;
+};
 
 type SessionInfo = {
   id: string;
@@ -1618,6 +1637,10 @@ function RemoteMicrophonePanel(props: {
     caregiver: null,
     elder: null,
   });
+  const [roleStatuses, setRoleStatuses] = useState<Record<SpeakerRole, RemoteMicRoleStatus>>({
+    caregiver: { status: "not-issued" },
+    elder: { status: "not-issued" },
+  });
   const [qrLoading, setQrLoading] = useState(false);
   const [qrError, setQrError] = useState("");
 
@@ -1625,6 +1648,19 @@ function RemoteMicrophonePanel(props: {
     if (!props.sessionId) return;
 
     void issueQrCodes();
+    void refreshRemoteMicStatus();
+  }, [props.sessionId]);
+
+  useEffect(() => {
+    if (!props.sessionId) return;
+
+    const timerId = window.setInterval(() => {
+      void refreshRemoteMicStatus();
+    }, 3000);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
   }, [props.sessionId]);
 
   async function issueQrCodes() {
@@ -1639,6 +1675,7 @@ function RemoteMicrophonePanel(props: {
       ]);
 
       setQrCodes({ caregiver, elder });
+      void refreshRemoteMicStatus();
     } catch (error) {
       setQrCodes({ caregiver: null, elder: null });
       setQrError(
@@ -1649,6 +1686,15 @@ function RemoteMicrophonePanel(props: {
     } finally {
       setQrLoading(false);
     }
+  }
+
+  async function refreshRemoteMicStatus() {
+    if (!props.sessionId) return;
+
+    try {
+      const status = await fetchRemoteMicStatus(props.sessionId);
+      setRoleStatuses(status.roles);
+    } catch {}
   }
 
   return (
@@ -1670,6 +1716,7 @@ function RemoteMicrophonePanel(props: {
           state={props.states.caregiver}
           level={props.levels.caregiver}
           qr={qrCodes.caregiver}
+          roleStatus={roleStatuses.caregiver}
         />
         <RemoteMicrophoneStatus
           label="高齢者マイク"
@@ -1678,6 +1725,7 @@ function RemoteMicrophonePanel(props: {
           state={props.states.elder}
           level={props.levels.elder}
           qr={qrCodes.elder}
+          roleStatus={roleStatuses.elder}
         />
       </div>
     </aside>
@@ -1691,14 +1739,18 @@ function RemoteMicrophoneStatus(props: {
   state: RemoteMicrophoneState;
   level: number;
   qr: RemoteMicQrInfo | null;
+  roleStatus: RemoteMicRoleStatus;
 }) {
-  const track = props.stream?.getAudioTracks()[0] ?? null;
-  const inputActive = Boolean(track && track.readyState === "live" && props.level > 0.01);
-  const status = props.stream
+  const connected = props.roleStatus.status === "connected";
+  const waiting = props.roleStatus.status === "waiting";
+  const status = remoteMicStatusLabel(props.roleStatus.status);
+  /*
+  const legacyWebRtcStatus = props.stream
     ? inputActive
       ? "接続済み・入力あり"
       : "接続済み・待機中"
     : remoteConnectionLabel(props.state);
+  */
 
   return (
     <div className="rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
@@ -1708,9 +1760,11 @@ function RemoteMicrophoneStatus(props: {
         </div>
         <div
           className={`rounded-full px-2 py-0.5 text-[10px] font-black ${
-            props.stream
+            connected
               ? "bg-emerald-100 text-emerald-900"
-              : "bg-stone-200 text-stone-600"
+              : waiting
+                ? "bg-amber-100 text-amber-900"
+                : "bg-stone-200 text-stone-600"
           }`}
         >
           {status}
@@ -1719,9 +1773,8 @@ function RemoteMicrophoneStatus(props: {
       <div className="mt-2">
         <div className="mb-1 flex items-center justify-between text-[10px] font-bold text-stone-500">
           <span>入力音量</span>
-          <span>{Math.round(props.level * 100)}%</span>
+          <span>{props.roleStatus.lastHeartbeatAt ? formatDateTime(props.roleStatus.lastHeartbeatAt) : "-"}</span>
         </div>
-        <LevelBar value={props.level} tone={props.role === "caregiver" ? "sky" : "emerald"} />
       </div>
       <div className="mt-2 rounded border border-stone-200 bg-white px-2 py-2 text-[10px] font-bold leading-snug text-stone-500">
         {props.qr ? (
@@ -1740,6 +1793,24 @@ function RemoteMicrophoneStatus(props: {
       ) : null}
     </div>
   );
+}
+
+function remoteMicStatusLabel(status: RemoteMicConnectionStatus) {
+  switch (status) {
+    case "waiting":
+      return "QR待機中";
+    case "connected":
+      return "接続済み";
+    case "disconnected":
+      return "切断";
+    case "expired":
+      return "期限切れ";
+    case "revoked":
+      return "解除済み";
+    case "not-issued":
+    default:
+      return "未発行";
+  }
 }
 
 function QrCanvas(props: { value: string; label: string; size: number }) {
@@ -1790,6 +1861,19 @@ async function issueRemoteMicToken(sessionId: string, role: SpeakerRole) {
   }
 
   return (await response.json()) as RemoteMicQrInfo;
+}
+
+async function fetchRemoteMicStatus(sessionId: string) {
+  const params = new URLSearchParams({ sessionId });
+  const response = await fetch(`/api/remote-mic/status?${params.toString()}`, {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Remote microphone status failed: ${response.status}`);
+  }
+
+  return (await response.json()) as RemoteMicStatusResponse;
 }
 
 function LevelBar(props: { value: number; tone: "emerald" | "sky" }) {

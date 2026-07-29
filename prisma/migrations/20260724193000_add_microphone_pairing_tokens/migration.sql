@@ -1,0 +1,2 @@
+-- No-op migration.
+-- The abandoned microphone_pairing_tokens design was removed before use.
