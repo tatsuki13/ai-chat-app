@@ -12,6 +12,7 @@ type MicState = "idle" | "requesting" | "streaming" | "stopped";
 
 const CHUNK_MS = 2000;
 const HEARTBEAT_MS = 15_000;
+const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const MIN_SEND_AVERAGE_LEVEL = 0.008;
 const MIN_SEND_PEAK_LEVEL = 0.03;
 
@@ -27,6 +28,7 @@ export default function RemoteMicClient() {
   const [lastSentAt, setLastSentAt] = useState("");
   const [recorderLabel, setRecorderLabel] = useState("未確認");
   const [openUrlLabel, setOpenUrlLabel] = useState("確認中");
+  const [browserLabel, setBrowserLabel] = useState("確認中");
   const [httpsUrl, setHttpsUrl] = useState("");
   const [helpText, setHelpText] = useState("");
   const [error, setError] = useState("");
@@ -47,32 +49,40 @@ export default function RemoteMicClient() {
   const canStart = Boolean(remoteMic) && micState === "idle";
 
   useEffect(() => {
-    setSecureContext(window.isSecureContext);
-    setMediaSupported(Boolean(navigator.mediaDevices?.getUserMedia));
+    const nextSecureContext = window.isSecureContext;
+    const nextMediaSupported = Boolean(navigator.mediaDevices?.getUserMedia);
+
+    setSecureContext(nextSecureContext);
+    setMediaSupported(nextMediaSupported);
     setOpenUrlLabel(`${window.location.protocol}//${window.location.host}`);
+    setBrowserLabel(getBrowserLabel(navigator.userAgent));
     const maybeHttpsUrl = getHttpsUrl(window.location.href);
     setHttpsUrl(maybeHttpsUrl);
 
-    if (!window.isSecureContext) {
-      setHelpText(
-        "この画面は安全なHTTPSページとして開かれていません。Safariで https:// から始まるTailscale URLを開いてください。",
-      );
+    if (!nextSecureContext) {
+      setHelpText(getInsecureContextHelp());
 
       if (maybeHttpsUrl) {
         window.setTimeout(() => {
           window.location.replace(maybeHttpsUrl);
         }, 800);
       }
-    } else if (!navigator.mediaDevices?.getUserMedia) {
+    } else if (!nextMediaSupported) {
       setHelpText(
-        "このブラウザーではマイクAPIが見えていません。Safariで開き直すか、iOSのSafari設定でマイク権限を確認してください。",
+        "HTTPSとしては開けていますが、マイクAPIが見えていません。QR読み取り後のカメラ内ブラウザではなく、右下の「…」からSafariで開いてください。",
       );
     }
 
     async function loadSession() {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => {
+        controller.abort();
+      }, SESSION_CHECK_TIMEOUT_MS);
+
       try {
         const response = await fetch("/api/remote-mic/session", {
           cache: "no-store",
+          signal: controller.signal,
         });
 
         if (!response.ok) {
@@ -85,10 +95,14 @@ export default function RemoteMicClient() {
       } catch (loadError) {
         setServerLabel("未接続");
         setError(
-          loadError instanceof Error
+          loadError instanceof DOMException && loadError.name === "AbortError"
+            ? "サーバー接続確認がタイムアウトしました。Tailscale接続とSafariで開いているかを確認してください。"
+            : loadError instanceof Error
             ? loadError.message
             : "マイク接続を確認できませんでした。",
         );
+      } finally {
+        window.clearTimeout(timeoutId);
       }
     }
 
@@ -284,8 +298,9 @@ export default function RemoteMicClient() {
         <div className="mt-4 space-y-3">
           <StatusRow label="サーバー接続" value={serverLabel} />
           <StatusRow label="表示URL" value={openUrlLabel} />
-          <StatusRow label="HTTPS" value={secureContext ? "安全な接続" : "HTTPSが必要"} />
-          <StatusRow label="マイクAPI" value={mediaSupported ? "利用可能" : "利用不可"} />
+          <StatusRow label="ブラウザ" value={browserLabel} />
+          <StatusRow label="安全判定" value={getSecureContextLabel(secureContext)} />
+          <StatusRow label="マイクAPI" value={getMediaSupportLabel(mediaSupported, secureContext)} />
           <StatusRow label="録音形式" value={recorderLabel} />
           <StatusRow label="マイク権限" value={permissionLabel} />
           <StatusRow label="音声送信" value={micState === "streaming" ? "送信中" : "停止中"} />
@@ -435,6 +450,39 @@ function getHttpsUrl(value: string) {
   } catch {
     return "";
   }
+}
+
+function getSecureContextLabel(value: boolean) {
+  if (value) return "安全な接続";
+  if (typeof window !== "undefined" && window.location.protocol === "https:") {
+    return "HTTPSだが安全判定なし";
+  }
+
+  return "HTTPSが必要";
+}
+
+function getMediaSupportLabel(mediaSupported: boolean, secureContext: boolean) {
+  if (mediaSupported) return "利用可能";
+  if (secureContext) return "利用不可/Safariで開く";
+
+  return "利用不可/安全判定待ち";
+}
+
+function getInsecureContextHelp() {
+  if (typeof window !== "undefined" && window.location.protocol === "https:") {
+    return "URLはhttpsですが、この表示環境は安全なページとして扱われていません。QR読み取り後のカメラ内ブラウザではなく、右下の「…」からSafariで開いてください。";
+  }
+
+  return "この画面はHTTPSで開かれていません。Safariで https:// から始まるTailscale URLを開いてください。";
+}
+
+function getBrowserLabel(userAgent: string) {
+  if (/CriOS/i.test(userAgent)) return "Chrome/iOS";
+  if (/FxiOS/i.test(userAgent)) return "Firefox/iOS";
+  if (/EdgiOS/i.test(userAgent)) return "Edge/iOS";
+  if (/Safari/i.test(userAgent) && /Mobile/i.test(userAgent)) return "Safari系";
+
+  return "不明";
 }
 
 function startLevelMeter(stream: MediaStream, onLevel: (level: number) => void) {
