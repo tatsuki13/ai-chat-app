@@ -64,10 +64,10 @@ export default function Home() {
     remoteMicStatuses.elder.status === "connected";
 
   useEffect(() => {
-    if (!session?.id) return;
+    if (!session?.id || bothMicsConnected) return;
 
     void issueRemoteMicQrCodes(session.id);
-  }, [session?.id]);
+  }, [bothMicsConnected, session?.id]);
 
   useEffect(() => {
     if (!session?.id) return;

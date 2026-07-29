@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { prisma } from "../prisma";
 import {
   REMOTE_MIC_COOKIE_NAME,
+  getRemoteMicSessionTtlSeconds,
   getRemoteMicTokenTtlSeconds,
   isRemoteMicEnabled,
   parseRemoteMicRole,
@@ -10,7 +11,6 @@ import {
 } from "./config";
 
 const TOKEN_BYTES = 32;
-const COOKIE_MAX_AGE_SECONDS = 15 * 60;
 
 export type RemoteMicSession = {
   tokenId: string;
@@ -103,6 +103,9 @@ export async function exchangeRemoteMicJoinToken(token: string) {
     throw new RemoteMicError("Invalid join token role", 401);
   }
 
+  const sessionExpiresAt = new Date(
+    now.getTime() + getRemoteMicSessionTtlSeconds() * 1000,
+  );
   const updated = await prisma.remoteMicJoinToken.updateMany({
     where: {
       id: record.id,
@@ -114,6 +117,7 @@ export async function exchangeRemoteMicJoinToken(token: string) {
       usedAt: now,
       lastHeartbeatAt: now,
       disconnectedAt: null,
+      expiresAt: sessionExpiresAt,
     },
   });
 
@@ -125,7 +129,7 @@ export async function exchangeRemoteMicJoinToken(token: string) {
     tokenId: record.id,
     sessionId: record.sessionId,
     role,
-    expiresAt: record.expiresAt,
+    expiresAt: sessionExpiresAt,
   };
 }
 
@@ -183,10 +187,7 @@ export async function setRemoteMicCookie(session: RemoteMicSession) {
     secure: true,
     sameSite: "strict",
     path: "/",
-    maxAge: Math.min(
-      COOKIE_MAX_AGE_SECONDS,
-      Math.max(1, Math.floor((session.expiresAt.getTime() - Date.now()) / 1000)),
-    ),
+    maxAge: Math.max(1, Math.floor((session.expiresAt.getTime() - Date.now()) / 1000)),
   });
 }
 
@@ -196,17 +197,26 @@ export async function clearRemoteMicCookie() {
 }
 
 export async function heartbeatRemoteMic(session: RemoteMicSession) {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + getRemoteMicSessionTtlSeconds() * 1000);
+
   await prisma.remoteMicJoinToken.updateMany({
     where: {
       id: session.tokenId,
       revokedAt: null,
-      expiresAt: { gt: new Date() },
+      expiresAt: { gt: now },
     },
     data: {
-      lastHeartbeatAt: new Date(),
+      lastHeartbeatAt: now,
       disconnectedAt: null,
+      expiresAt,
     },
   });
+
+  return {
+    ...session,
+    expiresAt,
+  };
 }
 
 export async function revokeRemoteMicSession(session: RemoteMicSession) {

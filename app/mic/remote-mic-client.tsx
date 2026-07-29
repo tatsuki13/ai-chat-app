@@ -11,6 +11,9 @@ type RemoteMicSession = {
 type MicState = "idle" | "requesting" | "streaming" | "stopped";
 
 const CHUNK_MS = 2000;
+const HEARTBEAT_MS = 15_000;
+const MIN_SEND_AVERAGE_LEVEL = 0.008;
+const MIN_SEND_PEAK_LEVEL = 0.03;
 
 export default function RemoteMicClient() {
   const [remoteMic, setRemoteMic] = useState<RemoteMicSession | null>(null);
@@ -27,6 +30,8 @@ export default function RemoteMicClient() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const levelStopRef = useRef<(() => void) | null>(null);
   const startedAtRef = useRef(0);
+  const sequenceRef = useRef(0);
+  const mimeTypeRef = useRef("");
   const chunkLevelRef = useRef({ sum: 0, count: 0, peak: 0 });
   const sendingRef = useRef(false);
 
@@ -78,7 +83,7 @@ export default function RemoteMicClient() {
       void fetch("/api/remote-mic/heartbeat", { method: "POST" }).catch(() => {
         setServerLabel("通信が不安定です");
       });
-    }, 5000);
+    }, HEARTBEAT_MS);
 
     return () => {
       window.clearInterval(timerId);
@@ -109,6 +114,7 @@ export default function RemoteMicClient() {
         video: false,
       });
       const mimeType = getSupportedAudioMimeType();
+      mimeTypeRef.current = mimeType;
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       streamRef.current = stream;
       recorderRef.current = recorder;
@@ -151,7 +157,8 @@ export default function RemoteMicClient() {
     if (sendingRef.current) return;
     sendingRef.current = true;
 
-    const sentSequence = sequence + 1;
+    const sentSequence = sequenceRef.current + 1;
+    sequenceRef.current = sentSequence;
     const capturedAt = startedAtRef.current || Date.now();
     const levels = chunkLevelRef.current;
     const averageLevel = levels.count > 0 ? levels.sum / levels.count : 0;
@@ -161,9 +168,22 @@ export default function RemoteMicClient() {
     startedAtRef.current = Date.now();
     setSequence(sentSequence);
 
+    if (
+      levels.count > 0 &&
+      averageLevel < MIN_SEND_AVERAGE_LEVEL &&
+      peakLevel < MIN_SEND_PEAK_LEVEL
+    ) {
+      sendingRef.current = false;
+      return;
+    }
+
     try {
       const formData = new FormData();
-      formData.append("audio", blob, `remote-mic-${sentSequence}.webm`);
+      formData.append(
+        "audio",
+        blob,
+        getAudioFileName(sentSequence, blob.type || mimeTypeRef.current),
+      );
       formData.append("client_chunk_id", crypto.randomUUID());
       formData.append("sequence", String(sentSequence));
       formData.append("captured_at", String(capturedAt));
@@ -177,7 +197,10 @@ export default function RemoteMicClient() {
       });
 
       if (!response.ok) {
-        throw new Error("音声送信に失敗しました。PCとの接続を確認してください。");
+        const detail = await response.json().catch(() => null);
+        const message =
+          typeof detail?.error === "string" ? detail.error : "音声送信に失敗しました。";
+        throw new Error(`${message} (${response.status})`);
       }
 
       setLastSentAt(new Date().toLocaleTimeString("ja-JP"));
@@ -207,6 +230,7 @@ export default function RemoteMicClient() {
     levelStopRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+    mimeTypeRef.current = "";
     setLevel(0);
     setMicState("idle");
 
@@ -313,6 +337,16 @@ function getSupportedAudioMimeType() {
   ];
 
   return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
+}
+
+function getAudioFileName(sequence: number, mimeType: string) {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes("mp4")) return `remote-mic-${sequence}.mp4`;
+  if (normalized.includes("ogg")) return `remote-mic-${sequence}.ogg`;
+  if (normalized.includes("wav")) return `remote-mic-${sequence}.wav`;
+  if (normalized.includes("mpeg")) return `remote-mic-${sequence}.mp3`;
+
+  return `remote-mic-${sequence}.webm`;
 }
 
 function startLevelMeter(stream: MediaStream, onLevel: (level: number) => void) {

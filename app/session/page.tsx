@@ -137,6 +137,8 @@ const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const EXTENSION_STEP_MS = 2 * 60 * 1000;
 const TIMER_TICK_MS = 1000;
 const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
+const REMOTE_MIC_STATUS_POLL_MS = 10_000;
+const REMOTE_MIC_SESSION_SYNC_MS = 5_000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
 
@@ -325,7 +327,7 @@ function SessionPageClient() {
   }, [session]);
 
   useEffect(() => {
-    if (!session?.id || session.ended_at) return;
+    if (!session?.id || session.ended_at || !remoteMicrophoneConnected) return;
 
     const timerId = window.setInterval(() => {
       void fetchSessionDetail(session.id)
@@ -338,12 +340,12 @@ function SessionPageClient() {
           setUtteranceTotal(detail.utterance_count);
         })
         .catch(() => {});
-    }, 2500);
+    }, REMOTE_MIC_SESSION_SYNC_MS);
 
     return () => {
       window.clearInterval(timerId);
     };
-  }, [session?.id, session?.ended_at]);
+  }, [remoteMicrophoneConnected, session?.id, session?.ended_at]);
 
   useEffect(() => {
     promptPanelRef.current = promptPanel;
@@ -416,7 +418,7 @@ function SessionPageClient() {
     void refresh();
     const timerId = window.setInterval(() => {
       void refresh();
-    }, 3000);
+    }, REMOTE_MIC_STATUS_POLL_MS);
 
     return () => {
       ignore = true;

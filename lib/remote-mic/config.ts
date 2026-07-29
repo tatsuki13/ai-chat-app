@@ -12,6 +12,12 @@ export function getRemoteMicTokenTtlSeconds() {
   return Number.isFinite(value) ? Math.max(60, Math.min(900, value)) : 300;
 }
 
+export function getRemoteMicSessionTtlSeconds() {
+  const value = Number(process.env.REMOTE_MIC_SESSION_TTL_SECONDS ?? 14_400);
+
+  return Number.isFinite(value) ? Math.max(300, Math.min(28_800, value)) : 14_400;
+}
+
 export function shouldStoreRawRemoteMicAudio() {
   return process.env.REMOTE_MIC_STORE_RAW_AUDIO === "true";
 }

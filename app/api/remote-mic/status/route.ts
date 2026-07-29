@@ -25,7 +25,7 @@ type RemoteMicTokenStatusRow = {
   createdAt: Date;
 };
 
-const HEARTBEAT_STALE_MS = 15_000;
+const HEARTBEAT_STALE_MS = 45_000;
 
 export async function GET(request: Request) {
   if (!isRemoteMicEnabled()) {
