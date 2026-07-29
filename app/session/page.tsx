@@ -9,7 +9,6 @@ import {
   useState,
 } from "react";
 import { useSearchParams } from "next/navigation";
-import QRCode from "qrcode";
 import {
   buildSlotControlDebugState,
   DISCUSSION_TOPIC,
@@ -24,27 +23,13 @@ import {
   type SingleMicInputService,
   type StereoSpeaker,
 } from "./audio-input-service";
-import {
-  createInitialRemoteMicrophoneState,
-  createRemoteMicrophoneReceiver,
-  type RemoteMicrophoneState,
-  type RemoteMicrophoneStreams,
-  type SpeakerRole,
-} from "./remote-microphone-service";
-import {
-  startRemoteAudioInput,
-  type RemoteAudioChunk,
-} from "./remote-audio-input-service";
 
 type Speaker = "caregiver" | "elder";
+type SpeakerRole = Speaker;
 type SpeakerWithUnknown = Speaker | "unknown";
 type ButtonType = "next_question" | "switch_topic" | "check_end" | "update_slots";
 type PromptTone = "question" | "switch" | "end" | "status" | "error";
 
-type RemoteMicQrInfo = {
-  joinUrl: string;
-  expiresAt: string;
-};
 type RemoteMicConnectionStatus =
   | "not-issued"
   | "waiting"
@@ -212,24 +197,12 @@ function SessionPageClient() {
   const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState("");
   const [audioInputLoading, setAudioInputLoading] = useState(false);
   const [pushToTalkActive, setPushToTalkActive] = useState(false);
-  const [remoteMicrophoneStreams, setRemoteMicrophoneStreams] =
-    useState<RemoteMicrophoneStreams>({
-      caregiver: null,
-      elder: null,
-    });
-  const [remoteMicrophoneStates, setRemoteMicrophoneStates] = useState<
-    Record<SpeakerRole, RemoteMicrophoneState>
+  const [remoteMicStatuses, setRemoteMicStatuses] = useState<
+    Record<SpeakerRole, RemoteMicRoleStatus>
   >({
-    caregiver: createInitialRemoteMicrophoneState(),
-    elder: createInitialRemoteMicrophoneState(),
+    caregiver: { status: "not-issued" },
+    elder: { status: "not-issued" },
   });
-  const [remoteMicrophoneLevels, setRemoteMicrophoneLevels] = useState<
-    Record<SpeakerRole, number>
-  >({
-    caregiver: 0,
-    elder: 0,
-  });
-  const [browserOrigin, setBrowserOrigin] = useState("");
   const [developerSlotStates, setDeveloperSlotStates] = useState<SlotState[]>([]);
   const [developerSlotControl, setDeveloperSlotControl] =
     useState<SlotControlDebugState | null>(null);
@@ -253,9 +226,6 @@ function SessionPageClient() {
   const timerRunningRef = useRef(false);
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
-  const remoteMicrophoneReceiverRef = useRef<ReturnType<
-    typeof createRemoteMicrophoneReceiver
-  > | null>(null);
 
   const participantCode = session?.participant_code || "未設定";
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
@@ -289,9 +259,9 @@ function SessionPageClient() {
     completionState === "active" &&
     !busyAction &&
     !transitionProposal;
-  const remoteMicrophoneConnected = Boolean(
-    remoteMicrophoneStreams.elder || remoteMicrophoneStreams.caregiver,
-  );
+  const remoteMicrophoneConnected =
+    remoteMicStatuses.elder.status === "connected" ||
+    remoteMicStatuses.caregiver.status === "connected";
 
   useEffect(() => {
     let ignore = false;
@@ -417,99 +387,42 @@ function SessionPageClient() {
   }, []);
 
   useEffect(() => {
-    setBrowserOrigin(window.location.origin);
-  }, []);
+    if (!session?.id || session.ended_at) {
+      setRemoteMicStatuses({
+        caregiver: { status: "not-issued" },
+        elder: { status: "not-issued" },
+      });
+      return;
+    }
 
-  useEffect(() => {
-    remoteMicrophoneReceiverRef.current?.stop();
-    remoteMicrophoneReceiverRef.current = null;
-    setRemoteMicrophoneStreams({ caregiver: null, elder: null });
-    setRemoteMicrophoneLevels({ caregiver: 0, elder: 0 });
-    setRemoteMicrophoneStates({
-      caregiver: createInitialRemoteMicrophoneState(),
-      elder: createInitialRemoteMicrophoneState(),
-    });
+    let ignore = false;
 
-    if (!session?.id || session.ended_at) return;
+    async function refresh() {
+      try {
+        const status = await fetchRemoteMicStatus(session.id);
+        if (!ignore) {
+          setRemoteMicStatuses(status.roles);
+        }
+      } catch {
+        if (!ignore) {
+          setRemoteMicStatuses({
+            caregiver: { status: "disconnected" },
+            elder: { status: "disconnected" },
+          });
+        }
+      }
+    }
 
-    const receiver = createRemoteMicrophoneReceiver({
-      sessionId: session.id,
-      onStream(role, stream) {
-        setRemoteMicrophoneStreams((current) => ({
-          ...current,
-          [role]: stream,
-        }));
-      },
-      onState(role, state) {
-        setRemoteMicrophoneStates((current) => ({
-          ...current,
-          [role]: state,
-        }));
-      },
-    });
-
-    remoteMicrophoneReceiverRef.current = receiver;
-    receiver.start();
+    void refresh();
+    const timerId = window.setInterval(() => {
+      void refresh();
+    }, 3000);
 
     return () => {
-      receiver.stop();
-      if (remoteMicrophoneReceiverRef.current === receiver) {
-        remoteMicrophoneReceiverRef.current = null;
-      }
+      ignore = true;
+      window.clearInterval(timerId);
     };
   }, [session?.id, session?.ended_at]);
-
-  useEffect(() => {
-    const stops: Array<() => void> = [];
-
-    (["caregiver", "elder"] as SpeakerRole[]).forEach((role) => {
-      const stream = remoteMicrophoneStreams[role];
-      if (!stream) {
-        setRemoteMicrophoneLevels((current) => ({ ...current, [role]: 0 }));
-        return;
-      }
-
-      try {
-        stops.push(
-          startRemoteAudioInput({
-            role,
-            stream,
-            onChunk(chunk) {
-              void handleVoiceAudioChunk(chunk);
-            },
-            onLevel(nextRole, level) {
-              setRemoteMicrophoneLevels((current) => ({
-                ...current,
-                [nextRole]: level,
-              }));
-            },
-            onError(nextRole, error) {
-              console.warn(`${nextRole} remote audio input failed`, error);
-              setRemoteMicrophoneStates((current) => ({
-                ...current,
-                [nextRole]: {
-                  ...current[nextRole],
-                  error: "リモート音声入力を確認してください。",
-                },
-              }));
-            },
-          }),
-        );
-      } catch (error) {
-        setRemoteMicrophoneStates((current) => ({
-          ...current,
-          [role]: {
-            ...current[role],
-            error: error instanceof Error ? error.message : "音量監視エラー",
-          },
-        }));
-      }
-    });
-
-    return () => {
-      stops.forEach((stop) => stop());
-    };
-  }, [remoteMicrophoneStreams.caregiver, remoteMicrophoneStreams.elder]);
 
   useEffect(() => {
     if (!remoteMicrophoneConnected) return;
@@ -794,7 +707,7 @@ function SessionPageClient() {
     });
   }
 
-  async function handleVoiceAudioChunk(chunk: SingleMicAudioChunk | RemoteAudioChunk) {
+  async function handleVoiceAudioChunk(chunk: SingleMicAudioChunk) {
     const currentSession = sessionRef.current;
     if (!currentSession || chunk.blob.size < 512 || !sttEnabledRef.current) return;
 
@@ -1560,10 +1473,7 @@ function SessionPageClient() {
           <div className="space-y-3">
             <RemoteMicrophonePanel
               sessionId={session?.id ?? ""}
-              origin={browserOrigin}
-              streams={remoteMicrophoneStreams}
-              states={remoteMicrophoneStates}
-              levels={remoteMicrophoneLevels}
+              statuses={remoteMicStatuses}
             />
 
             <DeveloperDialogueTopics
@@ -1628,75 +1538,8 @@ function SessionPageLoading() {
 
 function RemoteMicrophonePanel(props: {
   sessionId: string;
-  origin: string;
-  streams: RemoteMicrophoneStreams;
-  states: Record<SpeakerRole, RemoteMicrophoneState>;
-  levels: Record<SpeakerRole, number>;
+  statuses: Record<SpeakerRole, RemoteMicRoleStatus>;
 }) {
-  const [qrCodes, setQrCodes] = useState<Record<SpeakerRole, RemoteMicQrInfo | null>>({
-    caregiver: null,
-    elder: null,
-  });
-  const [roleStatuses, setRoleStatuses] = useState<Record<SpeakerRole, RemoteMicRoleStatus>>({
-    caregiver: { status: "not-issued" },
-    elder: { status: "not-issued" },
-  });
-  const [qrLoading, setQrLoading] = useState(false);
-  const [qrError, setQrError] = useState("");
-
-  useEffect(() => {
-    if (!props.sessionId) return;
-
-    void issueQrCodes();
-    void refreshRemoteMicStatus();
-  }, [props.sessionId]);
-
-  useEffect(() => {
-    if (!props.sessionId) return;
-
-    const timerId = window.setInterval(() => {
-      void refreshRemoteMicStatus();
-    }, 3000);
-
-    return () => {
-      window.clearInterval(timerId);
-    };
-  }, [props.sessionId]);
-
-  async function issueQrCodes() {
-    if (!props.sessionId) return;
-    setQrLoading(true);
-    setQrError("");
-
-    try {
-      const [caregiver, elder] = await Promise.all([
-        issueRemoteMicToken(props.sessionId, "caregiver"),
-        issueRemoteMicToken(props.sessionId, "elder"),
-      ]);
-
-      setQrCodes({ caregiver, elder });
-      void refreshRemoteMicStatus();
-    } catch (error) {
-      setQrCodes({ caregiver: null, elder: null });
-      setQrError(
-        error instanceof Error
-          ? error.message
-          : "スマートフォンマイク用QRを発行できませんでした。",
-      );
-    } finally {
-      setQrLoading(false);
-    }
-  }
-
-  async function refreshRemoteMicStatus() {
-    if (!props.sessionId) return;
-
-    try {
-      const status = await fetchRemoteMicStatus(props.sessionId);
-      setRoleStatuses(status.roles);
-    } catch {}
-  }
-
   return (
     <aside className="rounded-md border border-stone-300 bg-white p-3 shadow-sm">
       <div>
@@ -1712,20 +1555,12 @@ function RemoteMicrophonePanel(props: {
         <RemoteMicrophoneStatus
           label="介護者マイク"
           role="caregiver"
-          stream={props.streams.caregiver}
-          state={props.states.caregiver}
-          level={props.levels.caregiver}
-          qr={qrCodes.caregiver}
-          roleStatus={roleStatuses.caregiver}
+          roleStatus={props.statuses.caregiver}
         />
         <RemoteMicrophoneStatus
           label="高齢者マイク"
           role="elder"
-          stream={props.streams.elder}
-          state={props.states.elder}
-          level={props.levels.elder}
-          qr={qrCodes.elder}
-          roleStatus={roleStatuses.elder}
+          roleStatus={props.statuses.elder}
         />
       </div>
     </aside>
@@ -1735,10 +1570,6 @@ function RemoteMicrophonePanel(props: {
 function RemoteMicrophoneStatus(props: {
   label: string;
   role: SpeakerRole;
-  stream: MediaStream | null;
-  state: RemoteMicrophoneState;
-  level: number;
-  qr: RemoteMicQrInfo | null;
   roleStatus: RemoteMicRoleStatus;
 }) {
   const connected = props.roleStatus.status === "connected";
@@ -1776,21 +1607,6 @@ function RemoteMicrophoneStatus(props: {
           <span>{props.roleStatus.lastHeartbeatAt ? formatDateTime(props.roleStatus.lastHeartbeatAt) : "-"}</span>
         </div>
       </div>
-      <div className="mt-2 rounded border border-stone-200 bg-white px-2 py-2 text-[10px] font-bold leading-snug text-stone-500">
-        {props.qr ? (
-          <>
-            <QrCanvas value={props.qr.joinUrl} label={`${props.label} QRコード`} size={140} />
-            <span className="mt-1 block">有効期限: {formatDateTime(props.qr.expiresAt)}</span>
-          </>
-        ) : (
-          "QR未発行"
-        )}
-      </div>
-      {props.state.error ? (
-        <p className="mt-2 text-[11px] font-bold text-red-700">
-          {props.state.error}
-        </p>
-      ) : null}
     </div>
   );
 }
@@ -1811,56 +1627,6 @@ function remoteMicStatusLabel(status: RemoteMicConnectionStatus) {
     default:
       return "未発行";
   }
-}
-
-function QrCanvas(props: { value: string; label: string; size: number }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    void QRCode.toCanvas(canvas, props.value, {
-      errorCorrectionLevel: "M",
-      margin: 2,
-      width: props.size,
-      color: {
-        dark: "#111827",
-        light: "#ffffff",
-      },
-    });
-  }, [props.size, props.value]);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      width={props.size}
-      height={props.size}
-      aria-label={props.label}
-      role="img"
-      className="mx-auto block"
-      style={{ width: props.size, height: props.size }}
-    />
-  );
-}
-
-async function issueRemoteMicToken(sessionId: string, role: SpeakerRole) {
-  const response = await fetch("/api/remote-mic/tokens", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, role }),
-  });
-
-  if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    const message =
-      body && typeof body.error === "string"
-        ? body.error
-        : "スマートフォンマイク用QRを発行できませんでした。";
-    throw new Error(message);
-  }
-
-  return (await response.json()) as RemoteMicQrInfo;
 }
 
 async function fetchRemoteMicStatus(sessionId: string) {
@@ -1887,15 +1653,6 @@ function LevelBar(props: { value: number; tone: "emerald" | "sky" }) {
       />
     </div>
   );
-}
-
-function remoteConnectionLabel(state: RemoteMicrophoneState) {
-  if (state.error) return "通信エラー";
-  if (state.connectionState === "connecting") return "接続中";
-  if (state.connectionState === "disconnected") return "切断";
-  if (state.connectionState === "failed") return "接続失敗";
-  if (state.connectionState === "closed") return "未接続";
-  return "未接続";
 }
 
 function DeveloperDialogueTopics(props: {

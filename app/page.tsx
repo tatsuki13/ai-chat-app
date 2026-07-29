@@ -18,6 +18,25 @@ type RemoteMicQrInfo = {
   expiresAt: string;
 };
 type RemoteMicQrState = Record<RemoteMicRole, RemoteMicQrInfo | null>;
+type RemoteMicConnectionStatus =
+  | "not-issued"
+  | "waiting"
+  | "connected"
+  | "disconnected"
+  | "expired"
+  | "revoked";
+type RemoteMicRoleStatus = {
+  status: RemoteMicConnectionStatus;
+  expiresAt?: string;
+  usedAt?: string | null;
+  revokedAt?: string | null;
+  lastHeartbeatAt?: string | null;
+  disconnectedAt?: string | null;
+};
+type RemoteMicStatusResponse = {
+  now: string;
+  roles: Record<RemoteMicRole, RemoteMicRoleStatus>;
+};
 
 const STORAGE_KEY = "acp-hitl-current-session-id";
 
@@ -29,15 +48,54 @@ export default function Home() {
     caregiver: null,
     elder: null,
   });
+  const [remoteMicStatuses, setRemoteMicStatuses] = useState<
+    Record<RemoteMicRole, RemoteMicRoleStatus>
+  >({
+    caregiver: { status: "not-issued" },
+    elder: { status: "not-issued" },
+  });
   const [remoteMicQrLoading, setRemoteMicQrLoading] = useState(false);
   const [remoteMicQrError, setRemoteMicQrError] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  const bothMicsConnected =
+    remoteMicStatuses.caregiver.status === "connected" &&
+    remoteMicStatuses.elder.status === "connected";
+
   useEffect(() => {
     if (!session?.id) return;
 
     void issueRemoteMicQrCodes(session.id);
+  }, [session?.id]);
+
+  useEffect(() => {
+    if (!session?.id) return;
+
+    let ignore = false;
+
+    async function refresh() {
+      try {
+        const status = await fetchRemoteMicStatus(session.id);
+        if (!ignore) {
+          setRemoteMicStatuses(status.roles);
+        }
+      } catch {
+        if (!ignore) {
+          setRemoteMicQrError("スマートフォンマイクの接続状態を確認できませんでした。");
+        }
+      }
+    }
+
+    void refresh();
+    const timerId = window.setInterval(() => {
+      void refresh();
+    }, 3000);
+
+    return () => {
+      ignore = true;
+      window.clearInterval(timerId);
+    };
   }, [session?.id]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -95,6 +153,8 @@ export default function Home() {
       ]);
 
       setRemoteMicQr({ caregiver, elder });
+      const status = await fetchRemoteMicStatus(sessionId);
+      setRemoteMicStatuses(status.roles);
     } catch (qrError) {
       setRemoteMicQr({ caregiver: null, elder: null });
       setRemoteMicQrError(
@@ -105,6 +165,12 @@ export default function Home() {
     } finally {
       setRemoteMicQrLoading(false);
     }
+  }
+
+  function goToSession() {
+    if (!session || !bothMicsConnected) return;
+
+    router.push(`/session?sessionId=${encodeURIComponent(session.id)}`);
   }
 
   return (
@@ -149,15 +215,19 @@ export default function Home() {
               {busy ? "作成中" : session ? "セッション作成済み" : "マイク登録へ進む"}
             </button>
             {session ? (
-              <button
-                type="button"
-                onClick={() => {
-                  router.push(`/session?sessionId=${encodeURIComponent(session.id)}`);
-                }}
-                className="mt-2 min-h-11 w-full rounded-md border border-emerald-700 bg-emerald-50 px-3 text-[14px] font-black text-emerald-900 shadow-sm active:scale-[0.99]"
-              >
-                次へ進む
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={goToSession}
+                  disabled={!bothMicsConnected}
+                  className="mt-2 min-h-11 w-full rounded-md border border-emerald-700 bg-emerald-50 px-3 text-[14px] font-black text-emerald-900 shadow-sm active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
+                >
+                  {bothMicsConnected ? "対話画面へ進む" : "2台の接続を待っています"}
+                </button>
+                <p className="mt-2 text-[11px] font-bold text-stone-500">
+                  本人用・介護者用の両方が接続済みになると進めます。
+                </p>
+              </>
             ) : null}
           </form>
 
@@ -200,11 +270,13 @@ export default function Home() {
                   <QrCard
                     title="介護者用マイク"
                     qr={remoteMicQr.caregiver}
+                    status={remoteMicStatuses.caregiver}
                     tone="sky"
                   />
                   <QrCard
                     title="本人用マイク"
                     qr={remoteMicQr.elder}
+                    status={remoteMicStatuses.elder}
                     tone="emerald"
                   />
                 </div>
@@ -224,18 +296,32 @@ export default function Home() {
 function QrCard(props: {
   title: string;
   qr: RemoteMicQrInfo | null;
+  status: RemoteMicRoleStatus;
   tone: "sky" | "emerald";
 }) {
+  const connected = props.status.status === "connected";
+
   return (
     <article className="rounded-md border border-stone-200 bg-stone-50 p-3">
-      <div
-        className={`text-[14px] font-black ${
-          props.tone === "sky" ? "text-sky-800" : "text-emerald-800"
-        }`}
-      >
-        {props.title}
+      <div className="flex items-center justify-between gap-2">
+        <div
+          className={`text-[14px] font-black ${
+            props.tone === "sky" ? "text-sky-800" : "text-emerald-800"
+          }`}
+        >
+          {props.title}
+        </div>
+        <div
+          className={`rounded-full px-2 py-0.5 text-[10px] font-black ${
+            connected
+              ? "bg-emerald-100 text-emerald-900"
+              : "bg-stone-200 text-stone-600"
+          }`}
+        >
+          {remoteMicStatusLabel(props.status.status)}
+        </div>
       </div>
-      {props.qr ? (
+      {props.qr && !connected ? (
         <>
           <div className="mt-3 flex justify-center rounded-md border border-stone-200 bg-white p-3">
             <QrCanvas value={props.qr.joinUrl} label={`${props.title} QRコード`} />
@@ -246,9 +332,14 @@ function QrCard(props: {
         </>
       ) : (
         <div className="mt-3 flex min-h-[250px] items-center justify-center rounded-md border border-dashed border-stone-300 bg-white px-3 text-center text-[12px] font-bold text-stone-500">
-          QRコード未発行
+          {connected ? "接続済みです" : "QRコード未発行"}
         </div>
       )}
+      {props.status.lastHeartbeatAt ? (
+        <p className="mt-2 text-[11px] font-bold text-stone-500">
+          最終通信: {formatDateTime(props.status.lastHeartbeatAt)}
+        </p>
+      ) : null}
     </article>
   );
 }
@@ -283,10 +374,7 @@ function QrCanvas(props: { value: string; label: string }) {
   );
 }
 
-async function issueRemoteMicToken(
-  sessionId: string,
-  role: RemoteMicRole,
-) {
+async function issueRemoteMicToken(sessionId: string, role: RemoteMicRole) {
   const response = await fetch("/api/remote-mic/tokens", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -303,6 +391,37 @@ async function issueRemoteMicToken(
   }
 
   return (await response.json()) as RemoteMicQrInfo;
+}
+
+async function fetchRemoteMicStatus(sessionId: string) {
+  const params = new URLSearchParams({ sessionId });
+  const response = await fetch(`/api/remote-mic/status?${params.toString()}`, {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Remote microphone status failed: ${response.status}`);
+  }
+
+  return (await response.json()) as RemoteMicStatusResponse;
+}
+
+function remoteMicStatusLabel(status: RemoteMicConnectionStatus) {
+  switch (status) {
+    case "waiting":
+      return "QR待機中";
+    case "connected":
+      return "接続済み";
+    case "disconnected":
+      return "切断";
+    case "expired":
+      return "期限切れ";
+    case "revoked":
+      return "解除済み";
+    case "not-issued":
+    default:
+      return "未発行";
+  }
 }
 
 function formatDateTime(value: string) {
