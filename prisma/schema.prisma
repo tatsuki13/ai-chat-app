@@ -7,16 +7,17 @@ datasource db {
 }
 
 model Session {
-  id              String             @id @default(cuid())
-  participantCode String?            @map("participant_code")
+  id              String               @id @default(cuid())
+  participantCode String?              @map("participant_code")
   condition       String?
-  startedAt       DateTime           @default(now()) @map("started_at")
-  endedAt         DateTime?          @map("ended_at")
+  startedAt       DateTime             @default(now()) @map("started_at")
+  endedAt         DateTime?            @map("ended_at")
   finalMinutes    FinalMinute[]
-  subSlotStates    SlotSubState[]
+  subSlotStates   SlotSubState[]
   slotStates      SlotState[]
   utterances      SessionUtterance[]
   webRtcSignals   WebRtcSignal[]
+  remoteMicTokens RemoteMicJoinToken[]
 
   @@index([startedAt])
   @@index([participantCode])
@@ -38,6 +39,47 @@ model WebRtcSignal {
   @@index([sessionId, role, recipient, createdAt])
   @@index([expiresAt])
   @@map("web_rtc_signals")
+}
+
+model RemoteMicJoinToken {
+  id              String                @id @default(cuid())
+  tokenHash       String                @unique @map("token_hash")
+  sessionId       String                @map("session_id")
+  role            String
+  expiresAt       DateTime              @map("expires_at")
+  usedAt          DateTime?             @map("used_at")
+  revokedAt       DateTime?             @map("revoked_at")
+  lastHeartbeatAt DateTime?             @map("last_heartbeat_at")
+  disconnectedAt  DateTime?             @map("disconnected_at")
+  createdAt       DateTime              @default(now()) @map("created_at")
+  chunks          RemoteMicAudioChunk[]
+  session         Session               @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, role, revokedAt, expiresAt])
+  @@index([expiresAt])
+  @@map("remote_mic_join_tokens")
+}
+
+model RemoteMicAudioChunk {
+  id               String             @id @default(cuid())
+  remoteMicTokenId String             @map("remote_mic_token_id")
+  sessionId        String             @map("session_id")
+  role             String
+  clientChunkId    String             @map("client_chunk_id")
+  sequence         Int
+  capturedAt       DateTime           @map("captured_at")
+  durationMs       Int                @map("duration_ms")
+  averageLevel     Float?             @map("average_level")
+  peakLevel        Float?             @map("peak_level")
+  utteranceId      String?            @map("utterance_id")
+  skipped          Boolean            @default(false)
+  createdAt        DateTime           @default(now()) @map("created_at")
+  remoteMicToken   RemoteMicJoinToken @relation(fields: [remoteMicTokenId], references: [id], onDelete: Cascade)
+
+  @@unique([remoteMicTokenId, clientChunkId])
+  @@index([sessionId, role, capturedAt])
+  @@index([createdAt])
+  @@map("remote_mic_audio_chunks")
 }
 
 model SessionUtterance {

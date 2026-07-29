@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { useSearchParams } from "next/navigation";
+import QRCode from "qrcode";
 import {
   buildSlotControlDebugState,
   DISCUSSION_TOPIC,
@@ -39,6 +40,11 @@ type Speaker = "caregiver" | "elder";
 type SpeakerWithUnknown = Speaker | "unknown";
 type ButtonType = "next_question" | "switch_topic" | "check_end" | "update_slots";
 type PromptTone = "question" | "switch" | "end" | "status" | "error";
+
+type RemoteMicQrInfo = {
+  joinUrl: string;
+  expiresAt: string;
+};
 
 type SessionInfo = {
   id: string;
@@ -328,6 +334,27 @@ function SessionPageClient() {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    if (!session?.id || session.ended_at) return;
+
+    const timerId = window.setInterval(() => {
+      void fetchSessionDetail(session.id)
+        .then((detail) => {
+          setUtterances((current) =>
+            mergeUtterances(current, detail.utterances).slice(
+              -MAX_RENDERED_UTTERANCES,
+            ),
+          );
+          setUtteranceTotal(detail.utterance_count);
+        })
+        .catch(() => {});
+    }, 2500);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [session?.id, session?.ended_at]);
 
   useEffect(() => {
     promptPanelRef.current = promptPanel;
@@ -1587,12 +1614,42 @@ function RemoteMicrophonePanel(props: {
   states: Record<SpeakerRole, RemoteMicrophoneState>;
   levels: Record<SpeakerRole, number>;
 }) {
-  const caregiverUrl = buildRemoteMicrophoneUrl(
-    props.origin,
-    "caregiver",
-    props.sessionId,
-  );
-  const elderUrl = buildRemoteMicrophoneUrl(props.origin, "elder", props.sessionId);
+  const [qrCodes, setQrCodes] = useState<Record<SpeakerRole, RemoteMicQrInfo | null>>({
+    caregiver: null,
+    elder: null,
+  });
+  const [qrLoading, setQrLoading] = useState(false);
+  const [qrError, setQrError] = useState("");
+
+  useEffect(() => {
+    if (!props.sessionId) return;
+
+    void issueQrCodes();
+  }, [props.sessionId]);
+
+  async function issueQrCodes() {
+    if (!props.sessionId) return;
+    setQrLoading(true);
+    setQrError("");
+
+    try {
+      const [caregiver, elder] = await Promise.all([
+        issueRemoteMicToken(props.sessionId, "caregiver"),
+        issueRemoteMicToken(props.sessionId, "elder"),
+      ]);
+
+      setQrCodes({ caregiver, elder });
+    } catch (error) {
+      setQrCodes({ caregiver: null, elder: null });
+      setQrError(
+        error instanceof Error
+          ? error.message
+          : "スマートフォンマイク用QRを発行できませんでした。",
+      );
+    } finally {
+      setQrLoading(false);
+    }
+  }
 
   return (
     <aside className="rounded-md border border-stone-300 bg-white p-3 shadow-sm">
@@ -1612,7 +1669,7 @@ function RemoteMicrophonePanel(props: {
           stream={props.streams.caregiver}
           state={props.states.caregiver}
           level={props.levels.caregiver}
-          url={caregiverUrl}
+          qr={qrCodes.caregiver}
         />
         <RemoteMicrophoneStatus
           label="高齢者マイク"
@@ -1620,7 +1677,7 @@ function RemoteMicrophonePanel(props: {
           stream={props.streams.elder}
           state={props.states.elder}
           level={props.levels.elder}
-          url={elderUrl}
+          qr={qrCodes.elder}
         />
       </div>
     </aside>
@@ -1633,7 +1690,7 @@ function RemoteMicrophoneStatus(props: {
   stream: MediaStream | null;
   state: RemoteMicrophoneState;
   level: number;
-  url: string;
+  qr: RemoteMicQrInfo | null;
 }) {
   const track = props.stream?.getAudioTracks()[0] ?? null;
   const inputActive = Boolean(track && track.readyState === "live" && props.level > 0.01);
@@ -1666,8 +1723,15 @@ function RemoteMicrophoneStatus(props: {
         </div>
         <LevelBar value={props.level} tone={props.role === "caregiver" ? "sky" : "emerald"} />
       </div>
-      <div className="mt-2 break-all rounded border border-stone-200 bg-white px-2 py-1 text-[10px] font-bold leading-snug text-stone-500">
-        {props.url || "セッション準備中"}
+      <div className="mt-2 rounded border border-stone-200 bg-white px-2 py-2 text-[10px] font-bold leading-snug text-stone-500">
+        {props.qr ? (
+          <>
+            <QrCanvas value={props.qr.joinUrl} label={`${props.label} QRコード`} size={140} />
+            <span className="mt-1 block">有効期限: {formatDateTime(props.qr.expiresAt)}</span>
+          </>
+        ) : (
+          "QR未発行"
+        )}
       </div>
       {props.state.error ? (
         <p className="mt-2 text-[11px] font-bold text-red-700">
@@ -1676,6 +1740,56 @@ function RemoteMicrophoneStatus(props: {
       ) : null}
     </div>
   );
+}
+
+function QrCanvas(props: { value: string; label: string; size: number }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    void QRCode.toCanvas(canvas, props.value, {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      width: props.size,
+      color: {
+        dark: "#111827",
+        light: "#ffffff",
+      },
+    });
+  }, [props.size, props.value]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={props.size}
+      height={props.size}
+      aria-label={props.label}
+      role="img"
+      className="mx-auto block"
+      style={{ width: props.size, height: props.size }}
+    />
+  );
+}
+
+async function issueRemoteMicToken(sessionId: string, role: SpeakerRole) {
+  const response = await fetch("/api/remote-mic/tokens", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId, role }),
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const message =
+      body && typeof body.error === "string"
+        ? body.error
+        : "スマートフォンマイク用QRを発行できませんでした。";
+    throw new Error(message);
+  }
+
+  return (await response.json()) as RemoteMicQrInfo;
 }
 
 function LevelBar(props: { value: number; tone: "emerald" | "sky" }) {
@@ -1689,16 +1803,6 @@ function LevelBar(props: { value: number; tone: "emerald" | "sky" }) {
       />
     </div>
   );
-}
-
-function buildRemoteMicrophoneUrl(
-  origin: string,
-  role: SpeakerRole,
-  sessionId: string,
-) {
-  if (!origin || !sessionId) return "";
-
-  return `${origin}/microphone/${role}?sessionId=${encodeURIComponent(sessionId)}`;
 }
 
 function remoteConnectionLabel(state: RemoteMicrophoneState) {
@@ -2693,6 +2797,19 @@ function compareUtterancesByTime(left: Utterance, right: Utterance) {
   return (
     new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
   );
+}
+
+function mergeUtterances(current: Utterance[], incoming: Utterance[]) {
+  const byId = new Map<string, Utterance>();
+
+  for (const utterance of current) {
+    byId.set(utterance.id, utterance);
+  }
+  for (const utterance of incoming) {
+    byId.set(utterance.id, utterance);
+  }
+
+  return Array.from(byId.values()).sort(compareUtterancesByTime);
 }
 
 function getTransitionProposalReason(input: {

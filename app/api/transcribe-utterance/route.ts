@@ -1,7 +1,7 @@
-import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { prisma } from "../../../lib/prisma";
 import { normalizeConversationSpeaker } from "../../../lib/acp-mvp";
+import { transcribeAudioFile } from "../../../lib/server/transcription/transcribe-audio";
 
 export const runtime = "nodejs";
 
@@ -40,9 +40,7 @@ export async function POST(request: Request) {
       });
     }
 
-    const transcript = normalizeTranscript(
-      await transcribeAudio(apiKey, audio),
-    );
+    const transcript = await transcribeAudioFile(audio);
 
     if (!transcript) {
       return NextResponse.json({
@@ -79,34 +77,6 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
-}
-
-async function transcribeAudio(apiKey: string, audio: File) {
-  const openai = new OpenAI({
-    apiKey,
-    timeout: Number(process.env.OPENAI_TIMEOUT_MS || 20000),
-  });
-  const transcription = await openai.audio.transcriptions.create({
-    file: audio,
-    model: process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe",
-    language: "ja",
-    prompt:
-      "Japanese ACP conversation. Transcribe only spoken words and ignore silence or device noise.",
-  });
-
-  if (
-    typeof transcription === "object" &&
-    transcription !== null &&
-    "text" in transcription
-  ) {
-    return String(transcription.text ?? "");
-  }
-
-  return String(transcription ?? "");
-}
-
-function normalizeTranscript(value: string) {
-  return value.replace(/\s+/g, " ").trim();
 }
 
 function requiredString(value: FormDataEntryValue | null) {

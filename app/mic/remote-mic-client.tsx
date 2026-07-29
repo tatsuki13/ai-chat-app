@@ -1,0 +1,378 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+
+type RemoteMicRole = "elder" | "caregiver";
+type RemoteMicSession = {
+  sessionId: string;
+  role: RemoteMicRole;
+  expiresAt: string;
+};
+type MicState = "idle" | "requesting" | "streaming" | "stopped";
+
+const CHUNK_MS = 2000;
+
+export default function RemoteMicClient() {
+  const [remoteMic, setRemoteMic] = useState<RemoteMicSession | null>(null);
+  const [micState, setMicState] = useState<MicState>("idle");
+  const [secureContext, setSecureContext] = useState(false);
+  const [mediaSupported, setMediaSupported] = useState(false);
+  const [permissionLabel, setPermissionLabel] = useState("未確認");
+  const [serverLabel, setServerLabel] = useState("確認中");
+  const [level, setLevel] = useState(0);
+  const [sequence, setSequence] = useState(0);
+  const [lastSentAt, setLastSentAt] = useState("");
+  const [error, setError] = useState("");
+  const streamRef = useRef<MediaStream | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const levelStopRef = useRef<(() => void) | null>(null);
+  const startedAtRef = useRef(0);
+  const chunkLevelRef = useRef({ sum: 0, count: 0, peak: 0 });
+  const sendingRef = useRef(false);
+
+  const roleLabel = useMemo(() => {
+    if (remoteMic?.role === "elder") return "本人用マイク";
+    if (remoteMic?.role === "caregiver") return "介護者用マイク";
+    return "スマートフォンマイク";
+  }, [remoteMic?.role]);
+  const canStart = Boolean(remoteMic) && micState === "idle";
+
+  useEffect(() => {
+    setSecureContext(window.isSecureContext);
+    setMediaSupported(Boolean(navigator.mediaDevices?.getUserMedia));
+
+    async function loadSession() {
+      try {
+        const response = await fetch("/api/remote-mic/session", {
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          throw new Error("認証情報を確認できません。PC画面から新しいQRコードを発行してください。");
+        }
+
+        const data = (await response.json()) as { remoteMic: RemoteMicSession };
+        setRemoteMic(data.remoteMic);
+        setServerLabel("接続準備完了");
+      } catch (loadError) {
+        setServerLabel("未接続");
+        setError(
+          loadError instanceof Error
+            ? loadError.message
+            : "マイク接続を確認できませんでした。",
+        );
+      }
+    }
+
+    void loadSession();
+
+    return () => {
+      void stop(false);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!remoteMic || micState !== "streaming") return;
+
+    const timerId = window.setInterval(() => {
+      void fetch("/api/remote-mic/heartbeat", { method: "POST" }).catch(() => {
+        setServerLabel("通信が不安定です");
+      });
+    }, 5000);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [remoteMic, micState]);
+
+  async function start() {
+    if (!canStart || !remoteMic) return;
+
+    setError("");
+    setPermissionLabel("確認中");
+    setMicState("requesting");
+
+    try {
+      if (!window.isSecureContext) {
+        throw new Error("HTTPSで接続してください。Tailscale ServeのHTTPS URLから開いてください。");
+      }
+      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+        throw new Error("このブラウザーではマイク録音を利用できません。");
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+      const mimeType = getSupportedAudioMimeType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      streamRef.current = stream;
+      recorderRef.current = recorder;
+      levelStopRef.current = startLevelMeter(stream, (nextLevel) => {
+        setLevel(nextLevel);
+        chunkLevelRef.current.sum += nextLevel;
+        chunkLevelRef.current.count += 1;
+        chunkLevelRef.current.peak = Math.max(chunkLevelRef.current.peak, nextLevel);
+      });
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          void sendChunk(event.data);
+        }
+      };
+      recorder.onerror = () => {
+        setError("録音中にエラーが発生しました。");
+      };
+
+      startedAtRef.current = Date.now();
+      chunkLevelRef.current = { sum: 0, count: 0, peak: 0 };
+      recorder.start(CHUNK_MS);
+      setPermissionLabel("許可済み");
+      setMicState("streaming");
+      setServerLabel("音声送信中");
+    } catch (startError) {
+      if (isPermissionError(startError)) {
+        setPermissionLabel("拒否");
+      }
+      setError(
+        startError instanceof Error
+          ? startError.message
+          : "マイクを開始できませんでした。",
+      );
+      await stop(false);
+    }
+  }
+
+  async function sendChunk(blob: Blob) {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+
+    const sentSequence = sequence + 1;
+    const capturedAt = startedAtRef.current || Date.now();
+    const levels = chunkLevelRef.current;
+    const averageLevel = levels.count > 0 ? levels.sum / levels.count : 0;
+    const peakLevel = levels.peak;
+
+    chunkLevelRef.current = { sum: 0, count: 0, peak: 0 };
+    startedAtRef.current = Date.now();
+    setSequence(sentSequence);
+
+    try {
+      const formData = new FormData();
+      formData.append("audio", blob, `remote-mic-${sentSequence}.webm`);
+      formData.append("client_chunk_id", crypto.randomUUID());
+      formData.append("sequence", String(sentSequence));
+      formData.append("captured_at", String(capturedAt));
+      formData.append("duration_ms", String(Math.max(1, Date.now() - capturedAt)));
+      formData.append("average_level", String(averageLevel));
+      formData.append("peak_level", String(peakLevel));
+
+      const response = await fetch("/api/remote-mic/chunks", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error("音声送信に失敗しました。PCとの接続を確認してください。");
+      }
+
+      setLastSentAt(new Date().toLocaleTimeString("ja-JP"));
+      setServerLabel("音声送信中");
+    } catch (sendError) {
+      setServerLabel("通信エラー");
+      setError(
+        sendError instanceof Error
+          ? sendError.message
+          : "音声送信に失敗しました。",
+      );
+    } finally {
+      sendingRef.current = false;
+    }
+  }
+
+  async function stop(notifyServer = true) {
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    if (recorder && recorder.state !== "inactive") {
+      try {
+        recorder.stop();
+      } catch {}
+    }
+
+    levelStopRef.current?.();
+    levelStopRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    setLevel(0);
+    setMicState("idle");
+
+    if (notifyServer) {
+      await fetch("/api/remote-mic/disconnect", { method: "POST" }).catch(() => {});
+      setServerLabel("停止中");
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-[#f7f4ec] px-4 py-5 text-stone-950">
+      <section className="mx-auto max-w-md rounded-md border border-stone-300 bg-white p-4 shadow-sm">
+        <div className="border-b border-stone-200 pb-3">
+          <div className="text-[12px] font-black uppercase tracking-[0.08em] text-stone-500">
+            Remote microphone
+          </div>
+          <h1 className="mt-1 text-[22px] font-black leading-tight">
+            {roleLabel}
+          </h1>
+        </div>
+
+        <div className="mt-4 space-y-3">
+          <StatusRow label="サーバー接続" value={serverLabel} />
+          <StatusRow label="HTTPS" value={secureContext ? "安全な接続" : "HTTPSが必要"} />
+          <StatusRow label="マイクAPI" value={mediaSupported ? "利用可能" : "利用不可"} />
+          <StatusRow label="マイク権限" value={permissionLabel} />
+          <StatusRow label="音声送信" value={micState === "streaming" ? "送信中" : "停止中"} />
+          <StatusRow label="最終送信" value={lastSentAt || "未送信"} />
+          <div>
+            <div className="mb-1 flex items-center justify-between text-[12px] font-black text-stone-600">
+              <span>入力音量</span>
+              <span>{Math.round(level * 100)}%</span>
+            </div>
+            <LevelBar value={level} />
+          </div>
+        </div>
+
+        {error ? (
+          <p className="mt-4 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[13px] font-bold text-red-700">
+            {error}
+          </p>
+        ) : null}
+
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            disabled={!canStart}
+            onClick={() => void start()}
+            className="min-h-12 rounded-md bg-stone-950 px-3 text-[14px] font-black text-white active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400"
+          >
+            マイク開始
+          </button>
+          <button
+            type="button"
+            disabled={micState !== "streaming" && micState !== "requesting"}
+            onClick={() => void stop()}
+            className="min-h-12 rounded-md border border-stone-300 bg-white px-3 text-[14px] font-black text-stone-700 active:scale-[0.99] disabled:bg-stone-100 disabled:text-stone-400"
+          >
+            停止
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            void stop(false).then(() => start());
+          }}
+          disabled={!remoteMic}
+          className="mt-2 min-h-10 w-full rounded-md border border-emerald-700 bg-emerald-50 px-3 text-[13px] font-black text-emerald-900 active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
+        >
+          再接続
+        </button>
+      </section>
+    </main>
+  );
+}
+
+function StatusRow(props: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
+      <span className="text-[12px] font-bold text-stone-500">{props.label}</span>
+      <span className="text-right text-[13px] font-black text-stone-900">
+        {props.value}
+      </span>
+    </div>
+  );
+}
+
+function LevelBar(props: { value: number }) {
+  const width = `${Math.round(Math.min(1, Math.max(0, props.value)) * 100)}%`;
+
+  return (
+    <div className="h-2 overflow-hidden rounded-full bg-stone-100">
+      <div className="h-full bg-emerald-600" style={{ width }} />
+    </div>
+  );
+}
+
+function getSupportedAudioMimeType() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+  ];
+
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
+}
+
+function startLevelMeter(stream: MediaStream, onLevel: (level: number) => void) {
+  const AudioContextClass =
+    window.AudioContext ??
+    (window as Window & { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext;
+
+  if (!AudioContextClass) {
+    throw new Error("Web Audio API is not available in this browser");
+  }
+
+  const context = new AudioContextClass();
+  const source = context.createMediaStreamSource(stream);
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 1024;
+  const buffer = new Float32Array(analyser.fftSize);
+  let frameId = 0;
+  let stopped = false;
+
+  source.connect(analyser);
+
+  const tick = () => {
+    if (stopped) return;
+
+    analyser.getFloatTimeDomainData(buffer);
+    onLevel(calculateLevel(buffer));
+    frameId = window.requestAnimationFrame(tick);
+  };
+
+  frameId = window.requestAnimationFrame(tick);
+
+  return () => {
+    stopped = true;
+    window.cancelAnimationFrame(frameId);
+    try {
+      source.disconnect();
+    } catch {}
+    void context.close().catch(() => {});
+  };
+}
+
+function calculateLevel(samples: Float32Array) {
+  let sumSquares = 0;
+  let peak = 0;
+
+  for (const sample of samples) {
+    const absolute = Math.abs(sample);
+    sumSquares += sample * sample;
+    if (absolute > peak) peak = absolute;
+  }
+
+  const rms = Math.sqrt(sumSquares / samples.length);
+
+  return Math.min(1, Math.max(rms * 8, peak));
+}
+
+function isPermissionError(error: unknown) {
+  return (
+    error instanceof DOMException &&
+    (error.name === "NotAllowedError" || error.name === "SecurityError")
+  );
+}

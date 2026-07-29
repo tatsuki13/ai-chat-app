@@ -12,21 +12,33 @@ type SessionInfo = {
   ended_at: string | null;
 };
 
+type RemoteMicRole = "caregiver" | "elder";
+type RemoteMicQrInfo = {
+  joinUrl: string;
+  expiresAt: string;
+};
+type RemoteMicQrState = Record<RemoteMicRole, RemoteMicQrInfo | null>;
+
 const STORAGE_KEY = "acp-hitl-current-session-id";
 
 export default function Home() {
   const router = useRouter();
   const [participantCode, setParticipantCode] = useState("");
   const [session, setSession] = useState<SessionInfo | null>(null);
-  const [origin, setOrigin] = useState("");
-  const [microphoneBaseUrl, setMicrophoneBaseUrl] = useState("");
+  const [remoteMicQr, setRemoteMicQr] = useState<RemoteMicQrState>({
+    caregiver: null,
+    elder: null,
+  });
+  const [remoteMicQrLoading, setRemoteMicQrLoading] = useState(false);
+  const [remoteMicQrError, setRemoteMicQrError] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    setOrigin(window.location.origin);
-    setMicrophoneBaseUrl(window.location.origin);
-  }, []);
+    if (!session?.id) return;
+
+    void issueRemoteMicQrCodes(session.id);
+  }, [session?.id]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -72,16 +84,28 @@ export default function Home() {
     }
   }
 
-  const normalizedMicrophoneBaseUrl = normalizeBaseUrl(microphoneBaseUrl) || origin;
-  const caregiverUrl = session
-    ? buildMicrophoneUrl(normalizedMicrophoneBaseUrl, "caregiver", session.id)
-    : "";
-  const elderUrl = session
-    ? buildMicrophoneUrl(normalizedMicrophoneBaseUrl, "elder", session.id)
-    : "";
-  const usingLocalhost =
-    normalizedMicrophoneBaseUrl.includes("localhost") ||
-    normalizedMicrophoneBaseUrl.includes("127.0.0.1");
+  async function issueRemoteMicQrCodes(sessionId: string) {
+    setRemoteMicQrLoading(true);
+    setRemoteMicQrError("");
+
+    try {
+      const [caregiver, elder] = await Promise.all([
+        issueRemoteMicToken(sessionId, "caregiver"),
+        issueRemoteMicToken(sessionId, "elder"),
+      ]);
+
+      setRemoteMicQr({ caregiver, elder });
+    } catch (qrError) {
+      setRemoteMicQr({ caregiver: null, elder: null });
+      setRemoteMicQrError(
+        qrError instanceof Error
+          ? qrError.message
+          : "スマートフォンマイク用QRを発行できませんでした。",
+      );
+    } finally {
+      setRemoteMicQrLoading(false);
+    }
+  }
 
   return (
     <main className="min-h-screen bg-[#f7f4ec] px-4 py-5 text-stone-950">
@@ -144,7 +168,7 @@ export default function Home() {
                   スマートフォンマイク登録
                 </h2>
                 <p className="mt-1 text-[12px] font-bold text-stone-500">
-                  2台のスマートフォンで、それぞれのQRを読み取ってください。
+                  本人用と介護者用のスマートフォンで、それぞれのQRコードを読み取ってください。
                 </p>
               </div>
               <div className="rounded-full bg-stone-100 px-3 py-1 text-[12px] font-black text-stone-600">
@@ -152,39 +176,42 @@ export default function Home() {
               </div>
             </div>
 
-            <label className="mt-4 block rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
-              <span className="text-[12px] font-black text-stone-700">
-                スマホ接続用URL
-              </span>
-              <input
-                value={microphoneBaseUrl}
-                onChange={(event) => setMicrophoneBaseUrl(event.target.value)}
-                placeholder="例: http://172.17.69.186:3000"
-                className="mt-2 min-h-9 w-full rounded-md border border-stone-300 bg-white px-2 text-[12px] font-bold outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
-              />
-              {usingLocalhost ? (
-                <p className="mt-2 text-[11px] font-bold text-amber-800">
-                  localhost はスマホから接続できません。PCのLAN IPまたはHTTPSの公開URLを指定してください。
-                </p>
-              ) : null}
-            </label>
-
             {session ? (
-              <div className="mt-4 grid gap-3 md:grid-cols-2">
-                <QrCard
-                  title="介護者用マイク"
-                  url={caregiverUrl}
-                  tone="sky"
-                />
-                <QrCard
-                  title="高齢者用マイク"
-                  url={elderUrl}
-                  tone="emerald"
-                />
+              <div className="mt-4">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[12px] font-bold text-stone-500">
+                    QRコードは1回限り、短時間のみ有効です。URLは画面に表示しません。
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void issueRemoteMicQrCodes(session.id)}
+                    disabled={remoteMicQrLoading}
+                    className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 active:scale-[0.99] disabled:bg-stone-100 disabled:text-stone-400"
+                  >
+                    {remoteMicQrLoading ? "発行中" : "QRを再発行"}
+                  </button>
+                </div>
+                {remoteMicQrError ? (
+                  <p className="mb-3 rounded-md border border-amber-100 bg-amber-50 px-3 py-2 text-[12px] font-bold text-amber-800">
+                    {remoteMicQrError}
+                  </p>
+                ) : null}
+                <div className="grid gap-3 md:grid-cols-2">
+                  <QrCard
+                    title="介護者用マイク"
+                    qr={remoteMicQr.caregiver}
+                    tone="sky"
+                  />
+                  <QrCard
+                    title="本人用マイク"
+                    qr={remoteMicQr.elder}
+                    tone="emerald"
+                  />
+                </div>
               </div>
             ) : (
               <div className="mt-4 flex min-h-[280px] items-center justify-center rounded-md border border-dashed border-stone-300 bg-stone-50 px-4 text-center text-[13px] font-bold text-stone-500">
-                参加者IDを入力してセッションを作成すると、ここに2台分のQRが表示されます。
+                参加者IDを入力してセッションを作成すると、ここに2台分のQRコードが表示されます。
               </div>
             )}
           </section>
@@ -196,7 +223,7 @@ export default function Home() {
 
 function QrCard(props: {
   title: string;
-  url: string;
+  qr: RemoteMicQrInfo | null;
   tone: "sky" | "emerald";
 }) {
   return (
@@ -208,12 +235,20 @@ function QrCard(props: {
       >
         {props.title}
       </div>
-      <div className="mt-3 flex justify-center rounded-md border border-stone-200 bg-white p-3">
-        <QrCanvas value={props.url} label={`${props.title} 接続QRコード`} />
-      </div>
-      <div className="mt-3 break-all rounded border border-stone-200 bg-white px-2 py-2 text-[11px] font-bold leading-snug text-stone-500">
-        {props.url}
-      </div>
+      {props.qr ? (
+        <>
+          <div className="mt-3 flex justify-center rounded-md border border-stone-200 bg-white p-3">
+            <QrCanvas value={props.qr.joinUrl} label={`${props.title} QRコード`} />
+          </div>
+          <div className="mt-3 rounded border border-stone-200 bg-white px-2 py-2 text-[11px] font-bold leading-snug text-stone-500">
+            有効期限: {formatDateTime(props.qr.expiresAt)}
+          </div>
+        </>
+      ) : (
+        <div className="mt-3 flex min-h-[250px] items-center justify-center rounded-md border border-dashed border-stone-300 bg-white px-3 text-center text-[12px] font-bold text-stone-500">
+          QRコード未発行
+        </div>
+      )}
     </article>
   );
 }
@@ -248,26 +283,39 @@ function QrCanvas(props: { value: string; label: string }) {
   );
 }
 
-function buildMicrophoneUrl(
-  baseUrl: string,
-  role: "caregiver" | "elder",
+async function issueRemoteMicToken(
   sessionId: string,
+  role: RemoteMicRole,
 ) {
-  const params = new URLSearchParams({
-    sessionId,
+  const response = await fetch("/api/remote-mic/tokens", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId, role }),
   });
 
-  return `${normalizeBaseUrl(baseUrl)}/microphone/${role}?${params.toString()}`;
-}
-
-function normalizeBaseUrl(value: string) {
-  return value.trim().replace(/\/+$/, "");
-}
-
-function toUserFacingError(error: string) {
-  if (error === "participant_code already exists") {
-    return "この参加者IDはすでに使われています。";
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const message =
+      body && typeof body.error === "string"
+        ? body.error
+        : "スマートフォンマイク用QRを発行できませんでした。";
+    throw new Error(message);
   }
 
-  return error;
+  return (await response.json()) as RemoteMicQrInfo;
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "不明";
+
+  return date.toLocaleString("ja-JP");
+}
+
+function toUserFacingError(message: string) {
+  if (message === "participant_code already exists") {
+    return "この参加者IDはすでに使われています。別のIDを入力してください。";
+  }
+
+  return message;
 }

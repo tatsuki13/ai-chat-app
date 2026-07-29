@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../lib/prisma";
+import { isRemoteMicEnabled } from "../../../../lib/remote-mic/config";
+import {
+  authenticateRemoteMicRequest,
+  remoteMicErrorResponse,
+} from "../../../../lib/remote-mic/token-service";
 
 export const runtime = "nodejs";
 
@@ -25,9 +30,16 @@ const MAX_POLL_MESSAGES = 80;
 
 export async function GET(request: Request) {
   try {
+    if (!isRemoteMicEnabled()) {
+      return NextResponse.json(
+        { error: "Remote microphone is disabled" },
+        { status: 404 },
+      );
+    }
+
     const params = new URL(request.url).searchParams;
-    const sessionId = requiredString(params.get("sessionId"));
-    const role = parseRole(params.get("role"));
+    let sessionId = requiredString(params.get("sessionId"));
+    let role = parseRole(params.get("role"));
     const recipient = parsePeer(params.get("recipient"));
     const since = parseDate(params.get("since"));
 
@@ -36,6 +48,12 @@ export async function GET(request: Request) {
         { error: "sessionId, role, and recipient are required" },
         { status: 400 },
       );
+    }
+
+    if (recipient === "phone") {
+      const remoteMic = await authenticateRemoteMicRequest();
+      sessionId = remoteMic.sessionId;
+      role = remoteMic.role;
     }
 
     const session = await findOpenSession(sessionId);
@@ -74,6 +92,14 @@ export async function GET(request: Request) {
       messages: rows.map(serializeSignal),
     });
   } catch (error) {
+    const remoteMicError = remoteMicErrorResponse(error);
+    if (remoteMicError.status !== 500) {
+      return NextResponse.json(
+        { error: remoteMicError.message },
+        { status: remoteMicError.status },
+      );
+    }
+
     console.error("Failed to poll WebRTC signals", error);
 
     return NextResponse.json(
@@ -85,9 +111,16 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    if (!isRemoteMicEnabled()) {
+      return NextResponse.json(
+        { error: "Remote microphone is disabled" },
+        { status: 404 },
+      );
+    }
+
     const body = await request.json().catch(() => null);
-    const sessionId = requiredString(body?.sessionId ?? body?.session_id);
-    const role = parseRole(body?.role);
+    let sessionId = requiredString(body?.sessionId ?? body?.session_id);
+    let role = parseRole(body?.role);
     const sender = parsePeer(body?.sender);
     const recipient = parsePeer(body?.recipient);
     const messageType = parseMessageType(body?.messageType ?? body?.message_type);
@@ -105,6 +138,12 @@ export async function POST(request: Request) {
         { error: "Invalid signaling request" },
         { status: 400 },
       );
+    }
+
+    if (sender === "phone") {
+      const remoteMic = await authenticateRemoteMicRequest();
+      sessionId = remoteMic.sessionId;
+      role = remoteMic.role;
     }
 
     if (sender === recipient) {
@@ -171,6 +210,14 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
+    const remoteMicError = remoteMicErrorResponse(error);
+    if (remoteMicError.status !== 500) {
+      return NextResponse.json(
+        { error: remoteMicError.message },
+        { status: remoteMicError.status },
+      );
+    }
+
     console.error("Failed to post WebRTC signal", error);
 
     return NextResponse.json(
