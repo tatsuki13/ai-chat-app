@@ -21,6 +21,31 @@ type ChunkErrorDetail = {
   stage?: string;
   detail?: string;
 };
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: SpeechRecognitionResultEventLike) => void) | null;
+  onerror: ((event: { error?: string; message?: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+type SpeechRecognitionResultEventLike = {
+  resultIndex: number;
+  results: {
+    length: number;
+    [index: number]: {
+      isFinal: boolean;
+      length: number;
+      [index: number]: {
+        transcript: string;
+      };
+    };
+  };
+};
 
 const CHUNK_MS = 2000;
 const HEARTBEAT_MS = 15_000;
@@ -29,7 +54,7 @@ const MIN_SEND_AVERAGE_LEVEL = 0.008;
 const MIN_SEND_PEAK_LEVEL = 0.03;
 const MAX_PENDING_CHUNKS = 8;
 const MAX_CONSECUTIVE_SERVER_FAILURES = 3;
-const CLIENT_VERSION = "remote-mic-client-2026-07-30-segmented";
+const CLIENT_VERSION = "remote-mic-client-2026-07-30-speech-text";
 
 export default function RemoteMicClient() {
   const [remoteMic, setRemoteMic] = useState<RemoteMicSession | null>(null);
@@ -61,6 +86,9 @@ export default function RemoteMicClient() {
   const consecutiveServerFailuresRef = useRef(0);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const answerPollTimerRef = useRef<number | null>(null);
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const textSendingRef = useRef(false);
+  const pendingTextsRef = useRef<Array<{ text: string; recognizedAt: number }>>([]);
 
   const roleLabel = useMemo(() => {
     if (remoteMic?.role === "elder") return "本人用マイク";
@@ -162,8 +190,12 @@ export default function RemoteMicClient() {
       if (!window.isSecureContext) {
         throw new Error("HTTPSで接続してください。Tailscale ServeのHTTPS URLから開いてください。");
       }
-      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-        throw new Error("このブラウザーではマイク録音を利用できません。");
+      const SpeechRecognitionClass = getSpeechRecognitionConstructor();
+      if (!SpeechRecognitionClass) {
+        throw new Error("このブラウザーでは音声認識を利用できません。Chromeまたは対応ブラウザーで開いてください。");
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("このブラウザーではマイクを利用できません。");
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -174,10 +206,8 @@ export default function RemoteMicClient() {
         },
         video: false,
       });
-      const mimeType = getPreferredAudioMimeType();
-      mimeTypeRef.current = mimeType;
       streamRef.current = stream;
-      setRecorderLabel(mimeType || "ブラウザー標準");
+      setRecorderLabel("ブラウザー音声認識");
       try {
         levelStopRef.current = startLevelMeter(stream, (nextLevel) => {
           setLevel(nextLevel);
@@ -198,8 +228,8 @@ export default function RemoteMicClient() {
       chunkLevelRef.current = { sum: 0, count: 0, peak: 0 };
       setPermissionLabel("許可済み");
       setMicState("streaming");
-      setServerLabel("音声送信中");
-      await startWebRtcMicrophone(stream);
+      setServerLabel("音声認識中");
+      startSpeechRecognition(SpeechRecognitionClass);
     } catch (startError) {
       if (isPermissionError(startError)) {
         setPermissionLabel("拒否");
@@ -211,6 +241,114 @@ export default function RemoteMicClient() {
       );
       await stop(false);
     }
+  }
+
+  function startSpeechRecognition(
+    SpeechRecognitionClass: SpeechRecognitionConstructor,
+  ) {
+    const recognition = new SpeechRecognitionClass();
+    speechRecognitionRef.current = recognition;
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = "ja-JP";
+    recognition.onresult = (event) => {
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        if (!result?.isFinal) continue;
+
+        const text = Array.from({ length: result.length }, (_, itemIndex) =>
+          result[itemIndex]?.transcript ?? "",
+        )
+          .join("")
+          .trim();
+
+        if (text) {
+          enqueueRecognizedText(text);
+        }
+      }
+    };
+    recognition.onerror = (event) => {
+      console.warn("[remote-mic speech recognition error]", {
+        error: event.error,
+        message: event.message,
+      });
+      setServerLabel("音声認識エラー");
+      setError(getSpeechRecognitionErrorMessage(event.error));
+    };
+    recognition.onend = () => {
+      if (!recordingActiveRef.current) return;
+
+      try {
+        recognition.start();
+      } catch {
+        setServerLabel("音声認識停止");
+      }
+    };
+
+    recognition.start();
+  }
+
+  function enqueueRecognizedText(text: string) {
+    pendingTextsRef.current.push({ text, recognizedAt: Date.now() });
+    if (pendingTextsRef.current.length > MAX_PENDING_CHUNKS) {
+      pendingTextsRef.current.splice(
+        0,
+        pendingTextsRef.current.length - MAX_PENDING_CHUNKS,
+      );
+    }
+
+    void flushRecognizedTextQueue();
+  }
+
+  async function flushRecognizedTextQueue() {
+    if (textSendingRef.current) return;
+    textSendingRef.current = true;
+
+    try {
+      while (pendingTextsRef.current.length > 0 && recordingActiveRef.current) {
+        const item = pendingTextsRef.current.shift();
+        if (!item) continue;
+
+        await sendRecognizedText(item.text, item.recognizedAt);
+      }
+    } catch (textError) {
+      setServerLabel("テキスト送信エラー");
+      setError(
+        textError instanceof Error
+          ? textError.message
+          : "発話テキストの送信に失敗しました。",
+      );
+    } finally {
+      textSendingRef.current = false;
+    }
+  }
+
+  async function sendRecognizedText(text: string, recognizedAt: number) {
+    const sentSequence = sequenceRef.current + 1;
+    sequenceRef.current = sentSequence;
+    setSequence(sentSequence);
+
+    const response = await fetch("/api/remote-mic/utterance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        recognized_at: recognizedAt,
+      }),
+    });
+
+    if (!response.ok) {
+      const detail = (await response.json().catch(() => null)) as
+        | { error?: string }
+        | null;
+      const message =
+        typeof detail?.error === "string" ? detail.error : "発話テキストの送信に失敗しました。";
+
+      throw new Error(`${message} (${response.status})`);
+    }
+
+    setLastSentAt(new Date().toLocaleTimeString("ja-JP"));
+    setServerLabel("音声認識中");
   }
 
   async function startWebRtcMicrophone(stream: MediaStream) {
@@ -503,6 +641,9 @@ export default function RemoteMicClient() {
   async function stop(notifyServer = true) {
     recordingActiveRef.current = false;
     pendingChunksRef.current = [];
+    pendingTextsRef.current = [];
+    speechRecognitionRef.current?.abort();
+    speechRecognitionRef.current = null;
     if (answerPollTimerRef.current !== null) {
       window.clearInterval(answerPollTimerRef.current);
       answerPollTimerRef.current = null;
@@ -759,6 +900,31 @@ function getMediaSupportLabel(mediaSupported: boolean, secureContext: boolean) {
   if (secureContext) return "利用不可/Safariで開く";
 
   return "利用不可/安全判定待ち";
+}
+
+function getSpeechRecognitionConstructor() {
+  const speechWindow = window as Window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+}
+
+function getSpeechRecognitionErrorMessage(error?: string) {
+  switch (error) {
+    case "not-allowed":
+    case "service-not-allowed":
+      return "音声認識またはマイクの利用が拒否されました。";
+    case "no-speech":
+      return "音声を検出できませんでした。話し始めると自動で再開します。";
+    case "audio-capture":
+      return "マイク音声を取得できませんでした。";
+    case "network":
+      return "音声認識サービスへの接続に失敗しました。";
+    default:
+      return "音声認識中にエラーが発生しました。";
+  }
 }
 
 function getChunkErrorCategory(status: number) {
