@@ -815,16 +815,37 @@ function SessionPageClient() {
     });
 
     peerConnection.ontrack = (event) => {
+      console.info("[remote-mic pc track received]", {
+        peerId: offer.peerId,
+        role: offer.role,
+        kind: event.track.kind,
+        readyState: event.track.readyState,
+        muted: event.track.muted,
+        streamCount: event.streams.length,
+      });
+
+      event.track.onunmute = () => {
+        console.info("[remote-mic pc track unmuted]", {
+          peerId: offer.peerId,
+          role: offer.role,
+          readyState: event.track.readyState,
+        });
+      };
+      event.track.onmute = () => {
+        console.warn("[remote-mic pc track muted]", {
+          peerId: offer.peerId,
+          role: offer.role,
+        });
+      };
+      event.track.onended = () => {
+        console.warn("[remote-mic pc track ended]", {
+          peerId: offer.peerId,
+          role: offer.role,
+        });
+      };
+
       const stream = event.streams[0] ?? new MediaStream([event.track]);
       const remoteService = ensureRemoteStreamInputService();
-
-      console.info("[remote-mic pc track received]", {
-        role: offer.role,
-        speaker,
-        trackKind: event.track.kind,
-        trackState: event.track.readyState,
-        streamAudioTracks: stream.getAudioTracks().length,
-      });
 
       void remoteService
         .startRemoteInput(speaker, stream)
@@ -833,14 +854,23 @@ function SessionPageClient() {
           setStatusText("スマートフォン音声入力中");
         })
         .catch((error) => {
-          console.warn("Remote microphone stream failed", error);
+          console.error("[remote-mic pc remote input failed]", {
+            peerId: offer.peerId,
+            role: offer.role,
+            name: error instanceof Error ? error.name : "UnknownError",
+            message: error instanceof Error ? error.message : String(error),
+          });
           setAudioInputError("スマートフォン音声入力を開始できませんでした。");
         });
     };
     peerConnection.onconnectionstatechange = () => {
-      console.info("[remote-mic pc peer state]", {
+      console.info("[remote-mic pc connection state]", {
+        peerId: offer.peerId,
         role: offer.role,
-        state: peerConnection.connectionState,
+        connectionState: peerConnection.connectionState,
+        iceConnectionState: peerConnection.iceConnectionState,
+        iceGatheringState: peerConnection.iceGatheringState,
+        signalingState: peerConnection.signalingState,
       });
 
       if (
@@ -851,6 +881,21 @@ function SessionPageClient() {
         remoteStreamInputServiceRef.current?.stopRemoteInput(speaker);
         remoteMicPeerHandlesRef.current.delete(offer.peerId);
       }
+    };
+    peerConnection.oniceconnectionstatechange = () => {
+      console.info("[remote-mic pc ice state]", {
+        peerId: offer.peerId,
+        role: offer.role,
+        iceConnectionState: peerConnection.iceConnectionState,
+      });
+    };
+    peerConnection.onicecandidateerror = (event) => {
+      console.warn("[remote-mic pc ice candidate error]", {
+        peerId: offer.peerId,
+        role: offer.role,
+        errorCode: event.errorCode,
+        errorText: event.errorText,
+      });
     };
 
     await peerConnection.setRemoteDescription(offer.offer);
@@ -884,17 +929,31 @@ function SessionPageClient() {
 
   async function handleVoiceAudioChunk(chunk: SingleMicAudioChunk) {
     const currentSession = sessionRef.current;
+    console.info("[remote-mic pc stt eligibility]", {
+      hasSession: Boolean(currentSession),
+      blobSize: chunk.blob.size,
+      sttEnabled: sttEnabledRef.current,
+      speaker: chunk.speaker,
+    });
+
     if (!currentSession || chunk.blob.size < 512 || !sttEnabledRef.current) {
-      console.info("[remote-mic pc chunk skipped before stt]", {
+      console.warn("[remote-mic pc chunk skipped before stt]", {
         hasSession: Boolean(currentSession),
-        size: chunk.blob.size,
+        blobSize: chunk.blob.size,
         sttEnabled: sttEnabledRef.current,
+        speaker: chunk.speaker,
       });
       return;
     }
 
     try {
       setStatusText("スマートフォン音声を文字起こし中");
+      console.info("[remote-mic pc stt request]", {
+        speaker: chunk.speaker,
+        blobSize: chunk.blob.size,
+        mimeType: chunk.blob.type || chunk.mimeType,
+        sequence: chunk.sequence,
+      });
       const data = await sendAudioChunkToStt(
         currentSession.id,
         chunk.speaker,
@@ -2705,15 +2764,6 @@ async function sendAudioChunkToStt(
     body: formData,
   });
 
-  console.info("[remote-mic pc stt response]", {
-    speaker: normalizeSpeaker(speaker),
-    status: response.status,
-    ok: response.ok,
-    size: blob.size,
-    mimeType,
-    chunkNumber,
-  });
-
   if (!response.ok) {
     const errorBody = await response.json().catch(() => null);
     const errorText =
@@ -2724,7 +2774,17 @@ async function sendAudioChunkToStt(
     throw new Error(toUserFacingError(errorText));
   }
 
-  return response.json() as Promise<TranscribeUtteranceResponse>;
+  const data = (await response.json()) as TranscribeUtteranceResponse;
+
+  console.info("[remote-mic pc stt response]", {
+    status: response.status,
+    ok: response.ok,
+    skipped: Boolean(data.skipped),
+    hasUtterance: Boolean(data.utterance),
+    speaker: data.speaker,
+  });
+
+  return data;
 }
 
 function getAudioFileExtension(mimeType: string) {

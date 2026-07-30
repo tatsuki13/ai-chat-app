@@ -322,7 +322,7 @@ export function createRemoteStreamInputService(
 ): RemoteStreamInputService {
   type RemoteHandle = {
     stream: MediaStream;
-    context: AudioContext;
+    context: AudioContext | null;
     nodes: AudioNode[];
     recorder: MediaRecorder | null;
     segmentTimerId: number | null;
@@ -339,8 +339,48 @@ export function createRemoteStreamInputService(
     stopRemoteInput(speaker);
 
     if (typeof MediaRecorder === "undefined") {
-      throw new Error("audio input is not available in this browser");
+      throw new Error("MediaRecorder is not available");
     }
+
+    const remoteStream = new MediaStream(
+      stream.getAudioTracks().map((track) => track.clone()),
+    );
+
+    if (remoteStream.getAudioTracks().length === 0) {
+      throw new Error("Remote audio track is missing");
+    }
+
+    console.info("[remote-mic remote input start]", {
+      speaker,
+      audioTracks: remoteStream.getAudioTracks().length,
+      trackState: remoteStream.getAudioTracks()[0]?.readyState,
+      trackMuted: remoteStream.getAudioTracks()[0]?.muted,
+    });
+
+    const handle: RemoteHandle = {
+      stream: remoteStream,
+      context: null,
+      nodes: [],
+      recorder: null,
+      segmentTimerId: null,
+      stopLevelMeter: null,
+      active: true,
+    };
+    handles.set(speaker, handle);
+
+    startRemoteSegment(speaker);
+    void startRemoteLevelMonitoring(speaker).catch((error) => {
+      console.warn("[remote-mic level meter unavailable]", {
+        speaker,
+        name: error instanceof Error ? error.name : "UnknownError",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  async function startRemoteLevelMonitoring(speaker: StereoSpeaker) {
+    const handle = handles.get(speaker);
+    if (!handle?.active) return;
 
     const AudioContextClass =
       window.AudioContext ??
@@ -348,18 +388,12 @@ export function createRemoteStreamInputService(
         .webkitAudioContext;
 
     if (!AudioContextClass) {
-      throw new Error("Web Audio API is not available in this browser");
+      console.warn("[remote-mic Web Audio API unavailable]", { speaker });
+      return;
     }
 
-    const remoteStream = new MediaStream(
-      stream.getAudioTracks().map((track) => track.clone()),
-    );
-    console.info("[remote-mic remote input start]", {
-      speaker,
-      audioTracks: remoteStream.getAudioTracks().length,
-    });
     const context = new AudioContextClass();
-    const source = context.createMediaStreamSource(remoteStream);
+    const source = context.createMediaStreamSource(handle.stream);
     const analyser = context.createAnalyser();
     const silentGain = context.createGain();
 
@@ -369,25 +403,28 @@ export function createRemoteStreamInputService(
     analyser.connect(silentGain);
     silentGain.connect(context.destination);
 
-    const handle: RemoteHandle = {
-      stream: remoteStream,
-      context,
-      nodes: [source, analyser, silentGain],
-      recorder: null,
-      segmentTimerId: null,
-      stopLevelMeter: null,
-      active: true,
-    };
-    handles.set(speaker, handle);
+    handle.context = context;
+    handle.nodes = [source, analyser, silentGain];
 
     if (context.state === "suspended") {
-      await context.resume();
+      try {
+        await context.resume();
+      } catch (error) {
+        console.warn("[remote-mic AudioContext resume failed]", {
+          speaker,
+          name: error instanceof Error ? error.name : "UnknownError",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
     }
 
-    handle.stopLevelMeter = startRemoteLevelMeter(analyser, speaker, (level) => {
+    const currentHandle = handles.get(speaker);
+    if (!currentHandle?.active) return;
+
+    currentHandle.stopLevelMeter = startRemoteLevelMeter(analyser, speaker, (level) => {
       levelCallbacks.forEach((callback) => callback(level));
     });
-    startRemoteSegment(speaker);
   }
 
   function startRemoteSegment(speaker: StereoSpeaker) {
@@ -403,6 +440,14 @@ export function createRemoteStreamInputService(
     );
 
     handle.recorder = recorder;
+    console.info("[remote-mic remote recorder start]", {
+      speaker,
+      mimeType,
+      recorderState: recorder.state,
+      trackCount: handle.stream.getAudioTracks().length,
+      trackReadyState: handle.stream.getAudioTracks()[0]?.readyState,
+      trackMuted: handle.stream.getAudioTracks()[0]?.muted,
+    });
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
         parts.push(event.data);
@@ -450,10 +495,18 @@ export function createRemoteStreamInputService(
       }
     };
     recorder.onerror = (event) => {
-      console.warn(`remote speaker${speaker} recorder error`, event);
+      console.error("[remote-mic remote recorder error]", {
+        speaker,
+        recorderState: recorder.state,
+        eventType: event.type,
+      });
     };
 
     recorder.start();
+    console.info("[remote-mic remote recorder started]", {
+      speaker,
+      recorderState: recorder.state,
+    });
     handle.segmentTimerId = window.setTimeout(() => {
       if (recorder.state !== "inactive") {
         recorder.stop();
@@ -470,6 +523,8 @@ export function createRemoteStreamInputService(
       window.clearTimeout(handle.segmentTimerId);
       handle.segmentTimerId = null;
     }
+    handle.stopLevelMeter?.();
+    handle.stopLevelMeter = null;
     if (handle.recorder && handle.recorder.state !== "inactive") {
       try {
         handle.recorder.stop();
@@ -477,8 +532,7 @@ export function createRemoteStreamInputService(
         // Recorder may already be stopping after a peer disconnect.
       }
     }
-    handle.stopLevelMeter?.();
-    stopMediaStream(handle.stream);
+    handle.recorder = null;
 
     for (const node of handle.nodes) {
       try {
@@ -488,7 +542,10 @@ export function createRemoteStreamInputService(
       }
     }
 
-    void handle.context.close().catch(() => {});
+    if (handle.context) {
+      void handle.context.close().catch(() => {});
+    }
+    stopMediaStream(handle.stream);
     handles.delete(speaker);
   }
 

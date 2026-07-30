@@ -222,6 +222,13 @@ export default function RemoteMicClient() {
     }
 
     peerConnection.onconnectionstatechange = () => {
+      console.info("[remote-mic phone connection state]", {
+        connectionState: peerConnection.connectionState,
+        iceConnectionState: peerConnection.iceConnectionState,
+        iceGatheringState: peerConnection.iceGatheringState,
+        signalingState: peerConnection.signalingState,
+      });
+
       if (
         peerConnection.connectionState === "connected" ||
         peerConnection.connectionState === "connecting"
@@ -236,6 +243,17 @@ export default function RemoteMicClient() {
       ) {
         setServerLabel("音声ストリーム切断");
       }
+    };
+    peerConnection.oniceconnectionstatechange = () => {
+      console.info("[remote-mic phone ice state]", {
+        iceConnectionState: peerConnection.iceConnectionState,
+      });
+    };
+    peerConnection.onicecandidateerror = (event) => {
+      console.warn("[remote-mic phone ice candidate error]", {
+        errorCode: event.errorCode,
+        errorText: event.errorText,
+      });
     };
 
     const offer = await peerConnection.createOffer({
@@ -281,6 +299,11 @@ export default function RemoteMicClient() {
           if (!data.answer || peerConnection.remoteDescription) return;
 
           await peerConnection.setRemoteDescription(data.answer);
+          console.info("[remote-mic phone answer applied]", {
+            signalingState: peerConnection.signalingState,
+            connectionState: peerConnection.connectionState,
+            iceConnectionState: peerConnection.iceConnectionState,
+          });
           if (answerPollTimerRef.current !== null) {
             window.clearInterval(answerPollTimerRef.current);
             answerPollTimerRef.current = null;
