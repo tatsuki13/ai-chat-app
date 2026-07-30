@@ -24,8 +24,12 @@ const ALLOWED_AUDIO_BASE_TYPES = new Set([
 ]);
 
 export async function POST(request: Request) {
+  let stage = "authenticate";
+
   try {
+    stage = "authenticate";
     const remoteMic = await authenticateRemoteMicRequest();
+    stage = "parse-form-data";
     const formData = await request.formData();
     const audio = formData.get("audio");
     const clientChunkId = requiredString(formData.get("client_chunk_id"));
@@ -35,6 +39,7 @@ export async function POST(request: Request) {
     const averageLevel = parseOptionalFloat(formData.get("average_level"));
     const peakLevel = parseOptionalFloat(formData.get("peak_level"));
 
+    stage = "validate-metadata";
     if (
       !(audio instanceof File) ||
       !clientChunkId ||
@@ -86,6 +91,7 @@ export async function POST(request: Request) {
       );
     }
 
+    stage = "dedup-check";
     if (isRemoteMicDedupEnabled()) {
       const existing = await prisma.remoteMicAudioChunk.findUnique({
         where: {
@@ -110,9 +116,11 @@ export async function POST(request: Request) {
     }
 
     const capturedAt = new Date(capturedAtMs);
+    stage = "transcription";
     const transcript = await transcribeAudioFile(audio);
 
     if (!transcript) {
+      stage = "create-skipped-chunk";
       await prisma.remoteMicAudioChunk.create({
         data: {
           remoteMicTokenId: remoteMic.tokenId,
@@ -131,29 +139,37 @@ export async function POST(request: Request) {
       return NextResponse.json({ skipped: true });
     }
 
-    const utterance = await prisma.sessionUtterance.create({
-      data: {
-        sessionId: remoteMic.sessionId,
-        speaker: remoteMic.role,
-        text: transcript,
-        createdAt: capturedAt,
-      },
+    stage = "create-utterance";
+    const utterance = await prisma.$transaction(async (tx) => {
+      const createdUtterance = await tx.sessionUtterance.create({
+        data: {
+          sessionId: remoteMic.sessionId,
+          speaker: remoteMic.role,
+          text: transcript,
+          createdAt: capturedAt,
+        },
+      });
+
+      stage = "create-chunk-record";
+      await tx.remoteMicAudioChunk.create({
+        data: {
+          remoteMicTokenId: remoteMic.tokenId,
+          sessionId: remoteMic.sessionId,
+          role: remoteMic.role,
+          clientChunkId,
+          sequence,
+          capturedAt,
+          durationMs,
+          averageLevel,
+          peakLevel,
+          utteranceId: createdUtterance.id,
+        },
+      });
+
+      return createdUtterance;
     });
 
-    await prisma.remoteMicAudioChunk.create({
-      data: {
-        remoteMicTokenId: remoteMic.tokenId,
-        sessionId: remoteMic.sessionId,
-        role: remoteMic.role,
-        clientChunkId,
-        sequence,
-        capturedAt,
-        durationMs,
-        averageLevel,
-        peakLevel,
-        utteranceId: utterance.id,
-      },
-    });
+    stage = "complete";
 
     return NextResponse.json({
       utterance: {
@@ -167,7 +183,40 @@ export async function POST(request: Request) {
   } catch (error) {
     const response = remoteMicErrorResponse(error);
 
-    return NextResponse.json({ error: response.message }, { status: response.status });
+    console.error("[remote-mic chunk failed]", {
+      stage,
+      errorName: error instanceof Error ? error.name : "UnknownError",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      status:
+        typeof error === "object" &&
+        error !== null &&
+        "status" in error
+          ? String(error.status)
+          : undefined,
+      code:
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error
+          ? String(error.code)
+          : undefined,
+      cause:
+        error instanceof Error && error.cause
+          ? String(error.cause)
+          : undefined,
+    });
+
+    return NextResponse.json(
+      {
+        error: response.message,
+        ...(process.env.NODE_ENV === "development"
+          ? {
+              stage,
+              detail: error instanceof Error ? error.message : String(error),
+            }
+          : {}),
+      },
+      { status: response.status },
+    );
   }
 }
 

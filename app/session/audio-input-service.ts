@@ -78,6 +78,15 @@ export type SingleMicInputService = {
   isCapturing: () => boolean;
 };
 
+export type RemoteStreamInputService = {
+  startRemoteInput: (speaker: StereoSpeaker, stream: MediaStream) => Promise<void>;
+  stopRemoteInput: (speaker: StereoSpeaker) => void;
+  stopAllRemoteInputs: () => void;
+  onChunk: (callback: ChunkCallback) => () => void;
+  onLevel: (callback: LevelCallback) => () => void;
+  isRunning: (speaker?: StereoSpeaker) => boolean;
+};
+
 export async function loadAudioInputs() {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error("audio input is not available in this browser");
@@ -304,6 +313,191 @@ export function createSingleMicInputService(): SingleMicInputService {
     },
     isCapturing() {
       return handle?.recorder.state === "recording";
+    },
+  };
+}
+
+export function createRemoteStreamInputService(
+  chunkMs = 2000,
+): RemoteStreamInputService {
+  type RemoteHandle = {
+    stream: MediaStream;
+    context: AudioContext;
+    nodes: AudioNode[];
+    recorder: MediaRecorder | null;
+    segmentTimerId: number | null;
+    stopLevelMeter: (() => void) | null;
+    active: boolean;
+  };
+
+  const handles = new Map<StereoSpeaker, RemoteHandle>();
+  const chunkCallbacks = new Set<ChunkCallback>();
+  const levelCallbacks = new Set<LevelCallback>();
+  let sequence = 0;
+
+  async function startRemoteInput(speaker: StereoSpeaker, stream: MediaStream) {
+    stopRemoteInput(speaker);
+
+    if (typeof MediaRecorder === "undefined") {
+      throw new Error("audio input is not available in this browser");
+    }
+
+    const AudioContextClass =
+      window.AudioContext ??
+      (window as Window & { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+
+    if (!AudioContextClass) {
+      throw new Error("Web Audio API is not available in this browser");
+    }
+
+    const remoteStream = new MediaStream(
+      stream.getAudioTracks().map((track) => track.clone()),
+    );
+    const context = new AudioContextClass();
+    const source = context.createMediaStreamSource(remoteStream);
+    const analyser = context.createAnalyser();
+    const silentGain = context.createGain();
+
+    analyser.fftSize = 1024;
+    silentGain.gain.value = 0;
+    source.connect(analyser);
+    analyser.connect(silentGain);
+    silentGain.connect(context.destination);
+
+    const handle: RemoteHandle = {
+      stream: remoteStream,
+      context,
+      nodes: [source, analyser, silentGain],
+      recorder: null,
+      segmentTimerId: null,
+      stopLevelMeter: null,
+      active: true,
+    };
+    handles.set(speaker, handle);
+
+    if (context.state === "suspended") {
+      await context.resume();
+    }
+
+    handle.stopLevelMeter = startRemoteLevelMeter(analyser, speaker, (level) => {
+      levelCallbacks.forEach((callback) => callback(level));
+    });
+    startRemoteSegment(speaker);
+  }
+
+  function startRemoteSegment(speaker: StereoSpeaker) {
+    const handle = handles.get(speaker);
+    if (!handle?.active || handle.recorder) return;
+
+    const mimeType = getSupportedAudioMimeType();
+    const parts: Blob[] = [];
+    const startedAt = Date.now();
+    const recorder = new MediaRecorder(
+      handle.stream,
+      mimeType ? { mimeType } : undefined,
+    );
+
+    handle.recorder = recorder;
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        parts.push(event.data);
+      }
+    };
+    recorder.onstop = () => {
+      const currentHandle = handles.get(speaker);
+      if (currentHandle?.segmentTimerId !== null && currentHandle) {
+        window.clearTimeout(currentHandle.segmentTimerId);
+        currentHandle.segmentTimerId = null;
+      }
+      if (currentHandle) {
+        currentHandle.recorder = null;
+      }
+
+      const endedAt = Date.now();
+      const blob = new Blob(parts, {
+        type: recorder.mimeType || parts[0]?.type || mimeType,
+      });
+
+      if (blob.size >= 512 && currentHandle?.active) {
+        chunkCallbacks.forEach((callback) =>
+          callback({
+            speaker,
+            blob,
+            mimeType: blob.type || mimeType,
+            startedAt,
+            endedAt,
+            sequence: ++sequence,
+          }),
+        );
+      }
+
+      if (currentHandle?.active) {
+        startRemoteSegment(speaker);
+      }
+    };
+    recorder.onerror = (event) => {
+      console.warn(`remote speaker${speaker} recorder error`, event);
+    };
+
+    recorder.start();
+    handle.segmentTimerId = window.setTimeout(() => {
+      if (recorder.state !== "inactive") {
+        recorder.stop();
+      }
+    }, chunkMs);
+  }
+
+  function stopRemoteInput(speaker: StereoSpeaker) {
+    const handle = handles.get(speaker);
+    if (!handle) return;
+
+    handle.active = false;
+    if (handle.segmentTimerId !== null) {
+      window.clearTimeout(handle.segmentTimerId);
+      handle.segmentTimerId = null;
+    }
+    if (handle.recorder && handle.recorder.state !== "inactive") {
+      try {
+        handle.recorder.stop();
+      } catch {
+        // Recorder may already be stopping after a peer disconnect.
+      }
+    }
+    handle.stopLevelMeter?.();
+    stopMediaStream(handle.stream);
+
+    for (const node of handle.nodes) {
+      try {
+        node.disconnect();
+      } catch {
+        // Some browsers throw if a node was already disconnected.
+      }
+    }
+
+    void handle.context.close().catch(() => {});
+    handles.delete(speaker);
+  }
+
+  return {
+    startRemoteInput,
+    stopRemoteInput,
+    stopAllRemoteInputs() {
+      stopRemoteInput("A");
+      stopRemoteInput("B");
+    },
+    onChunk(callback) {
+      chunkCallbacks.add(callback);
+      return () => chunkCallbacks.delete(callback);
+    },
+    onLevel(callback) {
+      levelCallbacks.add(callback);
+      return () => levelCallbacks.delete(callback);
+    },
+    isRunning(speaker) {
+      if (speaker) return handles.has(speaker);
+
+      return handles.size > 0;
     },
   };
 }
@@ -614,6 +808,31 @@ function startSingleMicLevelMeter(
 
     analyser.getFloatTimeDomainData(buffer);
     emit({ ...calculateLevel(buffer), at: Date.now() });
+
+    frameId = window.requestAnimationFrame(tick);
+  };
+
+  frameId = window.requestAnimationFrame(tick);
+  return () => {
+    stopped = true;
+    window.cancelAnimationFrame(frameId);
+  };
+}
+
+function startRemoteLevelMeter(
+  analyser: AnalyserNode,
+  speaker: StereoSpeaker,
+  emit: (level: AudioInputLevel) => void,
+) {
+  const buffer = new Float32Array(analyser.fftSize);
+  let frameId = 0;
+  let stopped = false;
+
+  const tick = () => {
+    if (stopped) return;
+
+    analyser.getFloatTimeDomainData(buffer);
+    emit({ speaker, ...calculateLevel(buffer), at: Date.now() });
 
     frameId = window.requestAnimationFrame(tick);
   };

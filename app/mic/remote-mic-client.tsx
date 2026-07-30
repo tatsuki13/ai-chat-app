@@ -9,12 +9,27 @@ type RemoteMicSession = {
   expiresAt: string;
 };
 type MicState = "idle" | "requesting" | "streaming";
+type PendingChunk = {
+  blob: Blob;
+  capturedAt: number;
+  durationMs: number;
+  averageLevel: number;
+  peakLevel: number;
+};
+type ChunkErrorDetail = {
+  error?: string;
+  stage?: string;
+  detail?: string;
+};
 
 const CHUNK_MS = 2000;
 const HEARTBEAT_MS = 15_000;
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const MIN_SEND_AVERAGE_LEVEL = 0.008;
 const MIN_SEND_PEAK_LEVEL = 0.03;
+const MAX_PENDING_CHUNKS = 8;
+const MAX_CONSECUTIVE_SERVER_FAILURES = 3;
+const CLIENT_VERSION = "remote-mic-client-2026-07-30-segmented";
 
 export default function RemoteMicClient() {
   const [remoteMic, setRemoteMic] = useState<RemoteMicSession | null>(null);
@@ -40,6 +55,12 @@ export default function RemoteMicClient() {
   const mimeTypeRef = useRef("");
   const chunkLevelRef = useRef({ sum: 0, count: 0, peak: 0 });
   const sendingRef = useRef(false);
+  const recordingActiveRef = useRef(false);
+  const segmentTimerRef = useRef<number | null>(null);
+  const pendingChunksRef = useRef<PendingChunk[]>([]);
+  const consecutiveServerFailuresRef = useRef(0);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const answerPollTimerRef = useRef<number | null>(null);
 
   const roleLabel = useMemo(() => {
     if (remoteMic?.role === "elder") return "本人用マイク";
@@ -56,6 +77,7 @@ export default function RemoteMicClient() {
     setMediaSupported(nextMediaSupported);
     setOpenUrlLabel(`${window.location.protocol}//${window.location.host}`);
     setBrowserLabel(getBrowserLabel(navigator.userAgent));
+    console.info("[remote-mic client]", { version: CLIENT_VERSION });
     const maybeHttpsUrl = getHttpsUrl(window.location.href);
     setHttpsUrl(maybeHttpsUrl);
 
@@ -152,10 +174,9 @@ export default function RemoteMicClient() {
         },
         video: false,
       });
-      const { recorder, mimeType } = createMediaRecorder(stream);
+      const mimeType = getPreferredAudioMimeType();
       mimeTypeRef.current = mimeType;
       streamRef.current = stream;
-      recorderRef.current = recorder;
       setRecorderLabel(mimeType || "ブラウザー標準");
       try {
         levelStopRef.current = startLevelMeter(stream, (nextLevel) => {
@@ -169,21 +190,16 @@ export default function RemoteMicClient() {
         setLevel(0);
       }
 
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          void sendChunk(event.data);
-        }
-      };
-      recorder.onerror = () => {
-        setError("録音中にエラーが発生しました。");
-      };
-
+      recordingActiveRef.current = true;
+      pendingChunksRef.current = [];
+      sendingRef.current = false;
+      consecutiveServerFailuresRef.current = 0;
       startedAtRef.current = Date.now();
       chunkLevelRef.current = { sum: 0, count: 0, peak: 0 };
-      recorder.start(CHUNK_MS);
       setPermissionLabel("許可済み");
       setMicState("streaming");
       setServerLabel("音声送信中");
+      await startWebRtcMicrophone(stream);
     } catch (startError) {
       if (isPermissionError(startError)) {
         setPermissionLabel("拒否");
@@ -197,48 +213,201 @@ export default function RemoteMicClient() {
     }
   }
 
-  async function sendChunk(blob: Blob) {
-    if (sendingRef.current) return;
-    sendingRef.current = true;
+  async function startWebRtcMicrophone(stream: MediaStream) {
+    const peerConnection = new RTCPeerConnection();
+    peerConnectionRef.current = peerConnection;
 
-    const sentSequence = sequenceRef.current + 1;
-    sequenceRef.current = sentSequence;
-    const capturedAt = startedAtRef.current || Date.now();
-    const levels = chunkLevelRef.current;
-    const averageLevel = levels.count > 0 ? levels.sum / levels.count : 0;
-    const peakLevel = levels.peak;
+    for (const track of stream.getAudioTracks()) {
+      peerConnection.addTrack(track, stream);
+    }
 
+    peerConnection.onconnectionstatechange = () => {
+      if (
+        peerConnection.connectionState === "connected" ||
+        peerConnection.connectionState === "connecting"
+      ) {
+        setServerLabel("音声ストリーム送信中");
+        return;
+      }
+
+      if (
+        peerConnection.connectionState === "failed" ||
+        peerConnection.connectionState === "disconnected"
+      ) {
+        setServerLabel("音声ストリーム切断");
+      }
+    };
+
+    const offer = await peerConnection.createOffer({
+      offerToReceiveAudio: false,
+      offerToReceiveVideo: false,
+    });
+    await peerConnection.setLocalDescription(offer);
+    await waitForIceGatheringComplete(peerConnection);
+
+    const offerResponse = await fetch("/api/remote-mic/webrtc/offer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ offer: peerConnection.localDescription }),
+    });
+
+    if (!offerResponse.ok) {
+      throw new Error(`音声ストリーム接続を開始できませんでした。(${offerResponse.status})`);
+    }
+
+    const data = (await offerResponse.json()) as { peerId: string };
+    setServerLabel("PC側の受信準備を待っています");
+    pollWebRtcAnswer(data.peerId, peerConnection);
+  }
+
+  function pollWebRtcAnswer(peerId: string, peerConnection: RTCPeerConnection) {
+    if (answerPollTimerRef.current !== null) {
+      window.clearInterval(answerPollTimerRef.current);
+    }
+
+    answerPollTimerRef.current = window.setInterval(() => {
+      void fetch(
+        `/api/remote-mic/webrtc/offer?peerId=${encodeURIComponent(peerId)}`,
+        { cache: "no-store" },
+      )
+        .then((response) => {
+          if (!response.ok) throw new Error(`answer poll failed: ${response.status}`);
+
+          return response.json() as Promise<{
+            answer: RTCSessionDescriptionInit | null;
+          }>;
+        })
+        .then(async (data) => {
+          if (!data.answer || peerConnection.remoteDescription) return;
+
+          await peerConnection.setRemoteDescription(data.answer);
+          if (answerPollTimerRef.current !== null) {
+            window.clearInterval(answerPollTimerRef.current);
+            answerPollTimerRef.current = null;
+          }
+          setServerLabel("音声ストリーム送信中");
+        })
+        .catch(() => {
+          setServerLabel("PC側の受信準備を待っています");
+        });
+    }, 1000);
+  }
+
+  function startRecordingSegment() {
+    const stream = streamRef.current;
+    if (!stream || !recordingActiveRef.current || recorderRef.current) return;
+
+    const parts: Blob[] = [];
+    const segmentStartedAt = Date.now();
+    const recorder = createMediaRecorder(stream, mimeTypeRef.current);
+    recorderRef.current = recorder;
+    startedAtRef.current = segmentStartedAt;
     chunkLevelRef.current = { sum: 0, count: 0, peak: 0 };
-    startedAtRef.current = Date.now();
-    setSequence(sentSequence);
 
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        parts.push(event.data);
+      }
+    };
+    recorder.onerror = () => {
+      setError("録音中にエラーが発生しました。");
+    };
+    recorder.onstop = () => {
+      if (segmentTimerRef.current !== null) {
+        window.clearTimeout(segmentTimerRef.current);
+        segmentTimerRef.current = null;
+      }
+      recorderRef.current = null;
+
+      const actualType =
+        recorder.mimeType || parts[0]?.type || mimeTypeRef.current || "audio/webm";
+      const blob = new Blob(parts, { type: actualType });
+      const levels = chunkLevelRef.current;
+      const averageLevel = levels.count > 0 ? levels.sum / levels.count : 0;
+      const peakLevel = levels.peak;
+      chunkLevelRef.current = { sum: 0, count: 0, peak: 0 };
+
+      if (recordingActiveRef.current && blob.size > 0) {
+        enqueueChunk({
+          blob,
+          capturedAt: segmentStartedAt,
+          durationMs: Math.max(1, Date.now() - segmentStartedAt),
+          averageLevel,
+          peakLevel,
+        });
+      }
+
+      if (recordingActiveRef.current) {
+        startRecordingSegment();
+      }
+    };
+
+    recorder.start();
+    segmentTimerRef.current = window.setTimeout(() => {
+      if (recorder.state !== "inactive") {
+        recorder.stop();
+      }
+    }, CHUNK_MS);
+  }
+
+  function enqueueChunk(chunk: PendingChunk) {
     if (
-      levels.count > 0 &&
-      averageLevel < MIN_SEND_AVERAGE_LEVEL &&
-      peakLevel < MIN_SEND_PEAK_LEVEL
+      chunk.averageLevel < MIN_SEND_AVERAGE_LEVEL &&
+      chunk.peakLevel < MIN_SEND_PEAK_LEVEL
     ) {
-      sendingRef.current = false;
       return;
     }
 
+    pendingChunksRef.current.push(chunk);
+    if (pendingChunksRef.current.length > MAX_PENDING_CHUNKS) {
+      pendingChunksRef.current.splice(
+        0,
+        pendingChunksRef.current.length - MAX_PENDING_CHUNKS,
+      );
+    }
+
+    void flushChunkQueue();
+  }
+
+  async function flushChunkQueue() {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+
+    try {
+      while (pendingChunksRef.current.length > 0 && recordingActiveRef.current) {
+        const chunk = pendingChunksRef.current.shift();
+        if (!chunk) continue;
+
+        await sendChunk(chunk);
+      }
+    } finally {
+      sendingRef.current = false;
+    }
+  }
+
+  async function sendChunk(chunk: PendingChunk) {
+    const sentSequence = sequenceRef.current + 1;
+    sequenceRef.current = sentSequence;
+    setSequence(sentSequence);
+
     try {
       const actualType =
-        blob.type ||
+        chunk.blob.type ||
         recorderRef.current?.mimeType ||
         mimeTypeRef.current ||
         "application/octet-stream";
       const formData = new FormData();
       formData.append(
         "audio",
-        blob,
+        chunk.blob,
         getAudioFileName(sentSequence, actualType),
       );
       formData.append("client_chunk_id", createClientChunkId());
       formData.append("sequence", String(sentSequence));
-      formData.append("captured_at", String(capturedAt));
-      formData.append("duration_ms", String(Math.max(1, Date.now() - capturedAt)));
-      formData.append("average_level", String(averageLevel));
-      formData.append("peak_level", String(peakLevel));
+      formData.append("captured_at", String(chunk.capturedAt));
+      formData.append("duration_ms", String(chunk.durationMs));
+      formData.append("average_level", String(chunk.averageLevel));
+      formData.append("peak_level", String(chunk.peakLevel));
 
       const response = await fetch("/api/remote-mic/chunks", {
         method: "POST",
@@ -246,7 +415,9 @@ export default function RemoteMicClient() {
       });
 
       if (!response.ok) {
-        const detail = await response.json().catch(() => null);
+        const detail = (await response.json().catch(() => null)) as
+          | ChunkErrorDetail
+          | null;
         const message =
           typeof detail?.error === "string" ? detail.error : "音声送信に失敗しました。";
         if (response.status === 415) {
@@ -255,9 +426,22 @@ export default function RemoteMicClient() {
             "この端末の録音形式にサーバーが対応していません。録音形式を確認して、もう一度開始してください。",
           );
         }
-        throw new Error(`${message} (${response.status})`);
+        const displayMessage = formatChunkError(response.status, message, detail);
+        if (response.status >= 500) {
+          consecutiveServerFailuresRef.current += 1;
+          if (
+            consecutiveServerFailuresRef.current >=
+            MAX_CONSECUTIVE_SERVER_FAILURES
+          ) {
+            await stopRecordingAfterServerFailures(displayMessage);
+            return;
+          }
+        }
+
+        throw new Error(displayMessage);
       }
 
+      consecutiveServerFailuresRef.current = 0;
       setLastSentAt(new Date().toLocaleTimeString("ja-JP"));
       setServerLabel("音声送信中");
     } catch (sendError) {
@@ -265,12 +449,48 @@ export default function RemoteMicClient() {
       setError(
         sendError instanceof Error ? sendError.message : "音声送信に失敗しました。",
       );
-    } finally {
-      sendingRef.current = false;
     }
   }
 
+  async function stopRecordingAfterServerFailures(message: string) {
+    setServerLabel("音声処理停止");
+    pendingChunksRef.current = [];
+    setError(`音声処理に連続して失敗したため、録音を停止しました。\n${message}`);
+    await stop(false);
+  }
+
+  function formatChunkError(
+    status: number,
+    message: string,
+    detail: ChunkErrorDetail | null,
+  ) {
+    const category = getChunkErrorCategory(status);
+    const parts = [`${category}: ${message} (${status})`];
+
+    if (detail?.stage) {
+      parts.push(`処理段階: ${detail.stage}`);
+    }
+    if (detail?.detail) {
+      parts.push(`詳細: ${detail.detail}`);
+    }
+
+    return parts.join("\n");
+  }
+
   async function stop(notifyServer = true) {
+    recordingActiveRef.current = false;
+    pendingChunksRef.current = [];
+    if (answerPollTimerRef.current !== null) {
+      window.clearInterval(answerPollTimerRef.current);
+      answerPollTimerRef.current = null;
+    }
+    peerConnectionRef.current?.close();
+    peerConnectionRef.current = null;
+    if (segmentTimerRef.current !== null) {
+      window.clearTimeout(segmentTimerRef.current);
+      segmentTimerRef.current = null;
+    }
+
     const recorder = recorderRef.current;
     recorderRef.current = null;
     if (recorder && recorder.state !== "inactive") {
@@ -284,6 +504,7 @@ export default function RemoteMicClient() {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     mimeTypeRef.current = "";
+    chunkLevelRef.current = { sum: 0, count: 0, peak: 0 };
     setRecorderLabel("未確認");
     setLevel(0);
     setMicState("idle");
@@ -324,7 +545,7 @@ export default function RemoteMicClient() {
         </div>
 
         {error ? (
-          <p className="mt-4 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[13px] font-bold text-red-700">
+          <p className="mt-4 whitespace-pre-line rounded-md border border-red-100 bg-red-50 px-3 py-2 text-[13px] font-bold text-red-700">
             {error}
           </p>
         ) : null}
@@ -407,24 +628,18 @@ function LevelBar(props: { value: number }) {
   );
 }
 
-function createMediaRecorder(stream: MediaStream) {
-  for (const mimeType of getSupportedAudioMimeTypes()) {
-    try {
-      return {
-        recorder: new MediaRecorder(stream, { mimeType }),
-        mimeType,
-      };
-    } catch {}
-  }
-
+function createMediaRecorder(stream: MediaStream, mimeType: string) {
   try {
-    return {
-      recorder: new MediaRecorder(stream),
-      mimeType: "",
-    };
+    return mimeType
+      ? new MediaRecorder(stream, { mimeType })
+      : new MediaRecorder(stream);
   } catch {
     throw new Error("このブラウザーでは録音を開始できません。Safariを最新版にするか、別のブラウザーで開いてください。");
   }
+}
+
+function getPreferredAudioMimeType() {
+  return getSupportedAudioMimeTypes()[0] ?? "";
 }
 
 function getSupportedAudioMimeTypes() {
@@ -477,6 +692,23 @@ function createClientChunkId() {
   return Array.from(random, (value) => value.toString(36)).join("-");
 }
 
+function waitForIceGatheringComplete(peerConnection: RTCPeerConnection) {
+  if (peerConnection.iceGatheringState === "complete") {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve) => {
+    const timeoutId = window.setTimeout(resolve, 3000);
+
+    peerConnection.addEventListener("icegatheringstatechange", () => {
+      if (peerConnection.iceGatheringState !== "complete") return;
+
+      window.clearTimeout(timeoutId);
+      resolve();
+    });
+  });
+}
+
 function getHttpsUrl(value: string) {
   try {
     const url = new URL(value);
@@ -506,6 +738,17 @@ function getMediaSupportLabel(mediaSupported: boolean, secureContext: boolean) {
   return "利用不可/安全判定待ち";
 }
 
+function getChunkErrorCategory(status: number) {
+  if (status === 400) return "音声メタデータが不正です";
+  if (status === 401) return "マイク認証が期限切れです";
+  if (status === 403) return "マイク認証が拒否されました";
+  if (status === 415) return "録音形式が未対応です";
+  if (status === 429) return "送信が混み合っています";
+  if (status >= 500) return "サーバーの音声処理に失敗しました";
+
+  return "音声送信に失敗しました";
+}
+
 function getInsecureContextHelp() {
   if (typeof window !== "undefined" && window.location.protocol === "https:") {
     return "URLはhttpsですが、この表示環境は安全なページとして扱われていません。QR読み取り後のカメラ内ブラウザではなく、右下の「…」からSafariで開いてください。";
@@ -515,12 +758,22 @@ function getInsecureContextHelp() {
 }
 
 function getBrowserLabel(userAgent: string) {
-  if (/CriOS/i.test(userAgent)) return "Chrome/iOS";
-  if (/FxiOS/i.test(userAgent)) return "Firefox/iOS";
-  if (/EdgiOS/i.test(userAgent)) return "Edge/iOS";
-  if (/Safari/i.test(userAgent) && /Mobile/i.test(userAgent)) return "Safari系";
+  if (/SamsungBrowser/i.test(userAgent)) return "Samsung Internet / Android";
+  if (/EdgA|EdgiOS|Edg\//i.test(userAgent)) {
+    return /Android/i.test(userAgent) ? "Edge / Android" : "Edge";
+  }
+  if (/CriOS/i.test(userAgent)) return "Chrome / iOS";
+  if (/Chrome|Chromium/i.test(userAgent)) {
+    return /Android/i.test(userAgent) ? "Chrome / Android" : "Chrome";
+  }
+  if (/FxiOS/i.test(userAgent)) return "Firefox / iOS";
+  if (/Firefox/i.test(userAgent)) {
+    return /Android/i.test(userAgent) ? "Firefox / Android" : "Firefox";
+  }
+  if (/Safari/i.test(userAgent) && /Mobile/i.test(userAgent)) return "Safari / iOS";
+  if (/Safari/i.test(userAgent)) return "Safari";
 
-  return "不明";
+  return "その他のブラウザ";
 }
 
 function startLevelMeter(stream: MediaStream, onLevel: (level: number) => void) {

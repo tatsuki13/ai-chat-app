@@ -246,6 +246,20 @@ export function remoteMicErrorResponse(error: unknown) {
     };
   }
 
+  if (
+    error instanceof Error &&
+    typeof (error as Error & { status?: unknown }).status === "number"
+  ) {
+    const status = (error as Error & { status: number }).status;
+
+    if (status >= 400 && status <= 599) {
+      return {
+        message: error.message,
+        status,
+      };
+    }
+  }
+
   return {
     message: "Remote microphone request failed",
     status: 500,
