@@ -342,9 +342,7 @@ export function createRemoteStreamInputService(
       throw new Error("MediaRecorder is not available");
     }
 
-    const remoteStream = new MediaStream(
-      stream.getAudioTracks().map((track) => track.clone()),
-    );
+    const remoteStream = new MediaStream(stream.getAudioTracks());
 
     if (remoteStream.getAudioTracks().length === 0) {
       throw new Error("Remote audio track is missing");
