@@ -815,6 +815,39 @@ function SessionPageClient() {
     });
 
     peerConnection.ontrack = (event) => {
+      let remoteInputStarted = false;
+      const startRemoteInputFromTrack = () => {
+        if (remoteInputStarted || event.track.readyState !== "live") return;
+
+        remoteInputStarted = true;
+        const stream = new MediaStream([event.track]);
+        const remoteService = ensureRemoteStreamInputService();
+
+        console.info("[remote-mic pc remote input attach]", {
+          peerId: offer.peerId,
+          role: offer.role,
+          speaker,
+          readyState: event.track.readyState,
+          muted: event.track.muted,
+        });
+
+        void remoteService
+          .startRemoteInput(speaker, stream)
+          .then(() => {
+            setAudioInputError("");
+            setStatusText("スマートフォン音声入力中");
+          })
+          .catch((error) => {
+            console.error("[remote-mic pc remote input failed]", {
+              peerId: offer.peerId,
+              role: offer.role,
+              name: error instanceof Error ? error.name : "UnknownError",
+              message: error instanceof Error ? error.message : String(error),
+            });
+            setAudioInputError("スマートフォン音声入力を開始できませんでした。");
+          });
+      };
+
       console.info("[remote-mic pc track received]", {
         peerId: offer.peerId,
         role: offer.role,
@@ -830,6 +863,7 @@ function SessionPageClient() {
           role: offer.role,
           readyState: event.track.readyState,
         });
+        startRemoteInputFromTrack();
       };
       event.track.onmute = () => {
         console.warn("[remote-mic pc track muted]", {
@@ -844,24 +878,9 @@ function SessionPageClient() {
         });
       };
 
-      const stream = event.streams[0] ?? new MediaStream([event.track]);
-      const remoteService = ensureRemoteStreamInputService();
-
-      void remoteService
-        .startRemoteInput(speaker, stream)
-        .then(() => {
-          setAudioInputError("");
-          setStatusText("スマートフォン音声入力中");
-        })
-        .catch((error) => {
-          console.error("[remote-mic pc remote input failed]", {
-            peerId: offer.peerId,
-            role: offer.role,
-            name: error instanceof Error ? error.name : "UnknownError",
-            message: error instanceof Error ? error.message : String(error),
-          });
-          setAudioInputError("スマートフォン音声入力を開始できませんでした。");
-        });
+      if (!event.track.muted) {
+        startRemoteInputFromTrack();
+      }
     };
     peerConnection.onconnectionstatechange = () => {
       console.info("[remote-mic pc connection state]", {

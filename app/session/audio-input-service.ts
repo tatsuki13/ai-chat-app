@@ -350,6 +350,7 @@ export function createRemoteStreamInputService(
 
     console.info("[remote-mic remote input start]", {
       speaker,
+      role: remoteRoleLabel(speaker),
       audioTracks: remoteStream.getAudioTracks().length,
       trackState: remoteStream.getAudioTracks()[0]?.readyState,
       trackMuted: remoteStream.getAudioTracks()[0]?.muted,
@@ -370,6 +371,7 @@ export function createRemoteStreamInputService(
     void startRemoteLevelMonitoring(speaker).catch((error) => {
       console.warn("[remote-mic level meter unavailable]", {
         speaker,
+        role: remoteRoleLabel(speaker),
         name: error instanceof Error ? error.name : "UnknownError",
         message: error instanceof Error ? error.message : String(error),
       });
@@ -386,7 +388,10 @@ export function createRemoteStreamInputService(
         .webkitAudioContext;
 
     if (!AudioContextClass) {
-      console.warn("[remote-mic Web Audio API unavailable]", { speaker });
+      console.warn("[remote-mic Web Audio API unavailable]", {
+        speaker,
+        role: remoteRoleLabel(speaker),
+      });
       return;
     }
 
@@ -410,6 +415,7 @@ export function createRemoteStreamInputService(
       } catch (error) {
         console.warn("[remote-mic AudioContext resume failed]", {
           speaker,
+          role: remoteRoleLabel(speaker),
           name: error instanceof Error ? error.name : "UnknownError",
           message: error instanceof Error ? error.message : String(error),
         });
@@ -440,6 +446,7 @@ export function createRemoteStreamInputService(
     handle.recorder = recorder;
     console.info("[remote-mic remote recorder start]", {
       speaker,
+      role: remoteRoleLabel(speaker),
       mimeType,
       recorderState: recorder.state,
       trackCount: handle.stream.getAudioTracks().length,
@@ -468,6 +475,7 @@ export function createRemoteStreamInputService(
 
       console.info("[remote-mic remote segment]", {
         speaker,
+        role: remoteRoleLabel(speaker),
         size: blob.size,
         type: blob.type,
         parts: parts.length,
@@ -495,6 +503,7 @@ export function createRemoteStreamInputService(
     recorder.onerror = (event) => {
       console.error("[remote-mic remote recorder error]", {
         speaker,
+        role: remoteRoleLabel(speaker),
         recorderState: recorder.state,
         eventType: event.type,
       });
@@ -503,6 +512,7 @@ export function createRemoteStreamInputService(
     recorder.start();
     console.info("[remote-mic remote recorder started]", {
       speaker,
+      role: remoteRoleLabel(speaker),
       recorderState: recorder.state,
     });
     handle.segmentTimerId = window.setTimeout(() => {
@@ -998,4 +1008,8 @@ function getSupportedAudioMimeType() {
   ];
 
   return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
+}
+
+function remoteRoleLabel(speaker: StereoSpeaker) {
+  return speaker === "A" ? "elder" : "caregiver";
 }
