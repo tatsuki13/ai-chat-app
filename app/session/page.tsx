@@ -60,6 +60,11 @@ type RemoteMicPeerHandle = {
   peerConnection: RTCPeerConnection;
   role: SpeakerRole;
 };
+type RemoteStreamInputSetup = {
+  service: RemoteStreamInputService;
+  unsubscribeChunk: () => void;
+  unsubscribeLevel: () => void;
+};
 
 type SessionInfo = {
   id: string;
@@ -240,6 +245,7 @@ function SessionPageClient() {
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
   const remoteStreamInputServiceRef = useRef<RemoteStreamInputService | null>(null);
+  const remoteStreamInputSetupRef = useRef<RemoteStreamInputSetup | null>(null);
   const remoteMicPeerHandlesRef = useRef<Map<string, RemoteMicPeerHandle>>(
     new Map(),
   );
@@ -503,25 +509,13 @@ function SessionPageClient() {
   }, []);
 
   useEffect(() => {
-    const service = createRemoteStreamInputService();
-    const unsubscribeChunk = service.onChunk((chunk) => {
-      void handleVoiceAudioChunk(chunk);
-    });
-    const unsubscribeLevel = service.onLevel((level) => {
-      const normalizedLevel = Math.min(1, Math.max(level.rms * 8, level.peak));
-
-      setAudioInputLevels((current) => ({
-        ...current,
-        [level.speaker]: normalizedLevel,
-      }));
-    });
-
-    remoteStreamInputServiceRef.current = service;
+    ensureRemoteStreamInputService();
 
     return () => {
-      unsubscribeChunk();
-      unsubscribeLevel();
-      service.stopAllRemoteInputs();
+      remoteStreamInputSetupRef.current?.unsubscribeChunk();
+      remoteStreamInputSetupRef.current?.unsubscribeLevel();
+      remoteStreamInputSetupRef.current?.service.stopAllRemoteInputs();
+      remoteStreamInputSetupRef.current = null;
       remoteStreamInputServiceRef.current = null;
     };
   }, []);
@@ -774,6 +768,41 @@ function SessionPageClient() {
     setAudioInputLevels({ A: 0, B: 0 });
   }
 
+  function ensureRemoteStreamInputService() {
+    if (remoteStreamInputSetupRef.current) {
+      return remoteStreamInputSetupRef.current.service;
+    }
+
+    const service = createRemoteStreamInputService();
+    const unsubscribeChunk = service.onChunk((chunk) => {
+      console.info("[remote-mic pc chunk]", {
+        speaker: chunk.speaker,
+        size: chunk.blob.size,
+        mimeType: chunk.mimeType,
+        sequence: chunk.sequence,
+        durationMs: chunk.endedAt - chunk.startedAt,
+      });
+      void handleVoiceAudioChunk(chunk);
+    });
+    const unsubscribeLevel = service.onLevel((level) => {
+      const normalizedLevel = Math.min(1, Math.max(level.rms * 8, level.peak));
+
+      setAudioInputLevels((current) => ({
+        ...current,
+        [level.speaker]: normalizedLevel,
+      }));
+    });
+
+    remoteStreamInputSetupRef.current = {
+      service,
+      unsubscribeChunk,
+      unsubscribeLevel,
+    };
+    remoteStreamInputServiceRef.current = service;
+
+    return service;
+  }
+
   async function acceptRemoteMicWebRtcOffer(
     sessionId: string,
     offer: RemoteMicWebRtcOffer,
@@ -787,9 +816,18 @@ function SessionPageClient() {
 
     peerConnection.ontrack = (event) => {
       const stream = event.streams[0] ?? new MediaStream([event.track]);
+      const remoteService = ensureRemoteStreamInputService();
 
-      void remoteStreamInputServiceRef.current
-        ?.startRemoteInput(speaker, stream)
+      console.info("[remote-mic pc track received]", {
+        role: offer.role,
+        speaker,
+        trackKind: event.track.kind,
+        trackState: event.track.readyState,
+        streamAudioTracks: stream.getAudioTracks().length,
+      });
+
+      void remoteService
+        .startRemoteInput(speaker, stream)
         .then(() => {
           setAudioInputError("");
           setStatusText("スマートフォン音声入力中");
@@ -800,6 +838,11 @@ function SessionPageClient() {
         });
     };
     peerConnection.onconnectionstatechange = () => {
+      console.info("[remote-mic pc peer state]", {
+        role: offer.role,
+        state: peerConnection.connectionState,
+      });
+
       if (
         peerConnection.connectionState === "failed" ||
         peerConnection.connectionState === "closed" ||
@@ -841,9 +884,17 @@ function SessionPageClient() {
 
   async function handleVoiceAudioChunk(chunk: SingleMicAudioChunk) {
     const currentSession = sessionRef.current;
-    if (!currentSession || chunk.blob.size < 512 || !sttEnabledRef.current) return;
+    if (!currentSession || chunk.blob.size < 512 || !sttEnabledRef.current) {
+      console.info("[remote-mic pc chunk skipped before stt]", {
+        hasSession: Boolean(currentSession),
+        size: chunk.blob.size,
+        sttEnabled: sttEnabledRef.current,
+      });
+      return;
+    }
 
     try {
+      setStatusText("スマートフォン音声を文字起こし中");
       const data = await sendAudioChunkToStt(
         currentSession.id,
         chunk.speaker,
@@ -854,7 +905,17 @@ function SessionPageClient() {
         chunk.endedAt,
       );
 
-      if (!data.utterance) return;
+      console.info("[remote-mic pc stt result]", {
+        speaker: chunk.speaker,
+        skipped: Boolean(data.skipped),
+        hasUtterance: Boolean(data.utterance),
+        transcriptLength: data.transcript?.length ?? data.utterance?.text.length ?? 0,
+      });
+
+      if (!data.utterance) {
+        setStatusText(data.skipped ? "音声区間をスキップ" : "発話なし");
+        return;
+      }
 
       startTopicTimerIfNeeded();
       setUtterances((current) =>
@@ -2642,6 +2703,15 @@ async function sendAudioChunkToStt(
   const response = await fetch("/api/transcribe-utterance", {
     method: "POST",
     body: formData,
+  });
+
+  console.info("[remote-mic pc stt response]", {
+    speaker: normalizeSpeaker(speaker),
+    status: response.status,
+    ok: response.ok,
+    size: blob.size,
+    mimeType,
+    chunkNumber,
   });
 
   if (!response.ok) {

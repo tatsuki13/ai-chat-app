@@ -354,6 +354,10 @@ export function createRemoteStreamInputService(
     const remoteStream = new MediaStream(
       stream.getAudioTracks().map((track) => track.clone()),
     );
+    console.info("[remote-mic remote input start]", {
+      speaker,
+      audioTracks: remoteStream.getAudioTracks().length,
+    });
     const context = new AudioContextClass();
     const source = context.createMediaStreamSource(remoteStream);
     const analyser = context.createAnalyser();
@@ -417,6 +421,15 @@ export function createRemoteStreamInputService(
       const endedAt = Date.now();
       const blob = new Blob(parts, {
         type: recorder.mimeType || parts[0]?.type || mimeType,
+      });
+
+      console.info("[remote-mic remote segment]", {
+        speaker,
+        size: blob.size,
+        type: blob.type,
+        parts: parts.length,
+        durationMs: endedAt - startedAt,
+        active: Boolean(currentHandle?.active),
       });
 
       if (blob.size >= 512 && currentHandle?.active) {
