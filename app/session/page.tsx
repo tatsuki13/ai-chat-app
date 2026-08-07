@@ -46,10 +46,29 @@ type RemoteMicRoleStatus = {
   revokedAt?: string | null;
   lastHeartbeatAt?: string | null;
   disconnectedAt?: string | null;
+  muted?: boolean;
+  transmitting?: boolean;
 };
 type RemoteMicStatusResponse = {
   now: string;
   roles: Record<SpeakerRole, RemoteMicRoleStatus>;
+};
+type FixedRemoteMicActiveResponse = {
+  active: {
+    sessionId: string;
+    participantCode: string | null;
+    endedAt: string | null;
+    dialogueStartedAt: string | null;
+    roles: Record<
+      SpeakerRole,
+      {
+        connectedAt: number | null;
+        lastSeenAt: number | null;
+        muted: boolean;
+        transmitting: boolean;
+      }
+    >;
+  };
 };
 type RemoteMicWebRtcOffer = {
   peerId: string;
@@ -71,6 +90,7 @@ type SessionInfo = {
   participant_code: string | null;
   condition: string | null;
   started_at: string;
+  dialogue_started_at: string | null;
   ended_at: string | null;
 };
 
@@ -303,6 +323,7 @@ function SessionPageClient() {
               setUtterances(restored.utterances);
               setUtteranceTotal(restored.utterance_count);
               resetTopicTiming();
+              applyDialogueStartedAt(restored.session.dialogue_started_at);
               setStatusText("保存済み");
               setBusyAction(null);
             }
@@ -348,17 +369,19 @@ function SessionPageClient() {
   }, [session]);
 
   useEffect(() => {
-    if (!session?.id || session.ended_at || !remoteMicrophoneConnected) return;
+    if (!session?.id || session.ended_at) return;
 
     const timerId = window.setInterval(() => {
       void fetchSessionDetail(session.id)
         .then((detail) => {
+          setSession(detail.session);
           setUtterances((current) =>
             mergeUtterances(current, detail.utterances).slice(
               -MAX_RENDERED_UTTERANCES,
             ),
           );
           setUtteranceTotal(detail.utterance_count);
+          applyDialogueStartedAt(detail.session.dialogue_started_at);
         })
         .catch(() => {});
     }, REMOTE_MIC_SESSION_SYNC_MS);
@@ -366,7 +389,7 @@ function SessionPageClient() {
     return () => {
       window.clearInterval(timerId);
     };
-  }, [remoteMicrophoneConnected, session?.id, session?.ended_at]);
+  }, [session?.id, session?.ended_at]);
 
   useEffect(() => {
     promptPanelRef.current = promptPanel;
@@ -422,9 +445,10 @@ function SessionPageClient() {
 
     async function refresh() {
       try {
-        const status = await fetchRemoteMicStatus(session.id);
+        const status = await activateFixedRemoteMics(session.id);
         if (!ignore) {
           setRemoteMicStatuses(status.roles);
+          applyDialogueStartedAt(status.dialogueStartedAt);
         }
       } catch {
         if (!ignore) {
@@ -454,40 +478,8 @@ function SessionPageClient() {
   }, [remoteMicrophoneConnected]);
 
   useEffect(() => {
-    if (!session?.id || session.ended_at || !remoteMicrophoneConnected) {
-      stopRemoteMicWebRtc();
-      return;
-    }
-
-    let ignore = false;
-
-    async function refreshOffers() {
-      try {
-        const offers = await fetchRemoteMicWebRtcOffers(session.id);
-        if (ignore) return;
-
-        for (const offer of offers) {
-          if (remoteMicPeerHandlesRef.current.has(offer.peerId)) continue;
-
-          await acceptRemoteMicWebRtcOffer(session.id, offer);
-        }
-      } catch (error) {
-        console.warn("Remote microphone WebRTC negotiation failed", error);
-        setAudioInputError("スマートフォン音声ストリームを確認してください。");
-      }
-    }
-
-    void refreshOffers();
-    const timerId = window.setInterval(() => {
-      void refreshOffers();
-    }, 2000);
-
-    return () => {
-      ignore = true;
-      window.clearInterval(timerId);
-      stopRemoteMicWebRtc();
-    };
-  }, [remoteMicrophoneConnected, session?.id, session?.ended_at]);
+    stopRemoteMicWebRtc();
+  }, []);
 
   useEffect(() => {
     const service = createSingleMicInputService();
@@ -662,7 +654,6 @@ function SessionPageClient() {
     if (!session || !draft.trim()) return;
 
     const text = draft.trim();
-    startTopicTimerIfNeeded();
     setDraft("");
     setStatusText("保存中");
 
@@ -744,7 +735,6 @@ function SessionPageClient() {
       if (!pushToTalkPressedRef.current) return;
 
       const activeSpeaker = toAudioSpeaker(speakerRef.current);
-      startTopicTimerIfNeeded();
       voiceInputServiceRef.current.startCapture(activeSpeaker);
       pushToTalkActiveRef.current = true;
       setPushToTalkActive(true);
@@ -995,7 +985,6 @@ function SessionPageClient() {
         return;
       }
 
-      startTopicTimerIfNeeded();
       setUtterances((current) =>
         [...current, data.utterance as Utterance]
           .sort(compareUtterancesByTime)
@@ -1277,6 +1266,9 @@ function SessionPageClient() {
     try {
       const updated = await updateSessionDisplayId(session.id, nextId);
       setSession(updated);
+      setUtterances([]);
+      setUtteranceTotal(0);
+      resetTopicTiming();
       setIsEditingId(false);
       setStatusText("保存済み");
     } catch (error) {
@@ -1451,6 +1443,31 @@ function SessionPageClient() {
     setFinalMinutes(null);
     setTopicStartedAt(null);
     setTimerNow(now);
+  }
+
+  function applyDialogueStartedAt(value: string | null) {
+    if (!value) {
+      if (topicStartedAtRef.current === null) return;
+
+      topicStartedAtRef.current = null;
+      timerPausedStartedAtRef.current = null;
+      timerRunningRef.current = false;
+      setTopicPausedMs(0);
+      setTopicStartedAt(null);
+      setTimerNow(Date.now());
+      return;
+    }
+
+    const startedAt = new Date(value).getTime();
+    if (!Number.isFinite(startedAt)) return;
+    if (topicStartedAtRef.current === startedAt) return;
+
+    topicStartedAtRef.current = startedAt;
+    timerPausedStartedAtRef.current = null;
+    timerRunningRef.current = true;
+    setTopicPausedMs(0);
+    setTopicStartedAt(startedAt);
+    setTimerNow(Date.now());
   }
 
   function startTopicTimerIfNeeded() {
@@ -1718,10 +1735,6 @@ function SessionPageClient() {
                   onChange={(event) => {
                     const nextDraft = event.target.value;
 
-                    if (nextDraft.trim()) {
-                      startTopicTimerIfNeeded();
-                    }
-
                     setDraft(nextDraft);
                   }}
                   rows={2}
@@ -1815,7 +1828,7 @@ function RemoteMicrophonePanel(props: {
     <aside className="rounded-md border border-stone-300 bg-white p-3 shadow-sm">
       <div>
         <div className="text-[11px] font-black uppercase tracking-[0.08em] text-stone-500">
-          Network Mic
+          Fixed Mic
         </div>
         <h2 className="mt-0.5 text-[14px] font-black leading-tight">
           スマートフォンマイク
@@ -1829,7 +1842,7 @@ function RemoteMicrophonePanel(props: {
           roleStatus={props.statuses.caregiver}
         />
         <RemoteMicrophoneStatus
-          label="高齢者マイク"
+          label="本人マイク"
           role="elder"
           roleStatus={props.statuses.elder}
         />
@@ -1867,7 +1880,7 @@ function RemoteMicrophoneStatus(props: {
       </div>
       <div className="mt-2">
         <div className="mb-1 flex items-center justify-between text-[10px] font-bold text-stone-500">
-          <span>入力音量</span>
+          <span>{props.roleStatus.transmitting ? "送信中" : "ミュート"}</span>
           <span>{props.roleStatus.lastHeartbeatAt ? formatDateTime(props.roleStatus.lastHeartbeatAt) : "-"}</span>
         </div>
       </div>
@@ -1904,6 +1917,46 @@ async function fetchRemoteMicStatus(sessionId: string) {
   }
 
   return (await response.json()) as RemoteMicStatusResponse;
+}
+
+async function activateFixedRemoteMics(sessionId: string) {
+  const response = await fetch("/api/remote-mic/fixed/active", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Fixed remote microphone activation failed: ${response.status}`);
+  }
+
+  const data = (await response.json()) as FixedRemoteMicActiveResponse;
+  const now = Date.now();
+
+  return {
+    dialogueStartedAt: data.active.dialogueStartedAt,
+    roles: {
+      elder: toFixedRemoteMicStatus(data.active.roles.elder, now),
+      caregiver: toFixedRemoteMicStatus(data.active.roles.caregiver, now),
+    },
+  };
+}
+
+function toFixedRemoteMicStatus(
+  roleState: FixedRemoteMicActiveResponse["active"]["roles"][SpeakerRole],
+  now: number,
+): RemoteMicRoleStatus {
+  const connected =
+    roleState.lastSeenAt !== null && now - roleState.lastSeenAt <= 45_000;
+
+  return {
+    status: connected ? "connected" : "disconnected",
+    lastHeartbeatAt: roleState.lastSeenAt
+      ? new Date(roleState.lastSeenAt).toISOString()
+      : null,
+    muted: roleState.muted,
+    transmitting: roleState.transmitting,
+  };
 }
 
 async function fetchRemoteMicWebRtcOffers(sessionId: string) {

@@ -6,6 +6,8 @@ type RemoteMicRole = "elder" | "caregiver";
 type RemoteMicSession = {
   sessionId: string;
   role: RemoteMicRole;
+  participantCode: string | null;
+  dialogueStartedAt: string | null;
   expiresAt: string;
 };
 type MicState = "idle" | "requesting" | "streaming";
@@ -58,6 +60,7 @@ const CLIENT_VERSION = "remote-mic-client-2026-07-30-speech-text";
 
 export default function RemoteMicClient() {
   const [remoteMic, setRemoteMic] = useState<RemoteMicSession | null>(null);
+  const [fixedRole, setFixedRole] = useState<RemoteMicRole | null>(null);
   const [micState, setMicState] = useState<MicState>("idle");
   const [secureContext, setSecureContext] = useState(false);
   const [mediaSupported, setMediaSupported] = useState(false);
@@ -123,26 +126,55 @@ export default function RemoteMicClient() {
       );
     }
 
+    const role = getFixedRemoteMicRole();
+    setFixedRole(role);
+
     async function loadSession() {
+      if (!role) {
+        setServerLabel("役割未設定");
+        setError("/mic/elder または /mic/caregiver で開いてください。");
+        return;
+      }
+
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => {
         controller.abort();
       }, SESSION_CHECK_TIMEOUT_MS);
 
       try {
-        const response = await fetch("/api/remote-mic/session", {
+        const response = await fetch(`/api/remote-mic/fixed/current?role=${role}`, {
           cache: "no-store",
           signal: controller.signal,
         });
 
         if (!response.ok) {
           throw new Error(
-            `認証情報を確認できません。PC画面から新しいQRコードを発行してください。(${response.status})`,
+            `現在の対話セッションを確認できません。PC対話ページを開いてください。(${response.status})`,
           );
         }
 
-        const data = (await response.json()) as { remoteMic: RemoteMicSession };
-        setRemoteMic(data.remoteMic);
+        const data = (await response.json()) as {
+          active: {
+            sessionId: string;
+            participantCode: string | null;
+            dialogueStartedAt: string | null;
+            endedAt: string | null;
+          } | null;
+          role: RemoteMicRole;
+        };
+        if (!data.active) {
+          setRemoteMic(null);
+          setServerLabel("PC待機中");
+          return;
+        }
+
+        setRemoteMic({
+          sessionId: data.active.sessionId,
+          participantCode: data.active.participantCode,
+          dialogueStartedAt: data.active.dialogueStartedAt,
+          role: data.role,
+          expiresAt: "",
+        });
         setServerLabel("接続準備完了");
       } catch (loadError) {
         setServerLabel("未接続");
@@ -151,7 +183,7 @@ export default function RemoteMicClient() {
             ? "サーバー接続確認がタイムアウトしました。Tailscale接続とSafariで開いているかを確認してください。"
             : loadError instanceof Error
               ? loadError.message
-              : "マイク接続を確認できませんでした。",
+            : "現在の対話セッションを確認できませんでした。",
         );
       } finally {
         window.clearTimeout(timeoutId);
@@ -166,12 +198,95 @@ export default function RemoteMicClient() {
   }, []);
 
   useEffect(() => {
+    if (!fixedRole || micState === "streaming") return;
+
+    const timerId = window.setInterval(() => {
+      void fetch(`/api/remote-mic/fixed/current?role=${fixedRole}`, {
+        cache: "no-store",
+      })
+        .then((response) => {
+          if (!response.ok) throw new Error(`current failed: ${response.status}`);
+
+          return response.json() as Promise<{
+            active: {
+              sessionId: string;
+              participantCode: string | null;
+              dialogueStartedAt: string | null;
+              endedAt: string | null;
+            } | null;
+            role: RemoteMicRole;
+          }>;
+        })
+        .then((data) => {
+          if (!data.active) {
+            setRemoteMic(null);
+            setServerLabel("PC待機中");
+            return;
+          }
+
+          setRemoteMic({
+            sessionId: data.active.sessionId,
+            participantCode: data.active.participantCode,
+            dialogueStartedAt: data.active.dialogueStartedAt,
+            role: data.role,
+            expiresAt: "",
+          });
+          setServerLabel("接続準備完了");
+        })
+        .catch(() => {
+          setServerLabel("PC接続確認中");
+        });
+    }, 3000);
+
+    return () => window.clearInterval(timerId);
+  }, [fixedRole, micState]);
+
+  useEffect(() => {
     if (!remoteMic || micState !== "streaming") return;
 
     const timerId = window.setInterval(() => {
-      void fetch("/api/remote-mic/heartbeat", { method: "POST" }).catch(() => {
-        setServerLabel("通信が不安定です");
-      });
+      if (!fixedRole) return;
+
+      void fetch(`/api/remote-mic/fixed/current?role=${fixedRole}`, {
+        cache: "no-store",
+      })
+        .then((response) => {
+          if (!response.ok) throw new Error(`current failed: ${response.status}`);
+
+          return response.json() as Promise<{
+            active: {
+              sessionId: string;
+              participantCode: string | null;
+              dialogueStartedAt: string | null;
+              endedAt: string | null;
+            } | null;
+            role: RemoteMicRole;
+          }>;
+        })
+        .then((data) => {
+          if (
+            !data.active ||
+            data.active.sessionId !== remoteMic.sessionId ||
+            data.active.participantCode !== remoteMic.participantCode ||
+            data.active.endedAt
+          ) {
+            void stop(false);
+            setServerLabel("PC待機中");
+            return;
+          }
+
+          setRemoteMic((current) =>
+            current
+              ? {
+                  ...current,
+                  dialogueStartedAt: data.active?.dialogueStartedAt ?? null,
+                }
+              : current,
+          );
+        })
+        .catch(() => {
+          setServerLabel("通信が不安定です");
+        });
     }, HEARTBEAT_MS);
 
     return () => {
@@ -228,6 +343,7 @@ export default function RemoteMicClient() {
       chunkLevelRef.current = { sum: 0, count: 0, peak: 0 };
       setPermissionLabel("許可済み");
       setMicState("streaming");
+      await setFixedMicMuted(false);
       setServerLabel("音声認識中");
       startSpeechRecognition(SpeechRecognitionClass);
     } catch (startError) {
@@ -328,10 +444,16 @@ export default function RemoteMicClient() {
     sequenceRef.current = sentSequence;
     setSequence(sentSequence);
 
-    const response = await fetch("/api/remote-mic/utterance", {
+    if (!remoteMic) {
+      throw new Error("現在の対話セッションが未設定です。");
+    }
+
+    const response = await fetch("/api/remote-mic/fixed/utterance", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        sessionId: remoteMic.sessionId,
+        role: remoteMic.role,
         text,
         recognized_at: recognizedAt,
       }),
@@ -674,9 +796,40 @@ export default function RemoteMicClient() {
     setMicState("idle");
 
     if (notifyServer) {
-      await fetch("/api/remote-mic/disconnect", { method: "POST" }).catch(() => {});
+      await setFixedMicMuted(true).catch(() => {});
       setServerLabel("停止中");
     }
+  }
+
+  async function setFixedMicMuted(muted: boolean) {
+    if (!remoteMic) return;
+
+    const response = await fetch("/api/remote-mic/fixed/mute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: remoteMic.sessionId,
+        role: remoteMic.role,
+        muted,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`マイク状態を更新できませんでした。(${response.status})`);
+    }
+
+    const data = (await response.json()) as {
+      dialogueStartedAt: string | null;
+      muted: boolean;
+    };
+    setRemoteMic((current) =>
+      current
+        ? {
+            ...current,
+            dialogueStartedAt: data.dialogueStartedAt,
+          }
+        : current,
+    );
   }
 
   return (
@@ -691,6 +844,8 @@ export default function RemoteMicClient() {
 
         <div className="mt-4 space-y-3">
           <StatusRow label="サーバー接続" value={serverLabel} />
+          <StatusRow label="固定役割" value={fixedRole ? getRemoteMicRoleLabel(fixedRole) : "未設定"} />
+          <StatusRow label="参加者ID" value={remoteMic?.participantCode || "PC待機中"} />
           <StatusRow label="表示URL" value={openUrlLabel} />
           <StatusRow label="ブラウザ" value={browserLabel} />
           <StatusRow label="安全判定" value={getSecureContextLabel(secureContext)} />
@@ -900,6 +1055,25 @@ function getMediaSupportLabel(mediaSupported: boolean, secureContext: boolean) {
   if (secureContext) return "利用不可/Safariで開く";
 
   return "利用不可/安全判定待ち";
+}
+
+function getFixedRemoteMicRole(): RemoteMicRole | null {
+  const path = window.location.pathname.toLowerCase();
+  if (path.includes("/mic/elder")) {
+    window.localStorage.setItem("fixed-remote-mic-role", "elder");
+    return "elder";
+  }
+  if (path.includes("/mic/caregiver")) {
+    window.localStorage.setItem("fixed-remote-mic-role", "caregiver");
+    return "caregiver";
+  }
+
+  const saved = window.localStorage.getItem("fixed-remote-mic-role");
+  return saved === "elder" || saved === "caregiver" ? saved : null;
+}
+
+function getRemoteMicRoleLabel(role: RemoteMicRole) {
+  return role === "elder" ? "本人用" : "介護者用";
 }
 
 function getSpeechRecognitionConstructor() {

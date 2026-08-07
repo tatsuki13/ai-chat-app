@@ -56,6 +56,7 @@ export async function POST(request: Request) {
         participant_code: session.participantCode,
         condition: session.condition,
         started_at: session.startedAt.toISOString(),
+        dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
         ended_at: session.endedAt?.toISOString() ?? null,
       },
       slot_states: context.slotStates,

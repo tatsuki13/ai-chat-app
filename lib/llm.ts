@@ -72,6 +72,10 @@ type ConversationContext = {
   nextTopicTitle?: string;
 };
 
+const NEXT_QUESTION_RECENT_UTTERANCE_COUNT = 16;
+const NEXT_QUESTION_UNASSIGNED_UTTERANCE_COUNT = 16;
+const NEXT_QUESTION_ALREADY_ASKED_COUNT = 12;
+
 type ExplicitNoneResponse = {
   slotName: AcpSlotName;
   utterance: ConversationUtterance;
@@ -132,6 +136,9 @@ const SYSTEM_NEXT_QUESTION = [
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
+  "Use next_question_input.slotBackedMemory as the stable record of what has already been captured in slots.",
+  "Use next_question_input.unassignedRecentUtterances as possible conversational cues, but do not treat them as confirmed slot content unless the utterance itself clearly supports the question.",
+  "When slotBackedMemory and recentUtterances conflict, prefer slotBackedMemory for coverage decisions and recentUtterances for natural wording.",
   '{"question":"...","transition_phrase":"...","target_slot":"...","targetMainSlotId":"...","targetSubSlotId":"...","reason":"...","sensitivity":"low | medium | high"}',
 ].join("\n");
 
@@ -1594,6 +1601,16 @@ async function buildQuestionPayload(context: ConversationContext) {
     slotControl,
     context.subSlotStates ?? [],
   );
+  const slotBackedMemory = buildSlotBackedQuestionMemory(
+    currentTopic.id,
+    context.subSlotStates ?? [],
+    context.utterances,
+  );
+  const unassignedRecentUtterances = buildUnassignedRecentUtterances(
+    context.utterances,
+    context.subSlotStates ?? [],
+    NEXT_QUESTION_UNASSIGNED_UTTERANCE_COUNT,
+  );
 
   return {
     ...payload,
@@ -1619,15 +1636,16 @@ async function buildQuestionPayload(context: ConversationContext) {
         title: currentTopic.title,
       },
       askableSubSlots,
-      recentUtterances: recentUtterances(context.utterances, 8).map((utterance) => ({
-        id: utterance.id,
-        speaker: utterance.speaker,
-        text: utterance.text,
-      })),
+      slotBackedMemory,
+      unassignedRecentUtterances,
+      recentUtterances: recentUtterances(
+        context.utterances,
+        NEXT_QUESTION_RECENT_UTTERANCE_COUNT,
+      ).map(toQuestionUtterancePayload),
       alreadyAskedQuestions: context.utterances
         .filter((utterance) => !isElderSpeaker(utterance.speaker))
         .map((utterance) => utterance.text)
-        .slice(-8),
+        .slice(-NEXT_QUESTION_ALREADY_ASKED_COUNT),
       remainingQuestionCount: Math.max(
         0,
         currentTopic.maxFollowUpQuestions -
@@ -1674,6 +1692,71 @@ function buildAskableSubSlotsForQuestionPayload(
     });
 }
 
+function buildSlotBackedQuestionMemory(
+  currentMainSlotId: string,
+  subSlotStates: StoredSubSlotState[],
+  utterances: ConversationUtterance[],
+) {
+  const utteranceById = new Map(
+    utterances
+      .filter((utterance) => utterance.id)
+      .map((utterance) => [utterance.id as string, utterance]),
+  );
+
+  return subSlotStates
+    .filter((state) => state.mainSlotId === currentMainSlotId)
+    .map((state) => {
+      const definition = resolveSubSlotDefinition(state.mainSlotId, state.subSlotId);
+      const evidenceUtterances = state.evidenceUtteranceIds
+        .map((id) => utteranceById.get(id))
+        .filter((utterance): utterance is ConversationUtterance => Boolean(utterance))
+        .map(toQuestionUtterancePayload);
+
+      return {
+        mainSlotId: state.mainSlotId,
+        subSlotId: state.subSlotId,
+        label: definition?.label ?? state.subSlotId,
+        description: definition?.description ?? "",
+        completion: state.completion,
+        responseState: state.responseState,
+        reasonCode: state.reasonCode,
+        canAskAgain: state.canAskAgain,
+        evidenceUtterances,
+      };
+    })
+    .filter(
+      (state) =>
+        state.completion !== "none" ||
+        state.responseState !== "no_response" ||
+        state.evidenceUtterances.length > 0,
+    );
+}
+
+function buildUnassignedRecentUtterances(
+  utterances: ConversationUtterance[],
+  subSlotStates: StoredSubSlotState[],
+  count: number,
+) {
+  const assignedUtteranceIds = new Set(
+    subSlotStates.flatMap((state) => state.evidenceUtteranceIds),
+  );
+
+  return recentUtterances(
+    utterances.filter(
+      (utterance) => !utterance.id || !assignedUtteranceIds.has(utterance.id),
+    ),
+    count,
+  ).map(toQuestionUtterancePayload);
+}
+
+function toQuestionUtterancePayload(utterance: ConversationUtterance) {
+  return {
+    id: utterance.id,
+    speaker: utterance.speaker,
+    text: utterance.text,
+    created_at: utterance.created_at ?? utterance.createdAt ?? null,
+  };
+}
 function buildQuestionScopeFromSlotControl(
   debugState: SlotControlDebugState,
   fallback: ReturnType<typeof getCurrentTopicQuestionScope>,

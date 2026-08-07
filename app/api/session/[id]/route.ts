@@ -22,6 +22,7 @@ export async function GET(_request: Request, context: RouteContext) {
           participantCode: true,
           condition: true,
           startedAt: true,
+          dialogueStartedAt: true,
           endedAt: true,
         },
       }),
@@ -51,6 +52,7 @@ export async function GET(_request: Request, context: RouteContext) {
         participant_code: session.participantCode,
         condition: session.condition,
         started_at: session.startedAt.toISOString(),
+        dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
         ended_at: session.endedAt?.toISOString() ?? null,
       },
       utterance_count: utteranceCount,
@@ -109,10 +111,40 @@ export async function PATCH(request: Request, context: RouteContext) {
       );
     }
 
-    const session = await prisma.session.update({
-      where: { id },
+    const [, , session] = await prisma.$transaction([
+      prisma.sessionUtterance.deleteMany({
+        where: { sessionId: id },
+      }),
+      prisma.finalMinute.deleteMany({
+        where: { sessionId: id },
+      }),
+      prisma.session.update({
+        where: { id },
+        data: {
+          participantCode,
+          dialogueStartedAt: null,
+        },
+      }),
+    ]);
+
+    await prisma.slotState.updateMany({
+      where: { sessionId: id },
       data: {
-        participantCode,
+        status: "unanswered",
+        summary: "",
+        evidenceUtterance: null,
+      },
+    });
+    await prisma.slotSubState.updateMany({
+      where: { sessionId: id },
+      data: {
+        completion: "none",
+        responseState: "no_response",
+        reasonCode: "not_discussed",
+        evidenceUtteranceIds: [],
+        canAskAgain: true,
+        isDeferred: false,
+        lastUpdatedTopicId: null,
       },
     });
 
@@ -120,9 +152,10 @@ export async function PATCH(request: Request, context: RouteContext) {
       session: {
         id: session.id,
         participant_code: session.participantCode,
-        condition: session.condition,
-        started_at: session.startedAt.toISOString(),
-        ended_at: session.endedAt?.toISOString() ?? null,
+      condition: session.condition,
+      started_at: session.startedAt.toISOString(),
+      dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
+      ended_at: session.endedAt?.toISOString() ?? null,
       },
     });
   } catch (error) {

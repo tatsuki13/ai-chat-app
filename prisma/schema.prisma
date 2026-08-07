@@ -11,6 +11,7 @@ model Session {
   participantCode String?              @map("participant_code")
   condition       String?
   startedAt       DateTime             @default(now()) @map("started_at")
+  dialogueStartedAt DateTime?          @map("dialogue_started_at")
   endedAt         DateTime?            @map("ended_at")
   finalMinutes    FinalMinute[]
   subSlotStates   SlotSubState[]
@@ -19,6 +20,7 @@ model Session {
   remoteMicTokens RemoteMicJoinToken[]
 
   @@index([startedAt])
+  @@index([dialogueStartedAt])
   @@index([participantCode])
   @@map("sessions")
 }
