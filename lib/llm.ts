@@ -5,6 +5,7 @@ import {
   DISCUSSION_TOPICS,
   OPTIONAL_RESEARCH_THEMES,
   RESEARCH_THEMES,
+  buildACPMinutesFromStructuredInput,
   buildFallbackMinutes,
   buildSlotControlDebugState,
   calculateThemeCompletenessMetrics,
@@ -34,10 +35,13 @@ import {
   mergeSlotStates,
   normalizeSlotName,
   recentUtterances,
+  renderACPMinutesMarkdown,
   renderTranscript,
   resolveDiscussionTopic,
   resolveSubSlotDefinition,
   resolveResearchThemeForSlot,
+  validateACPMinutes,
+  type ACPMinutes,
   type AcpSlotName,
   type AnswerDepth,
   type AuxiliaryMinutesItem,
@@ -185,14 +189,20 @@ const SYSTEM_END_CHECK = [
 ].join("\n");
 
 const SYSTEM_FINAL_MINUTES_FROM_STRUCTURED = [
-  "You write Japanese ACP minutes for medical and care professionals.",
-  "Use only the validated structured slot data in the input. Do not re-classify the raw transcript and do not invent facts.",
-  "The visible markdown is clinical-facing documentation, not debug output. Do not include internal IDs, JSON keys, response_state names, completion labels, metrics, or raw slot status words.",
-  "Write concise natural Japanese. Organize by ACP theme and mention only themes/aspects that have confirmed evidence or clear follow-up needs.",
-  "If a caregiver paraphrase is used, state it only when the structured evidence also includes elder agreement or elaboration. Do not treat caregiver-only content as the elder's preference.",
-  "Separate confirmed elder wishes/values from items that require confirmation at the next conversation.",
-  "Do not add medical treatment recommendations, legal advice, diagnoses, family names, genders, or relationships unless present in the structured input.",
-  "Return JSON only with this shape: {\"markdown\":\"...\"}.",
+  "あなたはACPの話し合い記録を整理するシステムです。",
+  "入力には、ACP対話から既に抽出され、匿名化された構造化情報だけが含まれています。",
+  "入力された情報のみを使用してください。",
+  "新しい事実、希望、価値観、理由、人物関係を推測・補完してはいけません。",
+  "本人が話していない希望を生成してはいけません。",
+  "発言主体を変更してはいけません。",
+  "「かもしれない」「できれば」「状況による」「まだ決めていない」などの曖昧さや条件を、断定表現へ変更してはいけません。",
+  "否定表現を肯定表現へ変更してはいけません。",
+  "複数の発言を統合する場合は、その意味が明確に共通していて、根拠aspectが2つ以上ある場合だけ統合してください。",
+  "テーマ内の文章は生成しないでください。あなたが担当するのはoverall_summaryのみです。",
+  "core_values と cross_theme_connections は必ず source_aspects を持たせ、根拠aspectが1つしかない内容は生成しないでください。",
+  "入力に情報がない項目は空配列 [] としてください。",
+  "JSON以外の文章を出力しないでください。",
+  "Return JSON only with this shape: {\"overall_summary\":{\"core_values\":[{\"text\":\"...\",\"source_aspects\":[\"...\"]}],\"cross_theme_connections\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"related_themes\":[\"...\"]}],\"undecided_things\":[\"...\"]}}.",
 ].join("\n");
 
 const SYSTEM_SLOT_CONTROL_DEBUG = [
@@ -979,20 +989,34 @@ export async function generateFinalMinutes(
     getSessionMetadata(context),
     context.subSlotStates ?? [],
   );
-  const result = await requestJson<{ markdown?: unknown }>(
+  const baseMinutes =
+    fallback.json.acp_minutes ??
+    buildACPMinutesFromStructuredInput(fallback.json.acp_minutes_llm_input ?? {
+      title: "これからの暮らしと大切にしたいこと",
+      recordType: "acp_discussion_record_input",
+      themes: [],
+    });
+  const result = await requestJson<{ overall_summary?: unknown }>(
     SYSTEM_FINAL_MINUTES_FROM_STRUCTURED,
     buildStructuredMinutesPayload(fallback),
-    { markdown: fallback.markdown },
+    { overall_summary: baseMinutes.overall_summary },
   );
-  const markdown =
-    typeof result.markdown === "string" && result.markdown.trim()
-      ? result.markdown.trim()
-      : fallback.markdown;
+  const validatedMinutes = validateACPMinutes({
+    ...baseMinutes,
+    overall_summary: result.overall_summary,
+  }) ?? baseMinutes;
+  const markdown = renderACPMinutesMarkdown(
+    validatedMinutes,
+    fallback.json.generated_at,
+  );
 
   return ensureFinalMinutesIncludeTopic(
     {
       markdown,
-      json: fallback.json,
+      json: {
+        ...fallback.json,
+        acp_minutes: validatedMinutes,
+      },
     },
     context,
   );
@@ -1000,12 +1024,8 @@ export async function generateFinalMinutes(
 
 function buildStructuredMinutesPayload(minutes: FinalMinutesResult) {
   return {
-    session: minutes.json.session,
     generated_at: minutes.json.generated_at,
-    themes: summarizeStructuredThemes(minutes.json.themes ?? []),
-    optional_themes: summarizeStructuredThemes(minutes.json.optional_themes ?? []),
-    follow_up_items: minutes.json.auxiliary_items ?? [],
-    summary: minutes.json.summary,
+    acp_minutes_input: minutes.json.acp_minutes_llm_input,
   };
 }
 
@@ -1809,6 +1829,11 @@ function ensureFinalMinutesIncludeTopic(
       discussion_topic: DISCUSSION_TOPIC,
       utterances: context.utterances,
       slots: filterAcpSlotStates(context.slotStates),
+      acp_minutes: validateACPMinutes(rawJson.acp_minutes) ?? fallback.json.acp_minutes,
+      acp_minutes_llm_input:
+        rawJson.acp_minutes_llm_input && typeof rawJson.acp_minutes_llm_input === "object"
+          ? (rawJson.acp_minutes_llm_input as FinalMinutesResult["json"]["acp_minutes_llm_input"])
+          : fallback.json.acp_minutes_llm_input,
       themes: Array.isArray(rawJson.themes)
         ? (rawJson.themes as FinalMinutesResult["json"]["themes"])
         : fallback.json.themes,

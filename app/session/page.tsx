@@ -224,6 +224,7 @@ function SessionPageClient() {
   const [finalMinutes, setFinalMinutes] = useState<{
     id: string;
     markdown: string;
+    json: unknown;
     created_at: string;
   } | null>(null);
   const [completionError, setCompletionError] = useState("");
@@ -2268,13 +2269,14 @@ function TopicTransitionProposalCard(props: {
 
 function SessionCompletionPanel(props: {
   state: SessionCompletionState;
-  finalMinutes: { id: string; markdown: string; created_at: string } | null;
+  finalMinutes: { id: string; markdown: string; json?: unknown; created_at: string } | null;
   error: string;
   onRetry: () => void;
 }) {
   const [pdfFileName, setPdfFileName] = useState(() =>
     createDefaultPdfFileName(),
   );
+  const acpMinutes = getAcpMinutesFromFinalMinutes(props.finalMinutes);
 
   if (props.state === "failed") {
     return (
@@ -2322,13 +2324,175 @@ function SessionCompletionPanel(props: {
               PDFとして保存
             </button>
           </div>
-          <div className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md border border-emerald-100 bg-white px-3 py-2 text-[12px] font-semibold text-stone-700">
-            {props.finalMinutes.markdown}
-          </div>
+          {acpMinutes ? (
+            <ACPMinutesPreview minutes={acpMinutes} />
+          ) : (
+            <div className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md border border-emerald-100 bg-white px-3 py-2 text-[12px] font-semibold text-stone-700">
+              {props.finalMinutes.markdown}
+            </div>
+          )}
         </>
       ) : null}
     </section>
   );
+}
+
+type ACPMinutesView = {
+  title?: string;
+  recordType?: string;
+  themes?: Record<string, unknown>;
+  overall_summary?: {
+    core_values?: Array<{ text?: string }>;
+    cross_theme_connections?: Array<{ text?: string }>;
+    undecided_things?: string[];
+  };
+};
+
+function ACPMinutesPreview(props: { minutes: ACPMinutesView }) {
+  const themes = props.minutes.themes ?? {};
+  const sections = [
+    buildMinutesSection("本人の考えの概要", [
+      ...summaryTexts(props.minutes.overall_summary?.core_values),
+      ...summaryTexts(props.minutes.overall_summary?.cross_theme_connections),
+      ...minutesItems("まだ決めていないこと・迷い", stringArray(props.minutes.overall_summary?.undecided_things)),
+    ]),
+    buildMinutesSection("今の暮らしの中で大切にしていること", [
+      ...fieldItems(themes.current_life_values, "life_supports", "今、暮らしを支えているもの"),
+      ...singleFieldItem(themes.current_life_values, "reason", "それが大切な理由"),
+      ...nestedFieldItems(themes.current_life_values, "background", "relationships", "大切な人とのつながり"),
+      ...nestedFieldItems(themes.current_life_values, "background", "role", "家族や地域での役割"),
+      ...nestedFieldItems(themes.current_life_values, "background", "attachment", "自宅や地域への思い"),
+    ]),
+    buildMinutesSection("これからも守っていきたい暮らし", [
+      ...fieldItems(themes.future_life_continuity, "continued_activity", "これからも続けたいこと"),
+      ...fieldItems(themes.future_life_continuity, "self_continuation", "できる限り自分で続けたいこと"),
+      ...fieldItems(themes.future_life_continuity, "not_want_to_lose", "失いたくないもの"),
+      ...singleFieldItem(themes.future_life_continuity, "reason", "なぜ続けたいのか"),
+      ...fieldItems(themes.future_life_continuity, "acceptable_change", "変わっても大丈夫だと思えること"),
+      ...fieldItems(themes.future_life_continuity, "important_for_continuation", "続けるために大切になりそうなこと"),
+    ]),
+    buildMinutesSection("「自分らしく暮らす」ために大切なこと", [
+      ...fieldItems(themes.selfhood, "self_determination", "自分で決めていたいこと"),
+      ...fieldItems(themes.selfhood, "respect", "周囲に大切にしてほしいこと"),
+      ...fieldItems(themes.selfhood, "purpose_or_role", "生きがいや、自分の役割"),
+      ...fieldItems(themes.selfhood, "lifestyle", "本人らしい暮らし方"),
+      ...nestedFieldItems(themes.selfhood, "other_important_things", "privacy", "プライバシー"),
+      ...nestedFieldItems(themes.selfhood, "other_important_things", "connection", "人とのつながり"),
+      ...nestedFieldItems(themes.selfhood, "other_important_things", "comfort", "心身の快適さ"),
+    ]),
+    buildMinutesSection("もし手助けが必要になったら", [
+      ...fieldItems(themes.care_support, "acceptable_support", "こんな手助けなら受け入れやすい"),
+      ...fieldItems(themes.care_support, "unacceptable_support", "こういう手助けは避けたい"),
+      ...fieldItems(themes.care_support, "self_scope", "手助けを受けても、自分で続けたいこと"),
+      ...fieldItems(themes.care_support, "support_person", "誰に頼りたいか"),
+      ...fieldItems(themes.care_support, "support_decision", "手助けについて大切にしたい考え方"),
+      ...fieldItems(themes.care_support, "anxiety", "気になっていること・不安"),
+      ...fieldItems(themes.care_support, "support_condition", "支援を受けたい条件"),
+    ]),
+    buildMinutesSection("家族に伝えておきたいこと", [
+      ...fieldItems(themes.family_communication, "request", "家族にお願いしたいこと"),
+      ...fieldItems(themes.family_communication, "burden_concern", "家族に負担をかけることについて"),
+      ...fieldItems(themes.family_communication, "feelings", "家族への気持ち"),
+      ...fieldItems(themes.family_communication, "expected_judgement", "もし自分で判断することが難しくなったら"),
+      ...fieldItems(themes.family_communication, "avoidance", "家族にしてほしくないこと"),
+      ...fieldItems(themes.family_communication, "non_family_support", "家族以外にも頼れる人"),
+      ...fieldItems(themes.family_communication, "unspoken", "まだ言葉にできていないこと"),
+    ]),
+    buildMinutesSection("もし自分で決めることが難しくなったら", [
+      ...fieldItems(themes.proxy_decision_support, "trusted_person", "相談してほしい人"),
+      ...fieldItems(themes.proxy_decision_support, "trust_reason", "その人を信頼している理由"),
+      ...fieldItems(themes.proxy_decision_support, "values_to_share", "その人に知っておいてほしい自分の考え"),
+      ...fieldItems(themes.proxy_decision_support, "involvement", "どのように関わってほしいか"),
+      ...fieldItems(themes.proxy_decision_support, "multiple_people", "複数の人に相談してほしいか"),
+      ...(recordValue(themes.proxy_decision_support, "not_decided") === true
+        ? [{ label: "まだ特定の人を決めていない", values: ["現時点では、相談してほしい人をまだ決めていない。"] }]
+        : []),
+      ...fieldItems(themes.proxy_decision_support, "hard_to_decide", "決めにくい理由"),
+    ]),
+  ].filter((section) => section.items.length > 0);
+
+  return (
+    <div className="mt-3 max-h-96 overflow-y-auto rounded-md border border-emerald-100 bg-white px-3 py-3 text-stone-800">
+      <div className="text-[15px] font-black text-stone-950">これからの暮らしと大切にしたいこと</div>
+      <div className="mt-0.5 text-[12px] font-black text-emerald-800">ACP 話し合いの記録</div>
+      <p className="mt-2 text-[12px] font-semibold leading-relaxed text-stone-600">
+        この記録は、今回の話し合いの中で出てきた「大切にしたいこと」や「これからの希望」を、あとから本人や家族が振り返りやすい形にまとめたものです。
+      </p>
+      <div className="mt-3 space-y-3">
+        {sections.map((section) => (
+          <section key={section.title} className="border-t border-stone-100 pt-3">
+            <h3 className="text-[13px] font-black text-stone-950">{section.title}</h3>
+            <div className="mt-2 space-y-2">
+              {section.items.map((item) => (
+                <div key={`${section.title}-${item.label}`} className="rounded-md bg-stone-50 px-2.5 py-2">
+                  <div className="text-[11px] font-black text-stone-500">{item.label}</div>
+                  <ul className="mt-1 space-y-1">
+                    {item.values.map((value) => (
+                      <li key={value} className="text-[12px] font-semibold leading-relaxed text-stone-800">
+                        {value}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function getAcpMinutesFromFinalMinutes(
+  finalMinutes: { json?: unknown } | null,
+): ACPMinutesView | null {
+  if (!finalMinutes?.json || typeof finalMinutes.json !== "object") return null;
+  const json = finalMinutes.json as Record<string, unknown>;
+  const minutes = json.acp_minutes;
+  if (!minutes || typeof minutes !== "object") return null;
+  const record = minutes as ACPMinutesView;
+  return record.recordType === "acp_discussion_record" ? record : null;
+}
+
+function buildMinutesSection(title: string, items: Array<{ label: string; values: string[] }>) {
+  return { title, items: items.filter((item) => item.values.length > 0) };
+}
+
+function fieldItems(source: unknown, key: string, label: string) {
+  const values = stringArray(recordValue(source, key));
+  return values.length ? [{ label, values }] : [];
+}
+
+function singleFieldItem(source: unknown, key: string, label: string) {
+  const value = recordValue(source, key);
+  return typeof value === "string" && value.trim() ? [{ label, values: [value.trim()] }] : [];
+}
+
+function nestedFieldItems(source: unknown, groupKey: string, key: string, label: string) {
+  return fieldItems(recordValue(source, groupKey), key, label);
+}
+
+function summaryTexts(items: Array<{ text?: string }> | undefined) {
+  return minutesItems(
+    "まとめ",
+    (items ?? [])
+    .map((item) => item.text?.trim())
+      .filter((text): text is string => Boolean(text)),
+  );
+}
+
+function minutesItems(label: string, values: string[]) {
+  return values.length ? [{ label, values }] : [];
+}
+
+function stringArray(value: unknown) {
+  return Array.isArray(value)
+    ? [...new Set(value.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean))]
+    : [];
+}
+
+function recordValue(source: unknown, key: string) {
+  return source && typeof source === "object" ? (source as Record<string, unknown>)[key] : undefined;
 }
 
 function PromptPanel(props: {

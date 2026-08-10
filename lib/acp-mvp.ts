@@ -591,6 +591,8 @@ export type FinalMinutesResult = {
     discussion_topic: typeof DISCUSSION_TOPIC;
     utterances: ConversationUtterance[];
     slots: AcpSlotState[];
+    acp_minutes?: ACPMinutes;
+    acp_minutes_llm_input?: ACPMinutesLLMInput;
     themes?: ThemeMinutesItem[];
     optional_themes?: ThemeMinutesItem[];
     theme_metrics?: ThemeCompletenessMetrics;
@@ -615,6 +617,116 @@ export type AspectMinutesItem = {
   priority: AspectPriority;
   status: AspectStatus;
   evidence: EvidenceReference[];
+};
+
+export type ACPAspectCertainty = "明確" | "条件付き" | "迷いあり" | "不明";
+export type ACPAspectSpeaker = "本人" | "家族" | "その他";
+
+export type ACPAspectEvidence = {
+  value: string;
+  evidence?: string;
+  speaker?: ACPAspectSpeaker;
+  certainty?: ACPAspectCertainty;
+  condition?: string | null;
+  negation?: boolean;
+};
+
+export type ACPGeneratedSummary = {
+  text: string;
+  source_aspects: string[];
+};
+
+export type ACPGeneratedConnection = {
+  text: string;
+  source_aspects: string[];
+  related_themes: string[];
+};
+
+export type ACPMinutes = {
+  title: string;
+  recordType: "acp_discussion_record";
+  themes: {
+    current_life_values: {
+      title: string;
+      life_supports: string[];
+      reason: string | null;
+      background: {
+        relationships: string[];
+        role: string[];
+        attachment: string[];
+      };
+    };
+    future_life_continuity: {
+      title: string;
+      continued_activity: string[];
+      self_continuation: string[];
+      not_want_to_lose: string[];
+      reason: string | null;
+      acceptable_change: string[];
+      important_for_continuation: string[];
+    };
+    selfhood: {
+      title: string;
+      self_determination: string[];
+      respect: string[];
+      purpose_or_role: string[];
+      lifestyle: string[];
+      other_important_things: {
+        privacy: string[];
+        connection: string[];
+        comfort: string[];
+      };
+    };
+    care_support: {
+      title: string;
+      acceptable_support: string[];
+      unacceptable_support: string[];
+      self_scope: string[];
+      support_person: string[];
+      support_decision: string[];
+      anxiety: string[];
+      support_condition: string[];
+    };
+    family_communication: {
+      title: string;
+      request: string[];
+      burden_concern: string[];
+      feelings: string[];
+      expected_judgement: string[];
+      avoidance: string[];
+      non_family_support: string[];
+      unspoken: string[];
+    };
+    proxy_decision_support: {
+      title: string;
+      trusted_person: string[];
+      trust_reason: string[];
+      values_to_share: string[];
+      involvement: string[];
+      multiple_people: string[];
+      not_decided: boolean;
+      hard_to_decide: string[];
+    };
+  };
+  overall_summary: {
+    core_values: ACPGeneratedSummary[];
+    cross_theme_connections: ACPGeneratedConnection[];
+    undecided_things: string[];
+  };
+};
+
+export type ACPMinutesLLMInput = {
+  title: string;
+  recordType: "acp_discussion_record_input";
+  themes: Array<{
+    theme_id: keyof ACPMinutes["themes"];
+    title: string;
+    aspects: Array<{
+      aspect_id: string;
+      label: string;
+      evidence: ACPAspectEvidence[];
+    }>;
+  }>;
 };
 
 export type AuxiliaryMinutesItem = {
@@ -1398,6 +1510,9 @@ export function buildFallbackMinutes(
   );
   const themeMetrics = calculateThemeCompletenessMetrics(acpSlots);
   const auxiliaryItems = [buildUnresolvedAuxiliaryItem(utterances)];
+  const acpMinutesInput = buildACPMinutesLLMInput(themes);
+  const acpMinutes = buildACPMinutesFromStructuredInput(acpMinutesInput);
+  const markdown = renderACPMinutesMarkdown(acpMinutes, generatedAt);
   const statedThemes = themes.filter((theme) =>
     theme.aspects.some((aspect) => aspect.evidence.length > 0),
   );
@@ -1458,13 +1573,15 @@ export function buildFallbackMinutes(
   lines.push("- 介護者による要約は、本人の同意が確認できた場合のみ本人の考えとして整理しています。");
 
   return {
-    markdown: lines.join("\n"),
+    markdown,
     json: {
       generated_at: generatedAt,
       session,
       discussion_topic: DISCUSSION_TOPIC,
       utterances,
       slots: acpSlots,
+      acp_minutes: acpMinutes,
+      acp_minutes_llm_input: acpMinutesInput,
       themes,
       optional_themes: optionalThemes,
       theme_metrics: themeMetrics,
@@ -1522,6 +1639,470 @@ function buildThemeMinutesItems(
   });
 }
 
+export function buildACPMinutesLLMInput(themes: ThemeMinutesItem[]): ACPMinutesLLMInput {
+  return {
+    title: "これからの暮らしと大切にしたいこと",
+    recordType: "acp_discussion_record_input",
+    themes: themes
+      .filter((theme) => isACPMinutesThemeId(theme.theme_id))
+      .map((theme) => ({
+        theme_id: theme.theme_id as keyof ACPMinutes["themes"],
+        title: theme.title,
+        aspects: theme.aspects
+          .map((aspect) => ({
+            aspect_id: normalizeMinutesAspectId(theme.theme_id, aspect.aspect_id),
+            label: aspect.label,
+            evidence: aspect.evidence
+              .map((evidence) => toACPAspectEvidence(evidence))
+              .filter((evidence): evidence is ACPAspectEvidence => Boolean(evidence)),
+          }))
+          .filter((aspect) => aspect.evidence.length > 0),
+      }))
+      .filter((theme) => theme.aspects.length > 0),
+  };
+}
+
+export function buildACPMinutesFromStructuredInput(input: ACPMinutesLLMInput): ACPMinutes {
+  const getValues = (themeId: keyof ACPMinutes["themes"], aspectIds: string[]) =>
+    getAspectValues(input, themeId, aspectIds);
+  const getFirst = (themeId: keyof ACPMinutes["themes"], aspectIds: string[]) =>
+    getValues(themeId, aspectIds)[0] ?? null;
+
+  return {
+    title: "これからの暮らしと大切にしたいこと",
+    recordType: "acp_discussion_record",
+    themes: {
+      current_life_values: {
+        title: "今の暮らしの中で大切にしていること",
+        life_supports: getValues("current_life_values", ["valued_routine", "hobby_or_joy"]),
+        reason: getFirst("current_life_values", ["reason"]),
+        background: {
+          relationships: getValues("current_life_values", ["relationships", "cross_connection"]),
+          role: getValues("current_life_values", ["role"]),
+          attachment: getValues("current_life_values", ["attachment", "cross_living_environment"]),
+        },
+      },
+      future_life_continuity: {
+        title: "これからも守っていきたい暮らし",
+        continued_activity: getValues("future_life_continuity", ["continued_activity", "continued_relationship"]),
+        self_continuation: getValues("future_life_continuity", ["self_continuation"]),
+        not_want_to_lose: getValues("future_life_continuity", ["not_want_to_lose"]),
+        reason: getFirst("future_life_continuity", ["reason"]),
+        acceptable_change: getValues("future_life_continuity", ["acceptable_change"]),
+        important_for_continuation: getValues("future_life_continuity", [
+          "preferred_environment",
+          "cross_selfhood",
+          "cross_support",
+          "cross_secure_living",
+        ]),
+      },
+      selfhood: {
+        title: "「自分らしく暮らす」ために大切なこと",
+        self_determination: getValues("selfhood", ["self_determination"]),
+        respect: getValues("selfhood", ["respect"]),
+        purpose_or_role: getValues("selfhood", ["purpose_or_role"]),
+        lifestyle: getValues("selfhood", ["lifestyle", "cross_values", "cross_living_environment", "cross_support"]),
+        other_important_things: {
+          privacy: getValues("selfhood", ["privacy"]),
+          connection: getValues("selfhood", ["connection"]),
+          comfort: getValues("selfhood", ["comfort"]),
+        },
+      },
+      care_support: {
+        title: "もし手助けが必要になったら",
+        acceptable_support: getValues("care_support", ["acceptable_support"]),
+        unacceptable_support: getValues("care_support", ["unacceptable_support"]),
+        self_scope: getValues("care_support", ["self_scope"]),
+        support_person: getValues("care_support", ["support_person"]),
+        support_decision: getValues("care_support", ["decision_process"]),
+        anxiety: getValues("care_support", ["anxiety"]),
+        support_condition: getValues("care_support", ["support_condition", "timing"]),
+      },
+      family_communication: {
+        title: "家族に伝えておきたいこと",
+        request: getValues("family_communication", ["request"]),
+        burden_concern: getValues("family_communication", ["burden_concern"]),
+        feelings: getValues("family_communication", ["feelings"]),
+        expected_judgement: getValues("family_communication", ["expected_judgement"]),
+        avoidance: getValues("family_communication", ["avoidance"]),
+        non_family_support: getValues("family_communication", ["non_family_support"]),
+        unspoken: getValues("family_communication", ["unspoken"]),
+      },
+      proxy_decision_support: {
+        title: "もし自分で決めることが難しくなったら",
+        trusted_person: getValues("proxy_decision_support", ["trusted_person"]),
+        trust_reason: getValues("proxy_decision_support", ["trust_reason"]),
+        values_to_share: getValues("proxy_decision_support", ["values_to_share"]),
+        involvement: getValues("proxy_decision_support", ["involvement"]),
+        multiple_people: getValues("proxy_decision_support", ["multiple_people"]),
+        not_decided: getAspectValues(input, "proxy_decision_support", ["not_decided"]).length > 0,
+        hard_to_decide: getValues("proxy_decision_support", ["hard_to_decide"]),
+      },
+    },
+    overall_summary: buildConservativeOverallSummary(input),
+  };
+}
+
+export function validateACPMinutes(value: unknown): ACPMinutes | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<ACPMinutes>;
+  if (candidate.recordType !== "acp_discussion_record") return null;
+  if (!candidate.themes || typeof candidate.themes !== "object") return null;
+  if (!candidate.overall_summary || typeof candidate.overall_summary !== "object") return null;
+
+  return {
+    title: normalizeString(candidate.title, "これからの暮らしと大切にしたいこと"),
+    recordType: "acp_discussion_record",
+    themes: {
+      current_life_values: {
+        title: normalizeString(candidate.themes.current_life_values?.title, "今の暮らしの中で大切にしていること"),
+        life_supports: normalizeStringArray(candidate.themes.current_life_values?.life_supports),
+        reason: normalizeNullableString(candidate.themes.current_life_values?.reason),
+        background: {
+          relationships: normalizeStringArray(candidate.themes.current_life_values?.background?.relationships),
+          role: normalizeStringArray(candidate.themes.current_life_values?.background?.role),
+          attachment: normalizeStringArray(candidate.themes.current_life_values?.background?.attachment),
+        },
+      },
+      future_life_continuity: {
+        title: normalizeString(candidate.themes.future_life_continuity?.title, "これからも守っていきたい暮らし"),
+        continued_activity: normalizeStringArray(candidate.themes.future_life_continuity?.continued_activity),
+        self_continuation: normalizeStringArray(candidate.themes.future_life_continuity?.self_continuation),
+        not_want_to_lose: normalizeStringArray(candidate.themes.future_life_continuity?.not_want_to_lose),
+        reason: normalizeNullableString(candidate.themes.future_life_continuity?.reason),
+        acceptable_change: normalizeStringArray(candidate.themes.future_life_continuity?.acceptable_change),
+        important_for_continuation: normalizeStringArray(candidate.themes.future_life_continuity?.important_for_continuation),
+      },
+      selfhood: {
+        title: normalizeString(candidate.themes.selfhood?.title, "「自分らしく暮らす」ために大切なこと"),
+        self_determination: normalizeStringArray(candidate.themes.selfhood?.self_determination),
+        respect: normalizeStringArray(candidate.themes.selfhood?.respect),
+        purpose_or_role: normalizeStringArray(candidate.themes.selfhood?.purpose_or_role),
+        lifestyle: normalizeStringArray(candidate.themes.selfhood?.lifestyle),
+        other_important_things: {
+          privacy: normalizeStringArray(candidate.themes.selfhood?.other_important_things?.privacy),
+          connection: normalizeStringArray(candidate.themes.selfhood?.other_important_things?.connection),
+          comfort: normalizeStringArray(candidate.themes.selfhood?.other_important_things?.comfort),
+        },
+      },
+      care_support: {
+        title: normalizeString(candidate.themes.care_support?.title, "もし手助けが必要になったら"),
+        acceptable_support: normalizeStringArray(candidate.themes.care_support?.acceptable_support),
+        unacceptable_support: normalizeStringArray(candidate.themes.care_support?.unacceptable_support),
+        self_scope: normalizeStringArray(candidate.themes.care_support?.self_scope),
+        support_person: normalizeStringArray(candidate.themes.care_support?.support_person),
+        support_decision: normalizeStringArray(candidate.themes.care_support?.support_decision),
+        anxiety: normalizeStringArray(candidate.themes.care_support?.anxiety),
+        support_condition: normalizeStringArray(candidate.themes.care_support?.support_condition),
+      },
+      family_communication: {
+        title: normalizeString(candidate.themes.family_communication?.title, "家族に伝えておきたいこと"),
+        request: normalizeStringArray(candidate.themes.family_communication?.request),
+        burden_concern: normalizeStringArray(candidate.themes.family_communication?.burden_concern),
+        feelings: normalizeStringArray(candidate.themes.family_communication?.feelings),
+        expected_judgement: normalizeStringArray(candidate.themes.family_communication?.expected_judgement),
+        avoidance: normalizeStringArray(candidate.themes.family_communication?.avoidance),
+        non_family_support: normalizeStringArray(candidate.themes.family_communication?.non_family_support),
+        unspoken: normalizeStringArray(candidate.themes.family_communication?.unspoken),
+      },
+      proxy_decision_support: {
+        title: normalizeString(candidate.themes.proxy_decision_support?.title, "もし自分で決めることが難しくなったら"),
+        trusted_person: normalizeStringArray(candidate.themes.proxy_decision_support?.trusted_person),
+        trust_reason: normalizeStringArray(candidate.themes.proxy_decision_support?.trust_reason),
+        values_to_share: normalizeStringArray(candidate.themes.proxy_decision_support?.values_to_share),
+        involvement: normalizeStringArray(candidate.themes.proxy_decision_support?.involvement),
+        multiple_people: normalizeStringArray(candidate.themes.proxy_decision_support?.multiple_people),
+        not_decided: candidate.themes.proxy_decision_support?.not_decided === true,
+        hard_to_decide: normalizeStringArray(candidate.themes.proxy_decision_support?.hard_to_decide),
+      },
+    },
+    overall_summary: {
+      core_values: normalizeGeneratedSummaries(candidate.overall_summary.core_values),
+      cross_theme_connections: normalizeGeneratedConnections(candidate.overall_summary.cross_theme_connections),
+      undecided_things: normalizeStringArray(candidate.overall_summary.undecided_things),
+    },
+  };
+}
+
+export function renderACPMinutesMarkdown(minutes: ACPMinutes, generatedAt?: string) {
+  const lines = [
+    "# これからの暮らしと大切にしたいこと",
+    "",
+    "ACP 話し合いの記録",
+    "",
+    "この記録は、今回の話し合いの中で出てきた「大切にしたいこと」や「これからの希望」を、あとから本人や家族が振り返りやすい形にまとめたものです。",
+  ];
+
+  if (generatedAt) {
+    lines.push("", `作成日: ${formatJapaneseDate(generatedAt)}`);
+  }
+
+  appendMinutesSection(lines, "本人の考えの概要", [
+    ...minutes.overall_summary.core_values.map((item) => item.text),
+    ...minutes.overall_summary.cross_theme_connections.map((item) => item.text),
+    ...minutes.overall_summary.undecided_things,
+  ]);
+  appendMinutesSection(lines, minutes.themes.current_life_values.title, [
+    ...prefixValues("今、暮らしを支えているもの", minutes.themes.current_life_values.life_supports),
+    ...prefixValues("それが大切な理由", nullableToArray(minutes.themes.current_life_values.reason)),
+    ...prefixValues("大切な人とのつながり", minutes.themes.current_life_values.background.relationships),
+    ...prefixValues("家族や地域での役割", minutes.themes.current_life_values.background.role),
+    ...prefixValues("自宅や地域への思い", minutes.themes.current_life_values.background.attachment),
+  ]);
+  appendMinutesSection(lines, minutes.themes.future_life_continuity.title, [
+    ...prefixValues("これからも続けたいこと", minutes.themes.future_life_continuity.continued_activity),
+    ...prefixValues("できる限り自分で続けたいこと", minutes.themes.future_life_continuity.self_continuation),
+    ...prefixValues("失いたくないもの", minutes.themes.future_life_continuity.not_want_to_lose),
+    ...prefixValues("なぜ続けたいのか", nullableToArray(minutes.themes.future_life_continuity.reason)),
+    ...prefixValues("変わっても大丈夫だと思えること", minutes.themes.future_life_continuity.acceptable_change),
+    ...prefixValues("続けるために大切になりそうなこと", minutes.themes.future_life_continuity.important_for_continuation),
+  ]);
+  appendMinutesSection(lines, minutes.themes.selfhood.title, [
+    ...prefixValues("自分で決めていたいこと", minutes.themes.selfhood.self_determination),
+    ...prefixValues("周囲に大切にしてほしいこと", minutes.themes.selfhood.respect),
+    ...prefixValues("生きがいや、自分の役割", minutes.themes.selfhood.purpose_or_role),
+    ...prefixValues("本人らしい暮らし方", minutes.themes.selfhood.lifestyle),
+    ...prefixValues("プライバシー", minutes.themes.selfhood.other_important_things.privacy),
+    ...prefixValues("人とのつながり", minutes.themes.selfhood.other_important_things.connection),
+    ...prefixValues("心身の快適さ", minutes.themes.selfhood.other_important_things.comfort),
+  ]);
+  appendMinutesSection(lines, minutes.themes.care_support.title, [
+    ...prefixValues("こんな手助けなら受け入れやすい", minutes.themes.care_support.acceptable_support),
+    ...prefixValues("こういう手助けは避けたい", minutes.themes.care_support.unacceptable_support),
+    ...prefixValues("手助けを受けても、自分で続けたいこと", minutes.themes.care_support.self_scope),
+    ...prefixValues("誰に頼りたいか", minutes.themes.care_support.support_person),
+    ...prefixValues("手助けについて大切にしたい考え方", minutes.themes.care_support.support_decision),
+    ...prefixValues("気になっていること・不安", minutes.themes.care_support.anxiety),
+    ...prefixValues("支援を受けたい条件", minutes.themes.care_support.support_condition),
+  ]);
+  appendMinutesSection(lines, minutes.themes.family_communication.title, [
+    ...prefixValues("家族にお願いしたいこと", minutes.themes.family_communication.request),
+    ...prefixValues("家族に負担をかけることについて", minutes.themes.family_communication.burden_concern),
+    ...prefixValues("家族への気持ち", minutes.themes.family_communication.feelings),
+    ...prefixValues("もし自分で判断することが難しくなったら", minutes.themes.family_communication.expected_judgement),
+    ...prefixValues("家族にしてほしくないこと", minutes.themes.family_communication.avoidance),
+    ...prefixValues("家族以外にも頼れる人", minutes.themes.family_communication.non_family_support),
+    ...prefixValues("まだ言葉にできていないこと", minutes.themes.family_communication.unspoken),
+  ]);
+  appendMinutesSection(lines, minutes.themes.proxy_decision_support.title, [
+    ...prefixValues("相談してほしい人", minutes.themes.proxy_decision_support.trusted_person),
+    ...prefixValues("その人を信頼している理由", minutes.themes.proxy_decision_support.trust_reason),
+    ...prefixValues("その人に知っておいてほしい自分の考え", minutes.themes.proxy_decision_support.values_to_share),
+    ...prefixValues("どのように関わってほしいか", minutes.themes.proxy_decision_support.involvement),
+    ...prefixValues("複数の人に相談してほしいか", minutes.themes.proxy_decision_support.multiple_people),
+    ...(minutes.themes.proxy_decision_support.not_decided ? ["まだ特定の人を決めていない。"] : []),
+    ...prefixValues("決めにくい理由", minutes.themes.proxy_decision_support.hard_to_decide),
+  ]);
+
+  return lines.join("\n");
+}
+
+function toACPAspectEvidence(evidence: EvidenceReference): ACPAspectEvidence | null {
+  const rawText = stripSpeakerPrefix(evidence.evidenceText);
+  const text = anonymizeACPText(rawText);
+  if (!text) return null;
+
+  return {
+    value: normalizeMinutesSentence(text),
+    evidence: text,
+    speaker: normalizeEvidenceSpeaker(evidence.speaker),
+    certainty: inferEvidenceCertainty(text),
+    condition: inferEvidenceCondition(text),
+    negation: hasNegation(text),
+  };
+}
+
+function getAspectValues(
+  input: ACPMinutesLLMInput,
+  themeId: keyof ACPMinutes["themes"],
+  aspectIds: string[],
+) {
+  const idSet = new Set(aspectIds);
+  const theme = input.themes.find((item) => item.theme_id === themeId);
+  if (!theme) return [];
+
+  return uniqueStrings(
+    theme.aspects
+      .filter((aspect) => idSet.has(aspect.aspect_id))
+      .flatMap((aspect) => aspect.evidence.map(formatACPAspectForMinutes)),
+  );
+}
+
+function buildConservativeOverallSummary(input: ACPMinutesLLMInput): ACPMinutes["overall_summary"] {
+  const aspectThemes = new Map<string, Set<string>>();
+  input.themes.forEach((theme) => {
+    theme.aspects.forEach((aspect) => {
+      if (!aspectThemes.has(aspect.aspect_id)) aspectThemes.set(aspect.aspect_id, new Set());
+      aspectThemes.get(aspect.aspect_id)?.add(theme.theme_id);
+    });
+  });
+
+  const selfContinuationAspects = ["self_continuation", "self_determination", "self_scope"]
+    .filter((aspectId) => input.themes.some((theme) => theme.aspects.some((aspect) => aspect.aspect_id === aspectId)));
+  const relatedThemes = uniqueStrings(
+    input.themes
+      .filter((theme) => theme.aspects.some((aspect) => selfContinuationAspects.includes(aspect.aspect_id)))
+      .map((theme) => theme.theme_id),
+  );
+  const undecided = input.themes.flatMap((theme) =>
+    theme.aspects
+      .filter((aspect) =>
+        aspect.aspect_id === "not_decided" ||
+        aspect.evidence.some((evidence) => evidence.certainty === "迷いあり" || evidence.certainty === "条件付き"),
+      )
+      .flatMap((aspect) => aspect.evidence.map(formatACPAspectForMinutes)),
+  );
+
+  return {
+    core_values:
+      selfContinuationAspects.length >= 2
+        ? [{
+            text: "できることは、できるだけ自分で続けたいという思いが複数のテーマで確認されています。",
+            source_aspects: selfContinuationAspects,
+          }]
+        : [],
+    cross_theme_connections:
+      selfContinuationAspects.length >= 2 && relatedThemes.length >= 2
+        ? [{
+            text: "自分で続けたいという思いが、暮らしの継続、自分らしさ、支援の希望にまたがって表れています。",
+            source_aspects: selfContinuationAspects,
+            related_themes: relatedThemes,
+          }]
+        : [],
+    undecided_things: uniqueStrings(undecided),
+  };
+}
+
+function normalizeMinutesAspectId(themeId: string, aspectId: string) {
+  if (themeId === "care_support" && aspectId === "timing") return "support_condition";
+  return aspectId;
+}
+
+function formatACPAspectForMinutes(evidence: ACPAspectEvidence) {
+  const suffixes = [
+    evidence.condition ? `（条件: ${evidence.condition}）` : "",
+    evidence.certainty === "迷いあり" ? "（迷いあり）" : "",
+    evidence.certainty === "条件付き" && !evidence.condition ? "（条件付き）" : "",
+    evidence.negation ? "（否定・避けたい内容）" : "",
+  ].filter(Boolean);
+
+  return `${evidence.value}${suffixes.join("")}`;
+}
+
+function anonymizeACPText(value: string) {
+  return value
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[メール]")
+    .replace(/\b\d{2,4}[-\s]?\d{2,4}[-\s]?\d{3,4}\b/g, "[電話番号]")
+    .replace(/\b(?:patient|participant|研究参加者|患者)[-_ ]?[A-Za-z0-9]{3,}\b/gi, "[ID]")
+    .replace(/[A-Za-z0-9_-]{8,}/g, "[ID]")
+    .replace(/([一-龯]{2,4})(病院|クリニック|医院|医療センター)/g, "[医療機関]")
+    .trim();
+}
+
+function normalizeMinutesSentence(value: string) {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return /[。.!?！？]$/.test(text) ? text : `${text}。`;
+}
+
+function stripSpeakerPrefix(value: string) {
+  return value.replace(/^(本人|家族|介護者|その他|elder|caregiver)\s*[:：]\s*/i, "").trim();
+}
+
+function normalizeEvidenceSpeaker(value: string): ACPAspectSpeaker {
+  if (value === "elder") return "本人";
+  if (value === "caregiver") return "家族";
+  return "その他";
+}
+
+function inferEvidenceCertainty(text: string): ACPAspectCertainty {
+  if (/(まだ|決めていない|迷|分から|わから|考えられない)/.test(text)) return "迷いあり";
+  if (/(できれば|場合|なら|とき|時|うちは|状況|条件|かかるなら)/.test(text)) return "条件付き";
+  return text ? "明確" : "不明";
+}
+
+function inferEvidenceCondition(text: string) {
+  const match = text.match(/(.{0,24}(?:うちは|場合|なら|とき|時|状況).{0,24})/);
+  return match ? match[1].trim() : null;
+}
+
+function hasNegation(text: string) {
+  return /(嫌|いや|避けたい|したくない|してほしくない|望まない|不要|いらない|断る)/.test(text);
+}
+
+function isACPMinutesThemeId(value: string): value is keyof ACPMinutes["themes"] {
+  return [
+    "current_life_values",
+    "future_life_continuity",
+    "selfhood",
+    "care_support",
+    "family_communication",
+    "proxy_decision_support",
+  ].includes(value);
+}
+
+function normalizeString(value: unknown, fallback = "") {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function normalizeNullableString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeStringArray(value: unknown) {
+  return Array.isArray(value)
+    ? uniqueStrings(value.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean))
+    : [];
+}
+
+function normalizeGeneratedSummaries(value: unknown): ACPGeneratedSummary[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const text = normalizeString(record.text);
+      const sourceAspects = normalizeStringArray(record.source_aspects);
+      return text && sourceAspects.length >= 2 ? { text, source_aspects: sourceAspects } : null;
+    })
+    .filter((item): item is ACPGeneratedSummary => Boolean(item));
+}
+
+function normalizeGeneratedConnections(value: unknown): ACPGeneratedConnection[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const text = normalizeString(record.text);
+      const sourceAspects = normalizeStringArray(record.source_aspects);
+      const relatedThemes = normalizeStringArray(record.related_themes);
+      return text && sourceAspects.length >= 2 && relatedThemes.length >= 2
+        ? { text, source_aspects: sourceAspects, related_themes: relatedThemes }
+        : null;
+    })
+    .filter((item): item is ACPGeneratedConnection => Boolean(item));
+}
+
+function appendMinutesSection(lines: string[], title: string, values: string[]) {
+  const items = uniqueStrings(values);
+  if (items.length === 0) return;
+  lines.push("", `## ${title}`, "");
+  items.forEach((item) => lines.push(`- ${item}`));
+}
+
+function prefixValues(label: string, values: string[]) {
+  return values.map((value) => `${label}: ${value}`);
+}
+
+function nullableToArray(value: string | null) {
+  return value ? [value] : [];
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
+}
+
 function buildAspectEvidence(
   theme: (typeof ALL_RESEARCH_THEMES)[number],
   aspect: (typeof ALL_RESEARCH_THEMES)[number]["aspects"][number],
@@ -1537,7 +2118,7 @@ function buildAspectEvidence(
       themeId: theme.id,
       aspectId: aspect.id,
       evidenceUtteranceId: utterance.id,
-      evidenceText: `${SPEAKER_LABELS[utterance.speaker] ?? utterance.speaker}: ${truncate(utterance.text, 160)}`,
+      evidenceText: `${SPEAKER_LABELS[utterance.speaker] ?? utterance.speaker}: ${anonymizeACPText(truncate(utterance.text, 160))}`,
       speaker: utterance.speaker,
       sourceTopicId: stored.lastUpdatedTopicId ?? theme.id,
       inferred: false,
