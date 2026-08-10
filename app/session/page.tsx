@@ -199,6 +199,16 @@ function createOpeningPrompt(
   };
 }
 
+function createTopicTransitionPrompt(
+  topic: (typeof DISCUSSION_TOPICS)[number],
+): PromptPanelState {
+  return {
+    title: "次の話題へ",
+    body: topic.opening_prompt,
+    tone: "switch",
+  };
+}
+
 export default function SessionPage() {
   return (
     <Suspense fallback={<SessionPageLoading />}>
@@ -1139,7 +1149,7 @@ function SessionPageClient() {
 
       if (buttonType === "next_question") {
         const action = decideConversationAction({
-          intent: "next_question",
+          intent: "advance_topic",
           currentTopicIndex,
           slotControl: updateResult.slot_control ?? developerSlotControl,
         });
@@ -1149,27 +1159,14 @@ function SessionPageClient() {
           return;
         }
 
-        if (action.type === "switch_topic" && nextTopic) {
+        if (nextTopic) {
           advanceTopic();
-          setPromptPanel(createOpeningPrompt(nextTopic));
+          setPromptPanel(createTopicTransitionPrompt(nextTopic));
           return;
         }
 
-        const data = await postJson<NextQuestionResponse>("/api/ai/next-question", {
-          session_id: session.id,
-          current_topic: currentTopic.slot_name,
-          current_topic_title: currentTopic.title,
-        });
-        const body = joinPrompt(
-          data.suggestion.transition_phrase,
-          data.suggestion.question,
-        );
-
-        setPromptPanel({
-          title: "AIからの質問",
-          body,
-          tone: "question",
-        });
+        await completeSession();
+        return;
       }
 
       if (buttonType === "switch_topic") {
@@ -1181,6 +1178,12 @@ function SessionPageClient() {
 
         if (action.type === "complete_session") {
           await completeSession();
+          return;
+        }
+
+        if (action.type === "switch_topic" && nextTopic) {
+          advanceTopic();
+          setPromptPanel(createTopicTransitionPrompt(nextTopic));
           return;
         }
 
@@ -1501,7 +1504,7 @@ function SessionPageClient() {
         current_topic_title: currentTopic.title,
       });
       advanceTopic();
-      setPromptPanel(createOpeningPrompt(nextTopic));
+      setPromptPanel(createTopicTransitionPrompt(nextTopic));
       await refreshDeveloperSlotStates(session.id);
       setStatusText("保存済み");
     } catch {
@@ -1901,7 +1904,7 @@ function SessionPageClient() {
 
             <div className="grid grid-cols-2 gap-2">
               <ActionButton
-                label="次の質問"
+                label="次の話題へ"
                 tone="emerald"
                 busy={busyAction === "next_question"}
                 disabled={!session || Boolean(busyAction)}
@@ -2658,7 +2661,7 @@ function PromptPanel(props: {
       <div className="flex min-h-[180px] flex-col rounded-md border border-dashed border-stone-300 bg-white px-4 py-4 lg:h-[200px]">
         <div className="text-[12px] font-black text-stone-500">AIからの質問</div>
         <p className="mt-2 text-[17px] font-black leading-relaxed text-stone-500">
-          下の「質問する」または「次の話題へ」を押すと、ここに介護者が読み上げられる文が表示されます。
+          下の「質問生成」を押すと、ここに介護者が読み上げられる文が表示されます。「次の話題へ」では次テーマの話題提供に移ります。
         </p>
       </div>
     );
@@ -2741,8 +2744,8 @@ function TopicTimer(props: {
 function getPendingPrompt(buttonType: ButtonType): PromptPanelState {
   if (buttonType === "next_question") {
     return {
-      title: "次の質問",
-      body: "現在テーマを続けるか、次のテーマへ進むかを確認しています。",
+      title: "次の話題へ",
+      body: "現在のテーマを保存し、次の話題へ移動しています。",
       tone: "status",
     };
   }
@@ -3367,7 +3370,7 @@ function getTransitionProposalReason(input: {
 }
 
 function decideConversationAction(input: {
-  intent: "next_question" | "generate_question" | "check_end" | "minutes";
+  intent: "advance_topic" | "generate_question" | "check_end" | "minutes";
   currentTopicIndex: number;
   slotControl: SlotControlDebugState | null;
 }): ConversationAction {
@@ -3407,16 +3410,18 @@ function decideConversationAction(input: {
       : { type: "complete_session", reason: "終了可能です。" };
   }
 
-  if (input.intent === "generate_question") {
-    return { type: "generate_question", reason: "現在の会話から確認価値のある質問を生成します。" };
+  if (input.intent === "advance_topic") {
+    return allTopicsPresented
+      ? { type: "complete_session", reason: "最後のテーマまで提示済みのため終了確認へ進みます。" }
+      : { type: "switch_topic", reason: "次のテーマへ進みます。" };
   }
 
-  if (currentCoreNeedsQuestion) {
+  if (input.intent === "generate_question" && currentCoreNeedsQuestion) {
     return { type: "generate_question", reason: "現在テーマに確認すべきcore項目があります。" };
   }
 
   if (!allTopicsPresented) {
-    return { type: "switch_topic", reason: "現在テーマは十分話せているため次テーマへ進みます。" };
+    return { type: "switch_topic", reason: "現在テーマは十分話せているため、質問生成せず次テーマへ進みます。" };
   }
 
   return { type: "generate_question", reason: "終了前に不足確認を行います。" };
