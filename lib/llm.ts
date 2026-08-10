@@ -198,7 +198,10 @@ const SYSTEM_FINAL_MINUTES_FROM_STRUCTURED = [
   "否定表現を肯定表現へ変更してはいけません。",
   "複数の発言を統合する場合は、その意味が明確に共通していて、根拠aspectが2つ以上ある場合だけ統合してください。",
   "テーマごとの narratives は、currentThought、background、conditions、uncertainties、tensions、confirmationNeeded に整理してください。",
+  "各themeのaspectsには sub-slot の priority と status が含まれます。coreを優先し、optionalは意味ある根拠がある場合のみ、cross_topicは複数テーマの関係やoverall summaryに必要な場合のみ使ってください。",
   "currentThought と background は2〜5文程度を目安に、短すぎる単語メモや会話全文の貼り付けにしないでください。",
+  "currentThought と background の text には、発話をそのままコピーした文、引用符つきの発言文、話し言葉の相づちを並べた文を入れてはいけません。",
+  "currentThought と background は「本人は〜と考えている」「本人は〜と話している」のような第三者記録文として整理してください。",
   "conditions、uncertainties、tensions は本人発話から直接支持できる場合だけ書いてください。slotが空・不整合という理由だけで本人が迷っていると推論しないでください。",
   "confirmationNeeded は、本人の葛藤ではなく記録上確認が必要なことに限定してください。",
   "overall_summary の core_values と cross_theme_connections は必ず source_aspects と source_utterance_ids を持たせ、根拠aspectが1つしかない内容は生成しないでください。",
@@ -206,6 +209,114 @@ const SYSTEM_FINAL_MINUTES_FROM_STRUCTURED = [
   "JSON以外の文章を出力しないでください。",
   "Return JSON only with this shape: {\"narratives\":{\"current_life_values\":{\"currentThought\":{\"text\":\"...\",\"sourceUtteranceIds\":[\"...\"],\"sourceAspectIds\":[\"...\"]},\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]}},\"overall_summary\":{\"core_values\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"source_utterance_ids\":[\"...\"]}],\"cross_theme_connections\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"related_themes\":[\"...\"],\"source_utterance_ids\":[\"...\"]}],\"undecided_things\":[\"...\"]}}.",
 ].join("\n");
+
+const FINAL_MINUTES_RESPONSE_FORMAT = {
+  type: "json_schema",
+  json_schema: {
+    name: "acp_grounded_minutes",
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["narratives", "overall_summary"],
+      properties: {
+        narratives: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "current_life_values",
+            "future_life_continuity",
+            "selfhood",
+            "care_support",
+            "family_communication",
+            "proxy_decision_support",
+          ],
+          properties: {
+            current_life_values: { $ref: "#/$defs/themeNarrative" },
+            future_life_continuity: { $ref: "#/$defs/themeNarrative" },
+            selfhood: { $ref: "#/$defs/themeNarrative" },
+            care_support: { $ref: "#/$defs/themeNarrative" },
+            family_communication: { $ref: "#/$defs/themeNarrative" },
+            proxy_decision_support: { $ref: "#/$defs/themeNarrative" },
+          },
+        },
+        overall_summary: {
+          type: "object",
+          additionalProperties: false,
+          required: ["core_values", "cross_theme_connections", "undecided_things"],
+          properties: {
+            core_values: { type: "array", items: { $ref: "#/$defs/overallItem" } },
+            cross_theme_connections: {
+              type: "array",
+              items: { $ref: "#/$defs/connectionItem" },
+            },
+            undecided_things: { type: "array", items: { type: "string" } },
+          },
+        },
+      },
+      $defs: {
+        groundedText: {
+          type: "object",
+          additionalProperties: false,
+          required: ["text", "sourceUtteranceIds", "sourceAspectIds"],
+          properties: {
+            text: { type: "string" },
+            sourceUtteranceIds: {
+              type: "array",
+              minItems: 1,
+              items: { type: "string" },
+            },
+            sourceAspectIds: { type: "array", items: { type: "string" } },
+          },
+        },
+        nullableGroundedText: {
+          anyOf: [{ $ref: "#/$defs/groundedText" }, { type: "null" }],
+        },
+        themeNarrative: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "currentThought",
+            "background",
+            "conditions",
+            "uncertainties",
+            "tensions",
+            "confirmationNeeded",
+          ],
+          properties: {
+            currentThought: { $ref: "#/$defs/nullableGroundedText" },
+            background: { $ref: "#/$defs/nullableGroundedText" },
+            conditions: { type: "array", items: { $ref: "#/$defs/groundedText" } },
+            uncertainties: { type: "array", items: { $ref: "#/$defs/groundedText" } },
+            tensions: { type: "array", items: { $ref: "#/$defs/groundedText" } },
+            confirmationNeeded: { type: "array", items: { $ref: "#/$defs/groundedText" } },
+          },
+        },
+        overallItem: {
+          type: "object",
+          additionalProperties: false,
+          required: ["text", "source_aspects", "source_utterance_ids"],
+          properties: {
+            text: { type: "string" },
+            source_aspects: { type: "array", minItems: 2, items: { type: "string" } },
+            source_utterance_ids: { type: "array", minItems: 1, items: { type: "string" } },
+          },
+        },
+        connectionItem: {
+          type: "object",
+          additionalProperties: false,
+          required: ["text", "source_aspects", "related_themes", "source_utterance_ids"],
+          properties: {
+            text: { type: "string" },
+            source_aspects: { type: "array", minItems: 2, items: { type: "string" } },
+            related_themes: { type: "array", minItems: 2, items: { type: "string" } },
+            source_utterance_ids: { type: "array", minItems: 1, items: { type: "string" } },
+          },
+        },
+      },
+    },
+  },
+} as const;
 
 const SYSTEM_SLOT_CONTROL_DEBUG = [
   "あなたはACP対話ログを読み、開発確認用にサブスロットの状態を意味判定するAIです。",
@@ -1007,6 +1118,7 @@ export async function generateFinalMinutes(
       overall_summary: baseMinutes.overall_summary,
       narratives: baseMinutes.narratives,
     },
+    FINAL_MINUTES_RESPONSE_FORMAT,
   );
   const validatedMinutes = validateACPMinutes({
     ...baseMinutes,
@@ -1305,6 +1417,7 @@ async function requestJson<T>(
   systemPrompt: string,
   payload: unknown,
   fallback: T,
+  responseFormat: unknown = { type: "json_object" },
 ): Promise<T> {
   const apiKey = process.env.OPENAI_API_KEY;
 
@@ -1323,7 +1436,7 @@ async function requestJson<T>(
         { role: "system", content: `${COMMON_AI_POLICY}\n\n${systemPrompt}` },
         { role: "user", content: JSON.stringify(payload, null, 2) },
       ],
-      response_format: { type: "json_object" },
+      response_format: responseFormat as never,
     });
     const content = completion.choices[0]?.message?.content;
     const parsed = parseJson(content);

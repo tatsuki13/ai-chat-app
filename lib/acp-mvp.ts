@@ -650,14 +650,14 @@ export type ACPAspectEvidence = {
 export type ACPGeneratedSummary = {
   text: string;
   source_aspects: string[];
-  source_utterance_ids?: string[];
+  source_utterance_ids: string[];
 };
 
 export type ACPGeneratedConnection = {
   text: string;
   source_aspects: string[];
   related_themes: string[];
-  source_utterance_ids?: string[];
+  source_utterance_ids: string[];
 };
 
 export type GroundedMinutesText = {
@@ -753,6 +753,11 @@ export type ACPMinutes = {
       field: string;
       text: string;
       sourceUtteranceIds: string[];
+      sourceUtterances?: Array<{
+        id: string;
+        text: string;
+        speaker?: ACPAspectSpeaker;
+      }>;
       accepted: boolean;
       reason?: string;
     }>;
@@ -765,9 +770,12 @@ export type ACPMinutesLLMInput = {
   themes: Array<{
     theme_id: keyof ACPMinutes["themes"];
     title: string;
+    response_state?: ResponseState;
     aspects: Array<{
       aspect_id: string;
       label: string;
+      priority: AspectPriority;
+      status: AspectStatus;
       evidence: ACPAspectEvidence[];
     }>;
   }>;
@@ -1698,10 +1706,13 @@ export function buildACPMinutesLLMInput(themes: ThemeMinutesItem[]): ACPMinutesL
       .map((theme) => ({
         theme_id: theme.theme_id as keyof ACPMinutes["themes"],
         title: theme.title,
+        response_state: theme.response_state,
         aspects: theme.aspects
           .map((aspect) => ({
             aspect_id: normalizeMinutesAspectId(theme.theme_id, aspect.aspect_id),
             label: aspect.label,
+            priority: aspect.priority,
+            status: aspect.status,
             evidence: aspect.evidence
               .map((evidence) => toACPAspectEvidence(evidence))
               .filter((evidence): evidence is ACPAspectEvidence => Boolean(evidence)),
@@ -1804,6 +1815,7 @@ export function validateACPMinutes(
   if (!candidate.themes || typeof candidate.themes !== "object") return null;
   if (!candidate.overall_summary || typeof candidate.overall_summary !== "object") return null;
 
+  const evidenceIndex = input ? buildMinutesEvidenceIndex(input) : null;
   const narratives = normalizeThemeNarratives(candidate.narratives, input);
 
   return {
@@ -1873,14 +1885,14 @@ export function validateACPMinutes(
       },
     },
     overall_summary: {
-      core_values: normalizeGeneratedSummaries(candidate.overall_summary.core_values),
-      cross_theme_connections: normalizeGeneratedConnections(candidate.overall_summary.cross_theme_connections),
+      core_values: normalizeGeneratedSummaries(candidate.overall_summary.core_values, evidenceIndex),
+      cross_theme_connections: normalizeGeneratedConnections(candidate.overall_summary.cross_theme_connections, evidenceIndex),
       undecided_things: normalizeStringArray(candidate.overall_summary.undecided_things),
     },
     narratives,
     narrative_debug: {
       ...(candidate.narrative_debug ?? {}),
-      validation: buildNarrativeValidationDebug(narratives),
+      validation: buildNarrativeValidationDebug(narratives, input),
     },
   };
 }
@@ -2172,11 +2184,11 @@ function normalizeThemeNarratives(
       themeNarrative && typeof themeNarrative === "object"
         ? {
             currentThought:
-              normalizeGroundedText((themeNarrative as Record<string, unknown>).currentThought, themeId, evidenceIndex) ??
+              normalizeGroundedText((themeNarrative as Record<string, unknown>).currentThought, themeId, evidenceIndex, { rejectRawCopy: true }) ??
               fallbackTheme.currentThought ??
               null,
             background:
-              normalizeGroundedText((themeNarrative as Record<string, unknown>).background, themeId, evidenceIndex) ??
+              normalizeGroundedText((themeNarrative as Record<string, unknown>).background, themeId, evidenceIndex, { rejectRawCopy: true }) ??
               fallbackTheme.background ??
               null,
             conditions: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).conditions, themeId, evidenceIndex, fallbackTheme.conditions),
@@ -2192,19 +2204,21 @@ function normalizeThemeNarratives(
 
 function buildNarrativeValidationDebug(
   narratives: ACPMinutes["narratives"],
+  input?: ACPMinutesLLMInput,
 ): NonNullable<ACPMinutes["narrative_debug"]>["validation"] {
   if (!narratives) return [];
+  const evidenceIndex = input ? buildMinutesEvidenceIndex(input) : new Map();
 
   return Object.entries(narratives).flatMap(([themeId, narrative]) => {
     if (!narrative) return [];
 
     return [
-      ...groundedTextDebugRows(themeId, "currentThought", narrative.currentThought),
-      ...groundedTextDebugRows(themeId, "background", narrative.background),
-      ...groundedTextDebugRows(themeId, "conditions", narrative.conditions),
-      ...groundedTextDebugRows(themeId, "uncertainties", narrative.uncertainties),
-      ...groundedTextDebugRows(themeId, "tensions", narrative.tensions),
-      ...groundedTextDebugRows(themeId, "confirmationNeeded", narrative.confirmationNeeded),
+      ...groundedTextDebugRows(themeId, "currentThought", narrative.currentThought, evidenceIndex),
+      ...groundedTextDebugRows(themeId, "background", narrative.background, evidenceIndex),
+      ...groundedTextDebugRows(themeId, "conditions", narrative.conditions, evidenceIndex),
+      ...groundedTextDebugRows(themeId, "uncertainties", narrative.uncertainties, evidenceIndex),
+      ...groundedTextDebugRows(themeId, "tensions", narrative.tensions, evidenceIndex),
+      ...groundedTextDebugRows(themeId, "confirmationNeeded", narrative.confirmationNeeded, evidenceIndex),
     ];
   });
 }
@@ -2213,6 +2227,7 @@ function groundedTextDebugRows(
   themeId: string,
   field: string,
   value: GroundedMinutesText | GroundedMinutesText[] | null | undefined,
+  evidenceIndex: Map<string, { speaker?: ACPAspectSpeaker; text?: string }>,
 ) {
   if (!value) return [];
   const items = Array.isArray(value) ? value : [value];
@@ -2222,6 +2237,17 @@ function groundedTextDebugRows(
     field,
     text: item.text,
     sourceUtteranceIds: item.sourceUtteranceIds,
+    sourceUtterances: item.sourceUtteranceIds
+      .map((id) => {
+        const evidence = evidenceIndex.get(id);
+        if (!evidence?.text) return null;
+        return {
+          id,
+          text: evidence.text,
+          ...(evidence.speaker ? { speaker: evidence.speaker } : {}),
+        };
+      })
+      .filter((source): source is { id: string; text: string; speaker?: ACPAspectSpeaker } => Boolean(source)),
     accepted: item.sourceUtteranceIds.length > 0,
   }));
 }
@@ -2243,7 +2269,8 @@ function normalizeGroundedTextArray(
 function normalizeGroundedText(
   value: unknown,
   themeId: keyof ACPMinutes["themes"],
-  evidenceIndex: Map<string, { themeId: string; speaker?: ACPAspectSpeaker }> | null,
+  evidenceIndex: Map<string, { themeId: string; speaker?: ACPAspectSpeaker; text?: string }> | null,
+  options: { rejectRawCopy?: boolean } = {},
 ): GroundedMinutesText | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
@@ -2258,6 +2285,10 @@ function normalizeGroundedText(
       return evidence.speaker === "本人" || evidence.speaker === "家族";
     });
     if (!valid) return null;
+
+    if (options.rejectRawCopy && looksLikeRawEvidenceCopy(text, sourceUtteranceIds, evidenceIndex)) {
+      return null;
+    }
   }
 
   return {
@@ -2268,7 +2299,7 @@ function normalizeGroundedText(
 }
 
 function buildMinutesEvidenceIndex(input: ACPMinutesLLMInput) {
-  const index = new Map<string, { themeId: string; speaker?: ACPAspectSpeaker }>();
+  const index = new Map<string, { themeId: string; speaker?: ACPAspectSpeaker; text?: string }>();
   input.themes.forEach((theme) => {
     theme.aspects.forEach((aspect) => {
       aspect.evidence.forEach((evidence) => {
@@ -2276,11 +2307,43 @@ function buildMinutesEvidenceIndex(input: ACPMinutesLLMInput) {
         index.set(evidence.sourceUtteranceId, {
           themeId: theme.theme_id,
           speaker: evidence.speaker,
+          text: evidence.evidence ?? evidence.value,
         });
       });
     });
   });
   return index;
+}
+
+function looksLikeRawEvidenceCopy(
+  narrativeText: string,
+  sourceUtteranceIds: string[],
+  evidenceIndex: Map<string, { text?: string }>,
+) {
+  const normalizedNarrative = normalizeForMinutesCopyCheck(narrativeText);
+  if (!normalizedNarrative) return false;
+  if (/^「.*」$/.test(narrativeText.trim())) return true;
+
+  return sourceUtteranceIds.some((id) => {
+    const evidenceText = evidenceIndex.get(id)?.text;
+    if (!evidenceText) return false;
+    const normalizedEvidence = normalizeForMinutesCopyCheck(evidenceText);
+    if (normalizedEvidence.length < 12) return false;
+
+    return (
+      normalizedNarrative === normalizedEvidence ||
+      normalizedNarrative.includes(normalizedEvidence) ||
+      normalizedEvidence.includes(normalizedNarrative)
+    );
+  });
+}
+
+function normalizeForMinutesCopyCheck(value: string) {
+  return value
+    .replace(/^(本人|家族|介護者|その他|elder|caregiver)\s*[:：]\s*/i, "")
+    .replace(/[「」『』"'\s、。,.，．！？!?]/g, "")
+    .toLowerCase()
+    .trim();
 }
 
 function getSourceUtteranceIdsForAspects(
@@ -2372,7 +2435,10 @@ function normalizeStringArray(value: unknown) {
     : [];
 }
 
-function normalizeGeneratedSummaries(value: unknown): ACPGeneratedSummary[] {
+function normalizeGeneratedSummaries(
+  value: unknown,
+  evidenceIndex: Map<string, { themeId: string; speaker?: ACPAspectSpeaker; text?: string }> | null = null,
+): ACPGeneratedSummary[] {
   if (!Array.isArray(value)) return [];
   return value
     .map((item) => {
@@ -2380,12 +2446,23 @@ function normalizeGeneratedSummaries(value: unknown): ACPGeneratedSummary[] {
       const record = item as Record<string, unknown>;
       const text = normalizeString(record.text);
       const sourceAspects = normalizeStringArray(record.source_aspects);
-      return text && sourceAspects.length >= 2 ? { text, source_aspects: sourceAspects } : null;
+      const sourceUtteranceIds = normalizeStringArray(record.source_utterance_ids);
+      const validSourceUtteranceIds = filterKnownEvidenceIds(sourceUtteranceIds, evidenceIndex);
+      return text && sourceAspects.length >= 2 && validSourceUtteranceIds.length > 0
+        ? {
+            text,
+            source_aspects: sourceAspects,
+            source_utterance_ids: validSourceUtteranceIds,
+          }
+        : null;
     })
     .filter((item): item is ACPGeneratedSummary => Boolean(item));
 }
 
-function normalizeGeneratedConnections(value: unknown): ACPGeneratedConnection[] {
+function normalizeGeneratedConnections(
+  value: unknown,
+  evidenceIndex: Map<string, { themeId: string; speaker?: ACPAspectSpeaker; text?: string }> | null = null,
+): ACPGeneratedConnection[] {
   if (!Array.isArray(value)) return [];
   return value
     .map((item) => {
@@ -2394,11 +2471,26 @@ function normalizeGeneratedConnections(value: unknown): ACPGeneratedConnection[]
       const text = normalizeString(record.text);
       const sourceAspects = normalizeStringArray(record.source_aspects);
       const relatedThemes = normalizeStringArray(record.related_themes);
-      return text && sourceAspects.length >= 2 && relatedThemes.length >= 2
-        ? { text, source_aspects: sourceAspects, related_themes: relatedThemes }
+      const sourceUtteranceIds = normalizeStringArray(record.source_utterance_ids);
+      const validSourceUtteranceIds = filterKnownEvidenceIds(sourceUtteranceIds, evidenceIndex);
+      return text && sourceAspects.length >= 2 && relatedThemes.length >= 2 && validSourceUtteranceIds.length > 0
+        ? {
+            text,
+            source_aspects: sourceAspects,
+            related_themes: relatedThemes,
+            source_utterance_ids: validSourceUtteranceIds,
+          }
         : null;
     })
     .filter((item): item is ACPGeneratedConnection => Boolean(item));
+}
+
+function filterKnownEvidenceIds(
+  ids: string[],
+  evidenceIndex: Map<string, unknown> | null,
+) {
+  if (!evidenceIndex) return ids;
+  return ids.filter((id) => evidenceIndex.has(id));
 }
 
 function appendMinutesSection(lines: string[], title: string, values: string[]) {
