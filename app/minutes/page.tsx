@@ -26,15 +26,32 @@ type ACPMinutesRecord = {
   title?: string;
   recordType?: string;
   themes?: Record<string, unknown>;
+  narratives?: Record<string, ThemeNarrativeRecord | undefined>;
   overall_summary?: {
-    core_values?: Array<{ text?: string; source_aspects?: string[] }>;
+    core_values?: Array<{ text?: string; source_aspects?: string[]; source_utterance_ids?: string[] }>;
     cross_theme_connections?: Array<{
       text?: string;
       source_aspects?: string[];
       related_themes?: string[];
+      source_utterance_ids?: string[];
     }>;
     undecided_things?: string[];
   };
+};
+
+type GroundedTextRecord = {
+  text?: string;
+  sourceUtteranceIds?: string[];
+  sourceAspectIds?: string[];
+};
+
+type ThemeNarrativeRecord = {
+  currentThought?: GroundedTextRecord | null;
+  background?: GroundedTextRecord | null;
+  conditions?: GroundedTextRecord[];
+  uncertainties?: GroundedTextRecord[];
+  tensions?: GroundedTextRecord[];
+  confirmationNeeded?: GroundedTextRecord[];
 };
 
 type EvidenceRecord = {
@@ -303,21 +320,23 @@ function MinutesOverview(props: { minutes: ACPMinutesRecord }) {
     ...summaryTexts(props.minutes.overall_summary?.cross_theme_connections),
   ].slice(0, 5);
 
-  if (items.length === 0) return null;
-
   return (
-    <section className="minutes-subsection mt-6 rounded-md border border-emerald-100 bg-emerald-50 px-4 py-4">
+    <section className="minutes-subsection mt-6 rounded-md border border-emerald-100 bg-emerald-50 px-5 py-4">
       <h2 className="text-[17px] font-black text-stone-950">今回の話し合いから見えてきたこと</h2>
-      <p className="mt-1 text-[12px] font-bold text-stone-600">
-        以下は今回の話し合いで確認された内容の整理です。これだけで本人の考えを断定せず、各テーマと根拠発話もあわせて確認してください。
+      <p className="mt-2 text-[13px] font-semibold leading-7 text-stone-700">
+        この記録の「現在の考え」「背景・理由」などの文章は、話し合いで実際に語られた発言を根拠として、内容を変えない範囲で読みやすく整理しています。
+        各テーマの「根拠となった発言」では、整理のもとになった実際の発言を確認できます。
+        この記録だけで本人の意思を断定せず、必要に応じて本人との継続的な話し合いに活用してください。
       </p>
-      <ul className="mt-3 space-y-2">
-        {items.map((item) => (
-          <li key={item} className="text-[14px] font-semibold leading-relaxed text-stone-800">
-            {item}
-          </li>
-        ))}
-      </ul>
+      {items.length > 0 ? (
+        <ul className="mt-3 space-y-2">
+          {items.map((item) => (
+            <li key={item} className="text-[14px] font-semibold leading-relaxed text-stone-800">
+              {item}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </section>
   );
 }
@@ -335,16 +354,16 @@ function MinutesThemeSection(props: { theme: ThemeDisplay }) {
   if (!hasAnyContent) return null;
 
   return (
-    <section className="minutes-theme border-t border-stone-200 pt-6">
+    <section className="minutes-theme border-t border-stone-200 pt-7">
       <div className="flex items-baseline gap-3">
-        <span className="rounded-md bg-stone-900 px-2 py-1 text-[12px] font-black text-white">
+        <span className="inline-flex h-7 min-w-7 items-center justify-center rounded-md bg-stone-900 px-2 text-[12px] font-black text-white">
           {props.theme.number}
         </span>
         <h2 className="text-[21px] font-black leading-snug text-stone-950">
           {props.theme.title}
         </h2>
       </div>
-      <div className="mt-4 space-y-4">
+      <div className="mt-5 space-y-5">
         <MinutesSubsection title="現在の考え" values={props.theme.currentThoughts} />
         <MinutesSubsection title="その背景・理由" values={props.theme.background} />
         <MinutesSubsection title="条件によって変わること" values={props.theme.conditions} tone="condition" />
@@ -377,11 +396,11 @@ function MinutesSubsection(props: {
             : "border-transparent bg-white";
 
   return (
-    <section className={`minutes-subsection rounded-md border px-4 py-3 ${toneClass}`}>
-      <h3 className="text-[15px] font-black text-stone-950">{props.title}</h3>
-      <div className="mt-2 space-y-2">
+    <section className={`minutes-subsection rounded-md border px-4 py-4 ${toneClass}`}>
+      <h3 className="text-[15px] font-black leading-snug text-stone-950">{props.title}</h3>
+      <div className="mt-3 space-y-3">
         {values.map((value) => (
-          <p key={value} className="text-[14px] font-semibold leading-7 text-stone-800">
+          <p key={value} className="whitespace-pre-wrap text-[14px] font-semibold leading-8 text-stone-800">
             {value}
           </p>
         ))}
@@ -391,13 +410,13 @@ function MinutesSubsection(props: {
 }
 
 function MinutesEvidenceList(props: { evidence: EvidenceRecord[] }) {
-  const evidence = props.evidence.filter((item) => item.evidenceText);
+  const evidence = dedupeEvidenceByUtteranceId(props.evidence).filter((item) => item.evidenceText);
   if (evidence.length === 0) return null;
 
   return (
     <section className="minutes-subsection">
       <h3 className="text-[15px] font-black text-stone-950">根拠となった発言</h3>
-      <div className="mt-2 space-y-2">
+      <div className="mt-3 space-y-3">
         {evidence.slice(0, 8).map((item, index) => (
           <MinutesEvidenceQuote key={`${item.evidenceUtteranceId ?? index}-${index}`} evidence={item} />
         ))}
@@ -411,9 +430,9 @@ function MinutesEvidenceQuote(props: { evidence: EvidenceRecord }) {
   const target = speaker === "本人" ? "介護者" : speaker === "介護者" ? "本人" : "相手";
 
   return (
-    <blockquote className="evidence-card rounded-md border-l-4 border-stone-300 bg-stone-50 px-4 py-3">
+    <blockquote className="evidence-card rounded-md border border-stone-200 border-l-4 border-l-stone-400 bg-stone-50 px-4 py-4">
       <p className="whitespace-pre-wrap text-[14px] font-semibold leading-7 text-stone-800">
-        {stripEvidenceSpeaker(props.evidence.evidenceText ?? "")}
+        {quoteEvidenceText(stripEvidenceSpeaker(props.evidence.evidenceText ?? ""))}
       </p>
       <footer className="mt-2 text-[12px] font-black text-stone-500">
         {speaker} → {target}
@@ -480,18 +499,31 @@ function buildThemeDisplays(
 
   return THEME_ORDER.map((definition, index) => {
     const source = recordValue(themes, definition.id);
-    const uncertainties = [
-      ...collectKeys(source, definition.uncertaintyKeys ?? []),
-      ...(definition.booleanUncertaintyKey && recordValue(source, definition.booleanUncertaintyKey) === true
-        ? ["現時点では、まだ特定の人を決めていない。"]
-        : []),
-      ...collectOverallUndecided(minutes, definition.id),
-    ];
-    const conditions = collectKeys(source, definition.conditionKeys ?? []);
-    const currentThoughts = collectKeys(source, definition.currentKeys);
-    const background = collectPaths(source, definition.backgroundPaths ?? []);
-    const tensions = buildTensionNotes(currentThoughts, uncertainties);
+    const narrative = minutes?.narratives?.[definition.id];
+    const hasNarrative = Boolean(narrative);
+    const uncertainties = hasNarrative
+      ? collectNarrativeTexts(narrative?.uncertainties)
+      : [
+          ...collectKeys(source, definition.uncertaintyKeys ?? []),
+          ...(definition.booleanUncertaintyKey && recordValue(source, definition.booleanUncertaintyKey) === true
+            ? ["今回の話し合いでは、相談してほしい人をどこまで決めているかを確認できていません。"]
+            : []),
+          ...collectOverallUndecided(minutes, definition.id),
+        ];
+    const conditions = hasNarrative
+      ? collectNarrativeTexts(narrative?.conditions)
+      : collectKeys(source, definition.conditionKeys ?? []);
+    const currentThoughts = hasNarrative
+      ? collectNarrativeTexts(narrative?.currentThought)
+      : collectKeys(source, definition.currentKeys);
+    const background = hasNarrative
+      ? collectNarrativeTexts(narrative?.background)
+      : collectPaths(source, definition.backgroundPaths ?? []);
+    const tensions = hasNarrative ? collectNarrativeTexts(narrative?.tensions) : [];
     const confirmationNeeded = buildConfirmationNotes(definition.id, source);
+    const narrativeConfirmation = hasNarrative
+      ? collectNarrativeTexts(narrative?.confirmationNeeded)
+      : [];
 
     return {
       id: definition.id,
@@ -502,7 +534,7 @@ function buildThemeDisplays(
       conditions,
       uncertainties,
       tensions,
-      confirmationNeeded,
+      confirmationNeeded: uniqueStrings([...narrativeConfirmation, ...confirmationNeeded]),
       evidence: evidenceByTheme.get(definition.id) ?? [],
     };
   });
@@ -539,6 +571,35 @@ function collectThemeEvidence(value: unknown) {
   });
 
   return map;
+}
+
+function collectNarrativeTexts(
+  value: GroundedTextRecord | GroundedTextRecord[] | null | undefined,
+) {
+  if (!value) return [];
+  const items = Array.isArray(value) ? value : [value];
+  return uniqueStrings(
+    items
+      .filter((item) => Array.isArray(item.sourceUtteranceIds) && item.sourceUtteranceIds.length > 0)
+      .map((item) => item.text?.trim() ?? "")
+      .filter(Boolean),
+  );
+}
+
+function dedupeEvidenceByUtteranceId(evidence: EvidenceRecord[]) {
+  const seen = new Set<string>();
+  return evidence.filter((item) => {
+    const key =
+      item.evidenceUtteranceId?.trim() ||
+      [
+        speakerLabel(item.speaker),
+        "target",
+        normalizeEvidenceDedupeText(stripEvidenceSpeaker(item.evidenceText ?? "")),
+      ].join(":");
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function collectKeys(source: unknown, keys: readonly string[]) {
@@ -609,6 +670,16 @@ function speakerLabel(value: unknown) {
 
 function stripEvidenceSpeaker(value: string) {
   return value.replace(/^(本人|家族|介護者|その他|elder|caregiver)\s*[:：]\s*/i, "").trim();
+}
+
+function quoteEvidenceText(value: string) {
+  const text = value.trim();
+  if (!text) return "";
+  return text.startsWith("「") && text.endsWith("」") ? text : `「${text}」`;
+}
+
+function normalizeEvidenceDedupeText(value: string) {
+  return value.replace(/\s+/g, "").replace(/[「」『』"']/g, "").trim();
 }
 
 function formatDate(value: string) {

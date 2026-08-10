@@ -182,19 +182,29 @@ const SYSTEM_END_CHECK = [
 
 const SYSTEM_FINAL_MINUTES_FROM_STRUCTURED = [
   "あなたはACPの話し合い記録を整理するシステムです。",
-  "入力には、ACP対話から既に抽出され、匿名化された構造化情報だけが含まれています。",
+  "あなたの役割は、ACP対話の根拠発話を、意味を変えず読みやすい記録文へ整理することです。",
+  "入力には、ACP対話から既に抽出され、匿名化された構造化情報と根拠発話IDだけが含まれています。",
   "入力された情報のみを使用してください。",
-  "新しい事実、希望、価値観、理由、人物関係を推測・補完してはいけません。",
+  "入力された発話以外の情報を使用してはいけません。",
+  "新しい事実、希望、価値観、理由、人物関係、医療上の判断を推測・追加してはいけません。",
   "本人が話していない希望を生成してはいけません。",
   "発言主体を変更してはいけません。",
-  "「かもしれない」「できれば」「状況による」「まだ決めていない」などの曖昧さや条件を、断定表現へ変更してはいけません。",
+  "各記録文は必ず1件以上のsourceUtteranceIdsを持たなければなりません。",
+  "sourceUtteranceIdsで指定した発話から直接支持できない内容を書いてはいけません。",
+  "本人が「できれば」「まだ」「今のところ」「状況による」「分からない」などと話している場合、その条件・不確実性を削除してはいけません。",
+  "本人の中に異なる考えが同時に存在する場合、一方へ統合してはいけません。",
+  "介護者による解釈を、本人が直接話した内容であるかのように変更してはいけません。",
+  "会話調の冗長さは整理してよいですが、意味・強さ・条件・否定・迷いを変えてはいけません。",
   "否定表現を肯定表現へ変更してはいけません。",
   "複数の発言を統合する場合は、その意味が明確に共通していて、根拠aspectが2つ以上ある場合だけ統合してください。",
-  "テーマ内の文章は生成しないでください。あなたが担当するのはoverall_summaryのみです。",
-  "core_values と cross_theme_connections は必ず source_aspects を持たせ、根拠aspectが1つしかない内容は生成しないでください。",
+  "テーマごとの narratives は、currentThought、background、conditions、uncertainties、tensions、confirmationNeeded に整理してください。",
+  "currentThought と background は2〜5文程度を目安に、短すぎる単語メモや会話全文の貼り付けにしないでください。",
+  "conditions、uncertainties、tensions は本人発話から直接支持できる場合だけ書いてください。slotが空・不整合という理由だけで本人が迷っていると推論しないでください。",
+  "confirmationNeeded は、本人の葛藤ではなく記録上確認が必要なことに限定してください。",
+  "overall_summary の core_values と cross_theme_connections は必ず source_aspects と source_utterance_ids を持たせ、根拠aspectが1つしかない内容は生成しないでください。",
   "入力に情報がない項目は空配列 [] としてください。",
   "JSON以外の文章を出力しないでください。",
-  "Return JSON only with this shape: {\"overall_summary\":{\"core_values\":[{\"text\":\"...\",\"source_aspects\":[\"...\"]}],\"cross_theme_connections\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"related_themes\":[\"...\"]}],\"undecided_things\":[\"...\"]}}.",
+  "Return JSON only with this shape: {\"narratives\":{\"current_life_values\":{\"currentThought\":{\"text\":\"...\",\"sourceUtteranceIds\":[\"...\"],\"sourceAspectIds\":[\"...\"]},\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]}},\"overall_summary\":{\"core_values\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"source_utterance_ids\":[\"...\"]}],\"cross_theme_connections\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"related_themes\":[\"...\"],\"source_utterance_ids\":[\"...\"]}],\"undecided_things\":[\"...\"]}}.",
 ].join("\n");
 
 const SYSTEM_SLOT_CONTROL_DEBUG = [
@@ -990,15 +1000,19 @@ export async function generateFinalMinutes(
       recordType: "acp_discussion_record_input",
       themes: [],
     });
-  const result = await requestJson<{ overall_summary?: unknown }>(
+  const result = await requestJson<{ overall_summary?: unknown; narratives?: unknown }>(
     SYSTEM_FINAL_MINUTES_FROM_STRUCTURED,
     buildStructuredMinutesPayload(fallback),
-    { overall_summary: baseMinutes.overall_summary },
+    {
+      overall_summary: baseMinutes.overall_summary,
+      narratives: baseMinutes.narratives,
+    },
   );
   const validatedMinutes = validateACPMinutes({
     ...baseMinutes,
     overall_summary: result.overall_summary,
-  }) ?? baseMinutes;
+    narratives: result.narratives,
+  }, fallback.json.acp_minutes_llm_input) ?? baseMinutes;
   const markdown = renderACPMinutesMarkdown(
     validatedMinutes,
     fallback.json.generated_at,

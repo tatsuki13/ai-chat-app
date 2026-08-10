@@ -643,17 +643,36 @@ export type ACPAspectEvidence = {
   certainty?: ACPAspectCertainty;
   condition?: string | null;
   negation?: boolean;
+  sourceUtteranceId?: string;
+  sourceTopicId?: string;
 };
 
 export type ACPGeneratedSummary = {
   text: string;
   source_aspects: string[];
+  source_utterance_ids?: string[];
 };
 
 export type ACPGeneratedConnection = {
   text: string;
   source_aspects: string[];
   related_themes: string[];
+  source_utterance_ids?: string[];
+};
+
+export type GroundedMinutesText = {
+  text: string;
+  sourceUtteranceIds: string[];
+  sourceAspectIds?: string[];
+};
+
+export type ACPThemeNarrative = {
+  currentThought?: GroundedMinutesText | null;
+  background?: GroundedMinutesText | null;
+  conditions?: GroundedMinutesText[];
+  uncertainties?: GroundedMinutesText[];
+  tensions?: GroundedMinutesText[];
+  confirmationNeeded?: GroundedMinutesText[];
 };
 
 export type ACPMinutes = {
@@ -726,6 +745,17 @@ export type ACPMinutes = {
     core_values: ACPGeneratedSummary[];
     cross_theme_connections: ACPGeneratedConnection[];
     undecided_things: string[];
+  };
+  narratives?: Partial<Record<keyof ACPMinutes["themes"], ACPThemeNarrative>>;
+  narrative_debug?: {
+    validation?: Array<{
+      themeId: string;
+      field: string;
+      text: string;
+      sourceUtteranceIds: string[];
+      accepted: boolean;
+      reason?: string;
+    }>;
   };
 };
 
@@ -1760,15 +1790,21 @@ export function buildACPMinutesFromStructuredInput(input: ACPMinutesLLMInput): A
       },
     },
     overall_summary: buildConservativeOverallSummary(input),
+    narratives: buildFallbackThemeNarratives(input),
   };
 }
 
-export function validateACPMinutes(value: unknown): ACPMinutes | null {
+export function validateACPMinutes(
+  value: unknown,
+  input?: ACPMinutesLLMInput,
+): ACPMinutes | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<ACPMinutes>;
   if (candidate.recordType !== "acp_discussion_record") return null;
   if (!candidate.themes || typeof candidate.themes !== "object") return null;
   if (!candidate.overall_summary || typeof candidate.overall_summary !== "object") return null;
+
+  const narratives = normalizeThemeNarratives(candidate.narratives, input);
 
   return {
     title: normalizeString(candidate.title, "これからの暮らしと大切にしたいこと"),
@@ -1840,6 +1876,11 @@ export function validateACPMinutes(value: unknown): ACPMinutes | null {
       core_values: normalizeGeneratedSummaries(candidate.overall_summary.core_values),
       cross_theme_connections: normalizeGeneratedConnections(candidate.overall_summary.cross_theme_connections),
       undecided_things: normalizeStringArray(candidate.overall_summary.undecided_things),
+    },
+    narratives,
+    narrative_debug: {
+      ...(candidate.narrative_debug ?? {}),
+      validation: buildNarrativeValidationDebug(narratives),
     },
   };
 }
@@ -1929,6 +1970,8 @@ function toACPAspectEvidence(evidence: EvidenceReference): ACPAspectEvidence | n
     certainty: inferEvidenceCertainty(text),
     condition: inferEvidenceCondition(text),
     negation: hasNegation(text),
+    sourceUtteranceId: evidence.evidenceUtteranceId,
+    sourceTopicId: evidence.sourceTopicId,
   };
 }
 
@@ -1979,6 +2022,7 @@ function buildConservativeOverallSummary(input: ACPMinutesLLMInput): ACPMinutes[
         ? [{
             text: "できることは、できるだけ自分で続けたいという思いが複数のテーマで確認されています。",
             source_aspects: selfContinuationAspects,
+            source_utterance_ids: getSourceUtteranceIdsForAspects(input, selfContinuationAspects),
           }]
         : [],
     cross_theme_connections:
@@ -1987,10 +2031,264 @@ function buildConservativeOverallSummary(input: ACPMinutesLLMInput): ACPMinutes[
             text: "自分で続けたいという思いが、暮らしの継続、自分らしさ、支援の希望にまたがって表れています。",
             source_aspects: selfContinuationAspects,
             related_themes: relatedThemes,
+            source_utterance_ids: getSourceUtteranceIdsForAspects(input, selfContinuationAspects),
           }]
         : [],
     undecided_things: uniqueStrings(undecided),
   };
+}
+
+function buildFallbackThemeNarratives(input: ACPMinutesLLMInput): ACPMinutes["narratives"] {
+  const narratives: ACPMinutes["narratives"] = {};
+
+  input.themes.forEach((theme) => {
+    const groups = getNarrativeAspectGroups(theme.theme_id);
+    const currentThought = buildGroundedTextFromAspects(theme, groups.currentThought);
+    const background = buildGroundedTextFromAspects(theme, groups.background);
+    const conditions = buildGroundedTextListFromAspects(theme, groups.conditions);
+    const uncertainties = buildGroundedTextListFromAspects(theme, groups.uncertainties);
+    const tensions = buildGroundedTextListFromAspects(
+      theme,
+      theme.aspects
+        .filter((aspect) =>
+          aspect.evidence.some((evidence) => evidence.certainty === "迷いあり"),
+        )
+        .map((aspect) => aspect.aspect_id),
+    );
+
+    narratives[theme.theme_id] = {
+      currentThought,
+      background,
+      conditions,
+      uncertainties,
+      tensions,
+      confirmationNeeded: [],
+    };
+  });
+
+  return narratives;
+}
+
+function buildGroundedTextFromAspects(
+  theme: ACPMinutesLLMInput["themes"][number],
+  aspectIds: string[],
+): GroundedMinutesText | null {
+  const sourceAspects = theme.aspects.filter((aspect) => aspectIds.includes(aspect.aspect_id));
+  const sourceUtteranceIds = uniqueStrings(
+    sourceAspects.flatMap((aspect) =>
+      aspect.evidence.map((evidence) => evidence.sourceUtteranceId ?? ""),
+    ),
+  );
+  const texts = uniqueStrings(
+    sourceAspects.flatMap((aspect) => aspect.evidence.map(formatACPAspectForMinutes)),
+  );
+  if (sourceUtteranceIds.length === 0 || texts.length === 0) return null;
+
+  return {
+    text: `本人は、${texts.join(" また、")}と話している。`,
+    sourceUtteranceIds,
+    sourceAspectIds: uniqueStrings(sourceAspects.map((aspect) => aspect.aspect_id)),
+  };
+}
+
+function buildGroundedTextListFromAspects(
+  theme: ACPMinutesLLMInput["themes"][number],
+  aspectIds: string[],
+) {
+  return aspectIds
+    .map((aspectId) => buildGroundedTextFromAspects(theme, [aspectId]))
+    .filter((item): item is GroundedMinutesText => Boolean(item));
+}
+
+function getNarrativeAspectGroups(themeId: keyof ACPMinutes["themes"]) {
+  switch (themeId) {
+    case "current_life_values":
+      return {
+        currentThought: ["valued_routine", "hobby_or_joy"],
+        background: ["reason", "relationships", "role", "attachment", "cross_connection", "cross_living_environment"],
+        conditions: [],
+        uncertainties: [],
+      };
+    case "future_life_continuity":
+      return {
+        currentThought: ["continued_activity", "self_continuation", "not_want_to_lose"],
+        background: ["reason", "important_for_continuation", "preferred_environment", "cross_selfhood", "cross_support", "cross_secure_living"],
+        conditions: ["acceptable_change"],
+        uncertainties: [],
+      };
+    case "selfhood":
+      return {
+        currentThought: ["self_determination", "respect", "purpose_or_role", "lifestyle", "cross_values", "cross_living_environment", "cross_support"],
+        background: ["privacy", "connection", "comfort"],
+        conditions: [],
+        uncertainties: [],
+      };
+    case "care_support":
+      return {
+        currentThought: ["acceptable_support", "unacceptable_support", "self_scope", "support_person", "decision_process"],
+        background: ["anxiety"],
+        conditions: ["support_condition", "timing"],
+        uncertainties: [],
+      };
+    case "family_communication":
+      return {
+        currentThought: ["request", "burden_concern", "feelings", "expected_judgement", "avoidance", "non_family_support"],
+        background: [],
+        conditions: [],
+        uncertainties: ["unspoken"],
+      };
+    case "proxy_decision_support":
+      return {
+        currentThought: ["trusted_person", "trust_reason", "values_to_share", "involvement", "multiple_people"],
+        background: [],
+        conditions: [],
+        uncertainties: ["not_decided", "hard_to_decide"],
+      };
+  }
+}
+
+function normalizeThemeNarratives(
+  value: unknown,
+  input?: ACPMinutesLLMInput,
+): ACPMinutes["narratives"] {
+  const fallback = input ? buildFallbackThemeNarratives(input) : {};
+  if (!value || typeof value !== "object") return fallback;
+
+  const record = value as Record<string, unknown>;
+  const evidenceIndex = input ? buildMinutesEvidenceIndex(input) : null;
+  const next: ACPMinutes["narratives"] = {};
+
+  Object.keys(fallback).forEach((themeId) => {
+    if (!isACPMinutesThemeId(themeId)) return;
+    const themeNarrative = record[themeId];
+    const fallbackTheme = fallback[themeId] ?? {};
+    next[themeId] =
+      themeNarrative && typeof themeNarrative === "object"
+        ? {
+            currentThought:
+              normalizeGroundedText((themeNarrative as Record<string, unknown>).currentThought, themeId, evidenceIndex) ??
+              fallbackTheme.currentThought ??
+              null,
+            background:
+              normalizeGroundedText((themeNarrative as Record<string, unknown>).background, themeId, evidenceIndex) ??
+              fallbackTheme.background ??
+              null,
+            conditions: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).conditions, themeId, evidenceIndex, fallbackTheme.conditions),
+            uncertainties: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).uncertainties, themeId, evidenceIndex, fallbackTheme.uncertainties),
+            tensions: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).tensions, themeId, evidenceIndex, fallbackTheme.tensions),
+            confirmationNeeded: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).confirmationNeeded, themeId, evidenceIndex, fallbackTheme.confirmationNeeded),
+          }
+        : fallbackTheme;
+  });
+
+  return next;
+}
+
+function buildNarrativeValidationDebug(
+  narratives: ACPMinutes["narratives"],
+): NonNullable<ACPMinutes["narrative_debug"]>["validation"] {
+  if (!narratives) return [];
+
+  return Object.entries(narratives).flatMap(([themeId, narrative]) => {
+    if (!narrative) return [];
+
+    return [
+      ...groundedTextDebugRows(themeId, "currentThought", narrative.currentThought),
+      ...groundedTextDebugRows(themeId, "background", narrative.background),
+      ...groundedTextDebugRows(themeId, "conditions", narrative.conditions),
+      ...groundedTextDebugRows(themeId, "uncertainties", narrative.uncertainties),
+      ...groundedTextDebugRows(themeId, "tensions", narrative.tensions),
+      ...groundedTextDebugRows(themeId, "confirmationNeeded", narrative.confirmationNeeded),
+    ];
+  });
+}
+
+function groundedTextDebugRows(
+  themeId: string,
+  field: string,
+  value: GroundedMinutesText | GroundedMinutesText[] | null | undefined,
+) {
+  if (!value) return [];
+  const items = Array.isArray(value) ? value : [value];
+
+  return items.map((item) => ({
+    themeId,
+    field,
+    text: item.text,
+    sourceUtteranceIds: item.sourceUtteranceIds,
+    accepted: item.sourceUtteranceIds.length > 0,
+  }));
+}
+
+function normalizeGroundedTextArray(
+  value: unknown,
+  themeId: keyof ACPMinutes["themes"],
+  evidenceIndex: Map<string, { themeId: string; speaker?: ACPAspectSpeaker }> | null,
+  fallback: GroundedMinutesText[] = [],
+) {
+  if (!Array.isArray(value)) return fallback;
+  const items = value
+    .map((item) => normalizeGroundedText(item, themeId, evidenceIndex))
+    .filter((item): item is GroundedMinutesText => Boolean(item));
+
+  return items.length > 0 ? items : fallback;
+}
+
+function normalizeGroundedText(
+  value: unknown,
+  themeId: keyof ACPMinutes["themes"],
+  evidenceIndex: Map<string, { themeId: string; speaker?: ACPAspectSpeaker }> | null,
+): GroundedMinutesText | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const text = normalizeString(record.text);
+  const sourceUtteranceIds = normalizeStringArray(record.sourceUtteranceIds);
+  if (!text || sourceUtteranceIds.length === 0) return null;
+
+  if (evidenceIndex) {
+    const valid = sourceUtteranceIds.every((id) => {
+      const evidence = evidenceIndex.get(id);
+      if (!evidence || evidence.themeId !== themeId) return false;
+      return evidence.speaker === "本人" || evidence.speaker === "家族";
+    });
+    if (!valid) return null;
+  }
+
+  return {
+    text,
+    sourceUtteranceIds,
+    sourceAspectIds: normalizeStringArray(record.sourceAspectIds),
+  };
+}
+
+function buildMinutesEvidenceIndex(input: ACPMinutesLLMInput) {
+  const index = new Map<string, { themeId: string; speaker?: ACPAspectSpeaker }>();
+  input.themes.forEach((theme) => {
+    theme.aspects.forEach((aspect) => {
+      aspect.evidence.forEach((evidence) => {
+        if (!evidence.sourceUtteranceId) return;
+        index.set(evidence.sourceUtteranceId, {
+          themeId: theme.theme_id,
+          speaker: evidence.speaker,
+        });
+      });
+    });
+  });
+  return index;
+}
+
+function getSourceUtteranceIdsForAspects(
+  input: ACPMinutesLLMInput,
+  aspectIds: string[],
+) {
+  const idSet = new Set(aspectIds);
+  return uniqueStrings(
+    input.themes.flatMap((theme) =>
+      theme.aspects
+        .filter((aspect) => idSet.has(aspect.aspect_id))
+        .flatMap((aspect) => aspect.evidence.map((evidence) => evidence.sourceUtteranceId ?? "")),
+    ),
+  );
 }
 
 function normalizeMinutesAspectId(themeId: string, aspectId: string) {
@@ -1999,14 +2297,7 @@ function normalizeMinutesAspectId(themeId: string, aspectId: string) {
 }
 
 function formatACPAspectForMinutes(evidence: ACPAspectEvidence) {
-  const suffixes = [
-    evidence.condition ? `（条件: ${evidence.condition}）` : "",
-    evidence.certainty === "迷いあり" ? "（迷いあり）" : "",
-    evidence.certainty === "条件付き" && !evidence.condition ? "（条件付き）" : "",
-    evidence.negation ? "（否定・避けたい内容）" : "",
-  ].filter(Boolean);
-
-  return `${evidence.value}${suffixes.join("")}`;
+  return evidence.value;
 }
 
 function anonymizeACPText(value: string) {
