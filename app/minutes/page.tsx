@@ -25,7 +25,6 @@ type MinutesApiResponse = {
 type ACPMinutesRecord = {
   title?: string;
   recordType?: string;
-  themes?: Record<string, unknown>;
   narratives?: Record<string, ThemeNarrativeRecord | undefined>;
   overall_summary?: {
     core_values?: Array<{ text?: string; source_aspects?: string[]; source_utterance_ids?: string[] }>;
@@ -78,80 +77,32 @@ type ThemeDisplay = {
 type ThemeDisplayDefinition = {
   id: string;
   title: string;
-  currentKeys: readonly string[];
-  backgroundPaths?: readonly (readonly string[])[];
-  conditionKeys?: readonly string[];
-  uncertaintyKeys?: readonly string[];
-  booleanUncertaintyKey?: string;
 };
 
 const THEME_ORDER: readonly ThemeDisplayDefinition[] = [
   {
     id: "current_life_values",
     title: "今の暮らしの中で大切にしていること",
-    currentKeys: ["life_supports"],
-    backgroundPaths: [
-      ["reason"],
-      ["background", "relationships"],
-      ["background", "role"],
-      ["background", "attachment"],
-    ],
   },
   {
     id: "future_life_continuity",
     title: "これからも守っていきたい暮らし",
-    currentKeys: ["continued_activity", "self_continuation", "not_want_to_lose"],
-    backgroundPaths: [["reason"], ["important_for_continuation"]],
-    conditionKeys: ["acceptable_change"],
   },
   {
     id: "selfhood",
     title: "「自分らしく暮らす」ために大切なこと",
-    currentKeys: ["self_determination", "respect", "purpose_or_role", "lifestyle"],
-    backgroundPaths: [
-      ["other_important_things", "privacy"],
-      ["other_important_things", "connection"],
-      ["other_important_things", "comfort"],
-    ],
   },
   {
     id: "care_support",
     title: "もし手助けが必要になったら",
-    currentKeys: [
-      "acceptable_support",
-      "unacceptable_support",
-      "self_scope",
-      "support_person",
-      "support_decision",
-    ],
-    backgroundPaths: [["anxiety"]],
-    conditionKeys: ["support_condition"],
   },
   {
     id: "family_communication",
     title: "家族に伝えておきたいこと",
-    currentKeys: [
-      "request",
-      "burden_concern",
-      "feelings",
-      "expected_judgement",
-      "avoidance",
-      "non_family_support",
-    ],
-    uncertaintyKeys: ["unspoken"],
   },
   {
     id: "proxy_decision_support",
     title: "もし自分で医療や介護について決めることが難しくなったら",
-    currentKeys: [
-      "trusted_person",
-      "trust_reason",
-      "values_to_share",
-      "involvement",
-      "multiple_people",
-    ],
-    uncertaintyKeys: ["hard_to_decide"],
-    booleanUncertaintyKey: "not_decided",
   },
 ] as const;
 
@@ -495,35 +446,14 @@ function buildThemeDisplays(
   minutes: ACPMinutesRecord | null,
   evidenceByTheme: Map<string, EvidenceRecord[]>,
 ): ThemeDisplay[] {
-  const themes = minutes?.themes ?? {};
-
   return THEME_ORDER.map((definition, index) => {
-    const source = recordValue(themes, definition.id);
     const narrative = minutes?.narratives?.[definition.id];
-    const hasNarrative = Boolean(narrative);
-    const uncertainties = hasNarrative
-      ? collectNarrativeTexts(narrative?.uncertainties)
-      : [
-          ...collectKeys(source, definition.uncertaintyKeys ?? []),
-          ...(definition.booleanUncertaintyKey && recordValue(source, definition.booleanUncertaintyKey) === true
-            ? ["今回の話し合いでは、相談してほしい人をどこまで決めているかを確認できていません。"]
-            : []),
-          ...collectOverallUndecided(minutes, definition.id),
-        ];
-    const conditions = hasNarrative
-      ? collectNarrativeTexts(narrative?.conditions)
-      : collectKeys(source, definition.conditionKeys ?? []);
-    const currentThoughts = hasNarrative
-      ? collectNarrativeTexts(narrative?.currentThought)
-      : collectKeys(source, definition.currentKeys);
-    const background = hasNarrative
-      ? collectNarrativeTexts(narrative?.background)
-      : collectPaths(source, definition.backgroundPaths ?? []);
-    const tensions = hasNarrative ? collectNarrativeTexts(narrative?.tensions) : [];
-    const confirmationNeeded = buildConfirmationNotes(definition.id, source);
-    const narrativeConfirmation = hasNarrative
-      ? collectNarrativeTexts(narrative?.confirmationNeeded)
-      : [];
+    const uncertainties = collectNarrativeTexts(narrative?.uncertainties);
+    const conditions = collectNarrativeTexts(narrative?.conditions);
+    const currentThoughts = collectNarrativeTexts(narrative?.currentThought);
+    const background = collectNarrativeTexts(narrative?.background);
+    const tensions = collectNarrativeTexts(narrative?.tensions);
+    const confirmationNeeded = collectNarrativeTexts(narrative?.confirmationNeeded);
 
     return {
       id: definition.id,
@@ -534,7 +464,7 @@ function buildThemeDisplays(
       conditions,
       uncertainties,
       tensions,
-      confirmationNeeded: uniqueStrings([...narrativeConfirmation, ...confirmationNeeded]),
+      confirmationNeeded,
       evidence: evidenceByTheme.get(definition.id) ?? [],
     };
   });
@@ -602,56 +532,10 @@ function dedupeEvidenceByUtteranceId(evidence: EvidenceRecord[]) {
   });
 }
 
-function collectKeys(source: unknown, keys: readonly string[]) {
-  return keys.flatMap((key) => stringArray(recordValue(source, key)));
-}
-
-function collectPaths(source: unknown, paths: readonly (readonly string[])[]) {
-  return paths.flatMap((path) => {
-    const value = path.reduce<unknown>((current, key) => recordValue(current, key), source);
-    return typeof value === "string" ? stringArray([value]) : stringArray(value);
-  });
-}
-
-function collectOverallUndecided(minutes: ACPMinutesRecord | null, themeId: string) {
-  if (themeId !== "proxy_decision_support") return [];
-  return stringArray(minutes?.overall_summary?.undecided_things);
-}
-
-function buildTensionNotes(currentThoughts: string[], uncertainties: string[]) {
-  if (currentThoughts.length === 0 || uncertainties.length === 0) return [];
-  return [
-    "現在の考えとして話されている内容と、まだ決めきれていない内容が同時に残っている。どちらか一方に整理せず、次回以降も本人の言葉で確認する。",
-  ];
-}
-
-function buildConfirmationNotes(themeId: string, source: unknown) {
-  if (themeId !== "proxy_decision_support") return [];
-  const trusted = stringArray(recordValue(source, "trusted_person"));
-  const notDecided = recordValue(source, "not_decided") === true;
-  if (!trusted.length || !notDecided) return [];
-
-  return [
-    "相談してほしい人に関する発言がある一方で、特定の人をまだ決めていないという記録も残っている。相談相手の希望なのか、代理意思決定者までは決めていないという意味なのかは、次回の話し合いで確認する。",
-  ];
-}
-
 function summaryTexts(items: Array<{ text?: string }> | undefined) {
   return (items ?? [])
     .map((item) => item.text?.trim())
     .filter((text): text is string => Boolean(text));
-}
-
-function recordValue(source: unknown, key: string) {
-  return source && typeof source === "object" ? (source as Record<string, unknown>)[key] : undefined;
-}
-
-function stringArray(value: unknown) {
-  return Array.isArray(value)
-    ? uniqueStrings(value.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean))
-    : typeof value === "string" && value.trim()
-      ? [value.trim()]
-      : [];
 }
 
 function uniqueStrings(values: string[]) {
