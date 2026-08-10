@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createInitialSlotStates } from "../../../../lib/acp-store";
+import { createInitialSlotStates, getSessionContext } from "../../../../lib/acp-store";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
 
@@ -26,6 +26,27 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { error: "source participant_code is required" },
         { status: 400 },
+      );
+    }
+
+    const existingReplaySession = await prisma.session.findFirst({
+      where: {
+        participantCode: replayParticipantCode,
+        condition: "replay",
+      },
+      select: { id: true },
+    });
+
+    if (existingReplaySession) {
+      const sourceSession = await findSourceSession(sourceParticipantCode);
+
+      return NextResponse.json(
+        await buildReplayResponse({
+          sessionId: existingReplaySession.id,
+          sourceParticipantCode,
+          sourceSession,
+          reused: true,
+        }),
       );
     }
 
@@ -69,30 +90,15 @@ export async function POST(request: Request) {
     });
     const slotStates = await createInitialSlotStates(session.id);
 
-    return NextResponse.json({
-      session: {
-        id: session.id,
-        participant_code: session.participantCode,
-        condition: session.condition,
-        started_at: session.startedAt.toISOString(),
-        dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
-        ended_at: session.endedAt?.toISOString() ?? null,
-      },
-      source_session: {
-        participant_code: sourceSession.participantCode,
-        started_at: sourceSession.startedAt.toISOString(),
-        ended_at: sourceSession.endedAt?.toISOString() ?? null,
-        utterance_count: sourceSession.utterances.length,
-      },
-      utterance_count: session.utterances.length,
-      utterances: session.utterances.map((utterance) => ({
-        id: utterance.id,
-        speaker: normalizeConversationSpeaker(utterance.speaker),
-        text: utterance.text,
-        created_at: utterance.createdAt.toISOString(),
-      })),
-      slot_states: slotStates,
-    });
+    return NextResponse.json(
+      await buildReplayResponse({
+        sessionId: session.id,
+        sourceParticipantCode,
+        sourceSession,
+        slotStates,
+        reused: false,
+      }),
+    );
   } catch (error) {
     console.error(error);
 
@@ -105,4 +111,58 @@ export async function POST(request: Request) {
 
 function requiredString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+async function findSourceSession(sourceParticipantCode: string) {
+  return prisma.session.findFirst({
+    where: {
+      participantCode: sourceParticipantCode,
+      condition: { not: "replay" },
+    },
+    orderBy: [{ endedAt: "desc" }, { startedAt: "desc" }],
+    include: {
+      utterances: {
+        orderBy: { createdAt: "asc" },
+      },
+    },
+  });
+}
+
+async function buildReplayResponse(input: {
+  sessionId: string;
+  sourceParticipantCode: string;
+  sourceSession: Awaited<ReturnType<typeof findSourceSession>>;
+  slotStates?: Awaited<ReturnType<typeof createInitialSlotStates>>;
+  reused: boolean;
+}) {
+  const context = await getSessionContext(input.sessionId);
+
+  return {
+    reused: input.reused,
+    session: {
+      id: context.session.id,
+      participant_code: context.session.participantCode,
+      condition: context.session.condition,
+      started_at: context.session.startedAt.toISOString(),
+      dialogue_started_at: context.session.dialogueStartedAt?.toISOString() ?? null,
+      ended_at: context.session.endedAt?.toISOString() ?? null,
+    },
+    source_session: {
+      participant_code:
+        input.sourceSession?.participantCode ?? input.sourceParticipantCode,
+      started_at:
+        input.sourceSession?.startedAt.toISOString() ??
+        context.session.startedAt.toISOString(),
+      ended_at: input.sourceSession?.endedAt?.toISOString() ?? null,
+      utterance_count: input.sourceSession?.utterances.length ?? context.utterances.length,
+    },
+    utterance_count: context.utterances.length,
+    utterances: context.utterances.map((utterance) => ({
+      id: utterance.id,
+      speaker: normalizeConversationSpeaker(utterance.speaker),
+      text: utterance.text,
+      created_at: utterance.created_at,
+    })),
+    slot_states: input.slotStates ?? context.slotStates,
+  };
 }

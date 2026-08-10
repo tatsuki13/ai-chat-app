@@ -2079,13 +2079,11 @@ function buildGroundedTextFromAspects(
       aspect.evidence.map((evidence) => evidence.sourceUtteranceId ?? ""),
     ),
   );
-  const texts = uniqueStrings(
-    sourceAspects.flatMap((aspect) => aspect.evidence.map(formatACPAspectForMinutes)),
-  );
-  if (sourceUtteranceIds.length === 0 || texts.length === 0) return null;
+  const labels = uniqueStrings(sourceAspects.map((aspect) => aspect.label));
+  if (sourceUtteranceIds.length === 0 || labels.length === 0) return null;
 
   return {
-    text: `本人は、${texts.join(" また、")}と話している。`,
+    text: buildFallbackNarrativeText(theme.title, labels),
     sourceUtteranceIds,
     sourceAspectIds: uniqueStrings(sourceAspects.map((aspect) => aspect.aspect_id)),
   };
@@ -2145,6 +2143,14 @@ function getNarrativeAspectGroups(themeId: keyof ACPMinutes["themes"]) {
         uncertainties: ["not_decided", "hard_to_decide"],
       };
   }
+}
+
+function buildFallbackNarrativeText(themeTitle: string, labels: string[]) {
+  const labelText = labels.length === 1
+    ? labels[0]
+    : `${labels.slice(0, -1).join("、")}、${labels.at(-1)}`;
+
+  return `本人は、「${themeTitle}」について、${labelText}に関する考えを話している。具体的な表現や条件は、下の「根拠となった発言」で確認する。`;
 }
 
 function normalizeThemeNarratives(

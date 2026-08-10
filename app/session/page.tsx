@@ -179,6 +179,7 @@ type UpdateSlotsResponse = {
 };
 
 type ReplaySessionResponse = {
+  reused?: boolean;
   session: SessionInfo;
   source_session: {
     participant_code: string | null;
@@ -1419,7 +1420,7 @@ function SessionPageClient() {
   async function createReplaySessionFromParticipantCode(replayParticipantCode: string) {
     const sourceParticipantCode = replayParticipantCode.slice("tatsuki_".length);
     const confirmed = window.confirm(
-      `${sourceParticipantCode} の過去ログをコピーして、試運転用セッション ${replayParticipantCode} を作成しますか？元ログは変更しません。`,
+      `${sourceParticipantCode} の過去ログを使って、試運転用セッション ${replayParticipantCode} を作成または再開しますか？元ログは変更しません。`,
     );
     if (!confirmed) return;
 
@@ -1444,8 +1445,10 @@ function SessionPageClient() {
       setIdDraft("");
       resetTopicTiming();
       setPromptPanel({
-        title: "試運転セッション",
-        body: `${replay.source_session.participant_code ?? sourceParticipantCode} の過去ログ ${replay.source_session.utterance_count} 件をコピーしました。スロット更新や質問生成を試せます。`,
+        title: replay.reused ? "試運転セッションを再開しました" : "試運転セッション",
+        body: replay.reused
+          ? `${replayParticipantCode} の既存の試運転セッションを開きました。前回のスロット更新や試運転の続きから確認できます。`
+          : `${replay.source_session.participant_code ?? sourceParticipantCode} の過去ログ ${replay.source_session.utterance_count} 件をコピーしました。スロット更新や質問生成を試せます。`,
         tone: "status",
       });
       setStatusText("試運転");
