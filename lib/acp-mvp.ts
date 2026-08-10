@@ -607,6 +607,10 @@ export type FinalMinutesResult = {
     slots: AcpSlotState[];
     acp_minutes?: ACPMinutes;
     acp_minutes_llm_input?: ACPMinutesLLMInput;
+    acp_minutes_llm_meta?: {
+      source: "openai" | "fallback" | "error";
+      llmSucceeded: boolean;
+    };
     themes?: ThemeMinutesItem[];
     optional_themes?: ThemeMinutesItem[];
     theme_metrics?: ThemeCompletenessMetrics;

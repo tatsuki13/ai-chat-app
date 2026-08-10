@@ -251,10 +251,9 @@ const FINAL_MINUTES_RESPONSE_FORMAT = {
           additionalProperties: false,
           required: ["core_values", "cross_theme_connections", "undecided_things"],
           properties: {
-            core_values: { type: "array", maxItems: 4, items: { $ref: "#/$defs/overallItem" } },
+            core_values: { type: "array", items: { $ref: "#/$defs/overallItem" } },
             cross_theme_connections: {
               type: "array",
-              maxItems: 4,
               items: { $ref: "#/$defs/connectionItem" },
             },
             undecided_things: { type: "array", items: { type: "string" } },
@@ -270,7 +269,6 @@ const FINAL_MINUTES_RESPONSE_FORMAT = {
             text: { type: "string" },
             sourceUtteranceIds: {
               type: "array",
-              minItems: 1,
               items: { type: "string" },
             },
             sourceAspectIds: { type: "array", items: { type: "string" } },
@@ -305,8 +303,8 @@ const FINAL_MINUTES_RESPONSE_FORMAT = {
           required: ["text", "source_aspects", "source_utterance_ids"],
           properties: {
             text: { type: "string" },
-            source_aspects: { type: "array", minItems: 2, items: { type: "string" } },
-            source_utterance_ids: { type: "array", minItems: 1, items: { type: "string" } },
+            source_aspects: { type: "array", items: { type: "string" } },
+            source_utterance_ids: { type: "array", items: { type: "string" } },
           },
         },
         connectionItem: {
@@ -315,9 +313,9 @@ const FINAL_MINUTES_RESPONSE_FORMAT = {
           required: ["text", "source_aspects", "related_themes", "source_utterance_ids"],
           properties: {
             text: { type: "string" },
-            source_aspects: { type: "array", minItems: 2, items: { type: "string" } },
-            related_themes: { type: "array", minItems: 2, items: { type: "string" } },
-            source_utterance_ids: { type: "array", minItems: 1, items: { type: "string" } },
+            source_aspects: { type: "array", items: { type: "string" } },
+            related_themes: { type: "array", items: { type: "string" } },
+            source_utterance_ids: { type: "array", items: { type: "string" } },
           },
         },
       },
@@ -1118,7 +1116,11 @@ export async function generateFinalMinutes(
       recordType: "acp_discussion_record_input",
       themes: [],
     });
-  const result = await requestJson<{ overall_summary?: unknown; narratives?: unknown }>(
+  const result = await requestJson<{
+    overall_summary?: unknown;
+    narratives?: unknown;
+    __requestMeta?: JsonRequestMeta;
+  }>(
     SYSTEM_FINAL_MINUTES_FROM_STRUCTURED,
     buildStructuredMinutesPayload(fallback),
     {
@@ -1143,6 +1145,10 @@ export async function generateFinalMinutes(
       json: {
         ...fallback.json,
         acp_minutes: validatedMinutes,
+        acp_minutes_llm_meta: result.__requestMeta ?? {
+          source: "fallback",
+          llmSucceeded: false,
+        },
       },
     },
     context,
