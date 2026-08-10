@@ -26,6 +26,7 @@ export async function POST(request: Request) {
     const currentTopicTitle = optionalString(
       body.current_topic_title ?? body.currentTopicTitle,
     );
+    const finalize = body.finalize === true;
     const initialContext = await getSessionContext(sessionId);
     const bundle = await updateSlotStateBundleFromConversation({
       ...initialContext,
@@ -44,11 +45,12 @@ export async function POST(request: Request) {
       participantCode: context.session.participantCode,
     });
     const savedMinutes = await saveFinalMinutes(sessionId, minutes);
-    const endedAt = context.session.endedAt ?? new Date();
-    const session = await prisma.session.update({
-      where: { id: sessionId },
-      data: { endedAt },
-    });
+    const session = finalize
+      ? await prisma.session.update({
+          where: { id: sessionId },
+          data: { endedAt: context.session.endedAt ?? new Date() },
+        })
+      : context.session;
 
     return NextResponse.json({
       session: {

@@ -4,6 +4,7 @@ import {
   saveSubSlotStates,
   saveSlotStates,
 } from "../../../../lib/acp-store";
+import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
 import { updateSlotStateBundleFromConversation } from "../../../../lib/llm";
 
 export const runtime = "nodejs";
@@ -29,10 +30,17 @@ export async function POST(request: Request) {
     });
     await saveSlotStates(sessionId, bundle.slotStates);
     await saveSubSlotStates(sessionId, bundle.subSlotStates);
+    const slotControl = buildSlotControlDebugState({
+      slots: bundle.slotStates,
+      currentTopic,
+      subSlotStates: bundle.subSlotStates,
+      classificationDebug: bundle.debug.summary,
+    });
 
     return NextResponse.json({
       slot_states: bundle.slotStates,
       sub_slot_states: bundle.subSlotStates,
+      slot_control: slotControl,
       slot_classification_debug: bundle.debug,
       final_minutes: null,
     });

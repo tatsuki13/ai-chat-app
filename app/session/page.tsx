@@ -31,6 +31,12 @@ type SpeakerRole = Speaker;
 type SpeakerWithUnknown = Speaker | "unknown";
 type ButtonType = "next_question" | "switch_topic" | "check_end" | "update_slots";
 type PromptTone = "question" | "switch" | "end" | "status" | "error";
+type TopicTimerStartSource = "text" | "local_voice" | "remote_voice";
+type ConversationAction =
+  | { type: "generate_question"; reason: string }
+  | { type: "switch_topic"; reason: string }
+  | { type: "continue_same_question"; reason: string }
+  | { type: "complete_session"; reason: string };
 
 type RemoteMicConnectionStatus =
   | "not-issued"
@@ -164,13 +170,18 @@ type FinalMinutesResponse = {
   };
 };
 
+type UpdateSlotsResponse = {
+  slot_states: SlotState[];
+  sub_slot_states: unknown[];
+  slot_control?: SlotControlDebugState;
+  slot_classification_debug?: unknown;
+};
+
 const STORAGE_KEY = "acp-hitl-current-session-id";
 const MAX_RENDERED_UTTERANCES = 30;
 const BASE_TOPIC_DURATION_MS = 5 * 60 * 1000;
-const MAX_EXTENSION_DURATION_MS = 2 * 60 * 1000;
-const MAX_TOPIC_DURATION_MS = BASE_TOPIC_DURATION_MS + MAX_EXTENSION_DURATION_MS;
+const DECISION_RATIO = 0.6;
 const PROPOSAL_COOLDOWN_MS = 100 * 1000;
-const EXTENSION_STEP_MS = 2 * 60 * 1000;
 const TIMER_TICK_MS = 1000;
 const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const REMOTE_MIC_STATUS_POLL_MS = 10_000;
@@ -178,7 +189,9 @@ const REMOTE_MIC_SESSION_SYNC_MS = 5_000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
 
-function createOpeningPrompt(topic = DISCUSSION_TOPICS[0]): PromptPanelState {
+function createOpeningPrompt(
+  topic: (typeof DISCUSSION_TOPICS)[number] = DISCUSSION_TOPICS[0],
+): PromptPanelState {
   return {
     title: "最初の話題提供",
     body: topic.opening_prompt,
@@ -213,8 +226,12 @@ function SessionPageClient() {
   const [idError, setIdError] = useState("");
   const [topicBudgets, setTopicBudgets] = useState(createInitialTopicBudgets);
   const [topicStartedAt, setTopicStartedAt] = useState<number | null>(null);
+  const [topicTimerSource, setTopicTimerSource] =
+    useState<TopicTimerStartSource | null>(null);
   const [topicPausedMs, setTopicPausedMs] = useState(0);
-  const [topicExtensionMs, setTopicExtensionMs] = useState(0);
+  const [decisionPromptShownByTopic, setDecisionPromptShownByTopic] = useState<
+    boolean[]
+  >(() => DISCUSSION_TOPICS.map(() => false));
   const [timerNow, setTimerNow] = useState(() => Date.now());
   const [transitionProposal, setTransitionProposal] =
     useState<TopicTransitionProposal | null>(null);
@@ -280,19 +297,16 @@ function SessionPageClient() {
     utteranceTotal - visibleUtterances.length,
   );
   const isLastTopic = currentTopicIndex >= DISCUSSION_TOPICS.length - 1;
-  const topicBudgetMs =
-    Math.min(
-      MAX_TOPIC_DURATION_MS,
-      (topicBudgets[currentTopicIndex] ?? BASE_TOPIC_DURATION_MS) +
-        topicExtensionMs,
-    );
+  const topicBudgetMs = topicBudgets[currentTopicIndex] ?? BASE_TOPIC_DURATION_MS;
   const topicElapsedMs =
     topicStartedAt === null
       ? 0
       : Math.max(0, timerNow - topicStartedAt - topicPausedMs);
   const topicRemainingSeconds = Math.ceil((topicBudgetMs - topicElapsedMs) / 1000);
-  const baseTimeElapsed = topicElapsedMs >= BASE_TOPIC_DURATION_MS;
-  const maxTimeElapsed = topicElapsedMs >= MAX_TOPIC_DURATION_MS;
+  const decisionAtMs = calculateTopicDecisionAtMs(topicBudgetMs);
+  const decisionTimeElapsed = topicElapsedMs >= decisionAtMs;
+  const maxTimeElapsed = topicElapsedMs >= topicBudgetMs;
+  const carryToNextTopicMs = calculateTopicCarryMs(topicBudgetMs, topicElapsedMs);
   const topicProgress =
     topicBudgetMs > 0
       ? Math.min(1, topicElapsedMs / topicBudgetMs)
@@ -485,7 +499,7 @@ function SessionPageClient() {
   useEffect(() => {
     const service = createSingleMicInputService();
     const unsubscribeChunk = service.onChunk((chunk) => {
-      void handleVoiceAudioChunk(chunk);
+      void handleVoiceAudioChunk(chunk, "local_voice");
     });
     const unsubscribeLevel = service.onLevel((level) => {
       updateVoiceInputLevel(level);
@@ -570,14 +584,33 @@ function SessionPageClient() {
   }, [isConversationTimerRunning]);
 
   useEffect(() => {
+    if (!session || currentTopicIndex !== 0 || topicStartedAt === null) return;
+    if (completionState !== "active" || busyAction || transitionProposal) return;
+    if (topicElapsedMs < topicBudgetMs) return;
+
+    void forceAdvanceFromFirstTopic();
+  }, [
+    busyAction,
+    completionState,
+    currentTopicIndex,
+    session,
+    topicBudgetMs,
+    topicElapsedMs,
+    topicStartedAt,
+    transitionProposal,
+  ]);
+
+  useEffect(() => {
     if (!session || topicStartedAt === null) return;
     if (completionState !== "active") return;
     if (busyAction || pushToTalkActive || transitionProposal) return;
     if (timerNow < proposalCooldownUntil) return;
+    if (decisionPromptShownByTopic[currentTopicIndex]) return;
 
     const reason = getTransitionProposalReason({
-      baseTimeElapsed,
+      decisionTimeElapsed,
       maxTimeElapsed,
+      isFirstTopic: currentTopicIndex === 0,
       currentTopicSlot: developerSlotStates.find(
         (slot) => slot.slot_name === currentTopic.slot_name,
       ),
@@ -591,12 +624,18 @@ function SessionPageClient() {
       suggestedAt: Date.now(),
       topicIndex: currentTopicIndex,
     });
+    setDecisionPromptShownByTopic((current) =>
+      current.map((shown, index) =>
+        index === currentTopicIndex ? true : shown,
+      ),
+    );
   }, [
-    baseTimeElapsed,
     busyAction,
     completionState,
     currentTopic.slot_name,
     currentTopicIndex,
+    decisionPromptShownByTopic,
+    decisionTimeElapsed,
     developerSlotStates,
     maxTimeElapsed,
     proposalCooldownUntil,
@@ -737,6 +776,7 @@ function SessionPageClient() {
 
       const activeSpeaker = toAudioSpeaker(speakerRef.current);
       voiceInputServiceRef.current.startCapture(activeSpeaker);
+      markTopicInteractionStarted("local_voice");
       pushToTalkActiveRef.current = true;
       setPushToTalkActive(true);
     } finally {
@@ -773,7 +813,7 @@ function SessionPageClient() {
         sequence: chunk.sequence,
         durationMs: chunk.endedAt - chunk.startedAt,
       });
-      void handleVoiceAudioChunk(chunk);
+      void handleVoiceAudioChunk(chunk, "remote_voice");
     });
     const unsubscribeLevel = service.onLevel((level) => {
       const normalizedLevel = Math.min(1, Math.max(level.rms * 8, level.peak));
@@ -937,7 +977,10 @@ function SessionPageClient() {
     });
   }
 
-  async function handleVoiceAudioChunk(chunk: SingleMicAudioChunk) {
+  async function handleVoiceAudioChunk(
+    chunk: SingleMicAudioChunk,
+    source: Extract<TopicTimerStartSource, "local_voice" | "remote_voice">,
+  ) {
     const currentSession = sessionRef.current;
     console.info("[remote-mic pc stt eligibility]", {
       hasSession: Boolean(currentSession),
@@ -986,6 +1029,7 @@ function SessionPageClient() {
         return;
       }
 
+      markTopicInteractionStarted(source);
       setUtterances((current) =>
         [...current, data.utterance as Utterance]
           .sort(compareUtterancesByTime)
@@ -1083,15 +1127,34 @@ function SessionPageClient() {
     setPromptPanel(getPendingPrompt(buttonType));
 
     try {
-      if (buttonType !== "update_slots") {
-        await postJson("/api/ai/update-slots", {
-          session_id: session.id,
-          current_topic: currentTopic.slot_name,
-          current_topic_title: currentTopic.title,
-        });
+      const updateResult = await postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
+        session_id: session.id,
+        current_topic: currentTopic.slot_name,
+        current_topic_title: currentTopic.title,
+      });
+      setDeveloperSlotStates(updateResult.slot_states);
+      if (updateResult.slot_control) {
+        setDeveloperSlotControl(updateResult.slot_control);
       }
 
       if (buttonType === "next_question") {
+        const action = decideConversationAction({
+          intent: "next_question",
+          currentTopicIndex,
+          slotControl: updateResult.slot_control ?? developerSlotControl,
+        });
+
+        if (action.type === "complete_session") {
+          await completeSession();
+          return;
+        }
+
+        if (action.type === "switch_topic" && nextTopic) {
+          advanceTopic();
+          setPromptPanel(createOpeningPrompt(nextTopic));
+          return;
+        }
+
         const data = await postJson<NextQuestionResponse>("/api/ai/next-question", {
           session_id: session.id,
           current_topic: currentTopic.slot_name,
@@ -1110,27 +1173,46 @@ function SessionPageClient() {
       }
 
       if (buttonType === "switch_topic") {
-        const data = await postJson<TopicSwitchResponse>("/api/ai/switch-topic", {
+        const action = decideConversationAction({
+          intent: "generate_question",
+          currentTopicIndex,
+          slotControl: updateResult.slot_control ?? developerSlotControl,
+        });
+
+        if (action.type === "complete_session") {
+          await completeSession();
+          return;
+        }
+
+        const data = await postJson<NextQuestionResponse>("/api/ai/next-question", {
           session_id: session.id,
           current_topic: currentTopic.slot_name,
           current_topic_title: currentTopic.title,
-          next_topic: nextTopic?.slot_name,
-          next_topic_title: nextTopic?.title,
         });
-        if (data.suggestion.should_switch && nextTopic) {
-          advanceTopic();
-        }
+        const body = joinPrompt(
+          data.suggestion.transition_phrase,
+          data.suggestion.question,
+        );
 
         setPromptPanel({
-          title: data.suggestion.should_switch
-            ? "次の話題へ"
-            : "今の話題でもう少し確認",
-          body: data.suggestion.message,
-          tone: data.suggestion.should_switch ? "switch" : "question",
+          title: "AIからの質問",
+          body,
+          tone: "question",
         });
       }
 
       if (buttonType === "check_end") {
+        const action = decideConversationAction({
+          intent: "check_end",
+          currentTopicIndex,
+          slotControl: updateResult.slot_control ?? developerSlotControl,
+        });
+
+        if (action.type === "complete_session") {
+          await completeSession();
+          return;
+        }
+
         const data = await postJson<EndCheckResponse>("/api/ai/check-end", {
           session_id: session.id,
           current_topic: currentTopic.slot_name,
@@ -1157,24 +1239,38 @@ function SessionPageClient() {
             tone: "question",
           });
         } else {
-          setPromptPanel({
-            title: "全体終了確認",
-            body: data.suggestion.message,
-            tone: "end",
-          });
+          await completeSession();
+          return;
         }
       }
 
       if (buttonType === "update_slots") {
-        await postJson("/api/ai/update-slots", {
+        const action = decideConversationAction({
+          intent: "minutes",
+          currentTopicIndex,
+          slotControl: updateResult.slot_control ?? developerSlotControl,
+        });
+
+        const data = await postJson<FinalMinutesResponse>("/api/ai/final-minutes", {
           session_id: session.id,
           current_topic: currentTopic.slot_name,
           current_topic_title: currentTopic.title,
+          finalize: action.type === "complete_session",
         });
+        setSession(data.session);
+        setFinalMinutes(data.final_minutes);
+
+        if (action.type === "complete_session") {
+          setCompletionState("completed");
+          setTopicStartedAt(null);
+          topicStartedAtRef.current = null;
+          setStatusText("完了");
+          return;
+        }
 
         const updatedPrompt = {
-          title: "議事録更新",
-          body: "議事録を更新しました。",
+          title: "議事録生成",
+          body: "現時点の議事録を生成して保存しました。",
           tone: "status",
         } satisfies PromptPanelState;
 
@@ -1182,7 +1278,9 @@ function SessionPageClient() {
         schedulePromptRestore(updatedPrompt, promptToRestore);
       }
 
-      await refreshDeveloperSlotStates(session.id);
+      if (!updateResult.slot_control) {
+        await refreshDeveloperSlotStates(session.id);
+      }
       setStatusText("保存済み");
     } catch {
       setStatusText("保存エラー");
@@ -1335,7 +1433,7 @@ function SessionPageClient() {
     setTransitionProposal(null);
 
     if (isLastTopic) {
-      await completeSession();
+      await handleAction("check_end");
       return;
     }
 
@@ -1377,17 +1475,45 @@ function SessionPageClient() {
     }
   }
 
-  function extendCurrentTopic() {
-    setTopicExtensionMs((current) =>
-      Math.min(MAX_EXTENSION_DURATION_MS, current + EXTENSION_STEP_MS),
-    );
+  async function generateQuestionFromTransitionProposal() {
+    if (!session || busyAction || completionState !== "active") return;
+
     setTransitionProposal(null);
-    setProposalCooldownUntil(Date.now() + PROPOSAL_COOLDOWN_MS);
+    await handleAction("switch_topic");
   }
 
   function dismissTransitionProposal() {
     setTransitionProposal(null);
     setProposalCooldownUntil(Date.now() + PROPOSAL_COOLDOWN_MS);
+  }
+
+  async function forceAdvanceFromFirstTopic() {
+    if (!session || busyAction || !nextTopic) return;
+
+    setTransitionProposal(null);
+    setBusyAction("switch_topic");
+    setStatusText("話題切替中");
+
+    try {
+      await postJson("/api/ai/update-slots", {
+        session_id: session.id,
+        current_topic: currentTopic.slot_name,
+        current_topic_title: currentTopic.title,
+      });
+      advanceTopic();
+      setPromptPanel(createOpeningPrompt(nextTopic));
+      await refreshDeveloperSlotStates(session.id);
+      setStatusText("保存済み");
+    } catch {
+      setStatusText("保存エラー");
+      setPromptPanel({
+        title: "話題転換を実行できません",
+        body: "通信状態またはデータベース接続を確認してください。",
+        tone: "error",
+      });
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   async function completeSession() {
@@ -1409,6 +1535,7 @@ function SessionPageClient() {
         session_id: session.id,
         current_topic: currentTopic.slot_name,
         current_topic_title: currentTopic.title,
+        finalize: true,
       });
 
       setSession(data.session);
@@ -1436,7 +1563,8 @@ function SessionPageClient() {
     timerPausedStartedAtRef.current = null;
     timerRunningRef.current = false;
     setTopicPausedMs(0);
-    setTopicExtensionMs(0);
+    setTopicTimerSource(null);
+    setDecisionPromptShownByTopic(DISCUSSION_TOPICS.map(() => false));
     setTransitionProposal(null);
     setProposalCooldownUntil(0);
     setCompletionState("active");
@@ -1447,31 +1575,10 @@ function SessionPageClient() {
   }
 
   function applyDialogueStartedAt(value: string | null) {
-    if (!value) {
-      if (topicStartedAtRef.current === null) return;
-
-      topicStartedAtRef.current = null;
-      timerPausedStartedAtRef.current = null;
-      timerRunningRef.current = false;
-      setTopicPausedMs(0);
-      setTopicStartedAt(null);
-      setTimerNow(Date.now());
-      return;
-    }
-
-    const startedAt = new Date(value).getTime();
-    if (!Number.isFinite(startedAt)) return;
-    if (topicStartedAtRef.current === startedAt) return;
-
-    topicStartedAtRef.current = startedAt;
-    timerPausedStartedAtRef.current = null;
-    timerRunningRef.current = true;
-    setTopicPausedMs(0);
-    setTopicStartedAt(startedAt);
-    setTimerNow(Date.now());
+    if (!value) return;
   }
 
-  function startTopicTimerIfNeeded() {
+  function markTopicInteractionStarted(source: TopicTimerStartSource) {
     if (!sessionRef.current || topicStartedAtRef.current !== null) return;
 
     const now = Date.now();
@@ -1479,6 +1586,7 @@ function SessionPageClient() {
     timerPausedStartedAtRef.current = null;
     timerRunningRef.current = true;
     setTopicPausedMs(0);
+    setTopicTimerSource(source);
     setTopicStartedAt(now);
     setTimerNow(now);
   }
@@ -1486,20 +1594,40 @@ function SessionPageClient() {
   function advanceTopic() {
     if (!nextTopic) return;
 
-    const now = Date.now();
+    const nextBudget = calculateNextTopicBudget(topicBudgetMs, topicElapsedMs);
 
     setCurrentTopicIndex((current) =>
       Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
     );
-    topicStartedAtRef.current = now;
+    setTopicBudgets((current) =>
+      current.map((budget, index) =>
+        index === currentTopicIndex + 1 ? nextBudget : budget,
+      ),
+    );
+    topicStartedAtRef.current = null;
     timerPausedStartedAtRef.current = null;
-    timerRunningRef.current = true;
+    timerRunningRef.current = false;
     setTopicPausedMs(0);
-    setTopicStartedAt(now);
-    setTopicExtensionMs(0);
+    setTopicStartedAt(null);
+    setTopicTimerSource(null);
     setTransitionProposal(null);
     setProposalCooldownUntil(0);
-    setTimerNow(now);
+    setTimerNow(Date.now());
+  }
+
+  if (completionState === "completed" || completionState === "failed") {
+    return (
+      <main className="min-h-dvh bg-[#f7f8f4] px-4 py-6 text-stone-950">
+        <section className="mx-auto w-full max-w-3xl">
+          <SessionCompletionPanel
+            state={completionState}
+            finalMinutes={finalMinutes}
+            error={completionError}
+            onRetry={() => void completeSession()}
+          />
+        </section>
+      </main>
+    );
   }
 
   return (
@@ -1620,22 +1748,10 @@ function SessionPageClient() {
               isLastTopic={isLastTopic}
               maxTimeElapsed={maxTimeElapsed}
               reason={transitionProposal.reason}
-              extended={topicExtensionMs > 0}
               disabled={Boolean(busyAction) || completionState !== "active"}
               onAccept={() => void acceptTransitionProposal()}
-              onExtend={extendCurrentTopic}
+              onGenerateQuestion={() => void generateQuestionFromTransitionProposal()}
               onDismiss={dismissTransitionProposal}
-            />
-          </div>
-        ) : null}
-
-        {completionState === "completed" || completionState === "failed" ? (
-          <div className="mt-3">
-            <SessionCompletionPanel
-              state={completionState}
-              finalMinutes={finalMinutes}
-              error={completionError}
-              onRetry={() => void completeSession()}
             />
           </div>
         ) : null}
@@ -1736,6 +1852,9 @@ function SessionPageClient() {
                   onChange={(event) => {
                     const nextDraft = event.target.value;
 
+                    if (!draft && nextDraft.trim()) {
+                      markTopicInteractionStarted("text");
+                    }
                     setDraft(nextDraft);
                   }}
                   rows={2}
@@ -1765,6 +1884,14 @@ function SessionPageClient() {
               slotStates={developerSlotStates}
               slotControl={developerSlotControl}
               currentTopic={currentTopic.slot_name}
+              timerDebug={{
+                started: topicStartedAt !== null,
+                source: topicTimerSource,
+                budgetMs: topicBudgetMs,
+                elapsedMs: topicElapsedMs,
+                decisionAtMs,
+                carryToNextTopicMs,
+              }}
               loading={developerSlotLoading}
               error={developerSlotError}
               onRefresh={() => {
@@ -1774,14 +1901,14 @@ function SessionPageClient() {
 
             <div className="grid grid-cols-2 gap-2">
               <ActionButton
-                label="質問する"
+                label="次の質問"
                 tone="emerald"
                 busy={busyAction === "next_question"}
                 disabled={!session || Boolean(busyAction)}
                 onClick={() => handleAction("next_question")}
               />
               <ActionButton
-                label="次の話題へ"
+                label="質問生成"
                 tone="blue"
                 busy={busyAction === "switch_topic"}
                 disabled={!session || Boolean(busyAction)}
@@ -1795,7 +1922,7 @@ function SessionPageClient() {
                 onClick={() => handleAction("check_end")}
               />
               <ActionButton
-                label="議事録更新"
+                label="議事録生成"
                 tone="stone"
                 busy={busyAction === "update_slots"}
                 disabled={!session || Boolean(busyAction)}
@@ -2009,6 +2136,14 @@ function DeveloperDialogueTopics(props: {
   slotStates: SlotState[];
   slotControl: SlotControlDebugState | null;
   currentTopic: string;
+  timerDebug: {
+    started: boolean;
+    source: TopicTimerStartSource | null;
+    budgetMs: number;
+    elapsedMs: number;
+    decisionAtMs: number;
+    carryToNextTopicMs: number;
+  };
   loading: boolean;
   error: string;
   onRefresh: () => void;
@@ -2108,6 +2243,12 @@ function DeveloperDialogueTopics(props: {
         </summary>
         <div className="mt-2 space-y-1 text-[10px] font-bold leading-relaxed text-stone-600">
           <div>現在テーマID: {slotControl.currentTopicId}</div>
+          <div>Timer: {props.timerDebug.started ? "started" : "not started"}</div>
+          <div>Timer source: {props.timerDebug.source ?? "-"}</div>
+          <div>Current budget: {formatTimerSeconds(Math.floor(props.timerDebug.budgetMs / 1000))}</div>
+          <div>Elapsed: {formatTimerSeconds(Math.floor(props.timerDebug.elapsedMs / 1000))}</div>
+          <div>Decision threshold: {formatTimerSeconds(Math.floor(props.timerDebug.decisionAtMs / 1000))}</div>
+          <div>Carry to next topic: {formatTimerSeconds(Math.floor(props.timerDebug.carryToNextTopicMs / 1000))}</div>
           <div>参照メインスロット: {slotControl.currentMainSlot}</div>
           <div>
             参照サブスロット:{" "}
@@ -2118,6 +2259,21 @@ function DeveloperDialogueTopics(props: {
           <div>全スロット参照: {slotControl.allSlotReferenceUsed ? "あり" : "なし"}</div>
           <div>保留キュー: {slotControl.deferredSlotQueue.length}件</div>
           <div>終了前確認対象: {slotControl.beforeSessionEndTargets.length}件</div>
+          <div>
+            LLM classification source: {slotControl.classificationDebug?.source ?? "-"}
+          </div>
+          <div>
+            LLM succeeded: {slotControl.classificationDebug?.llmSucceeded ? "true" : "false"}
+          </div>
+          <div>Candidate count: {slotControl.classificationDebug?.candidateCount ?? slotControl.classificationDebug?.llmCandidateCount ?? "-"}</div>
+          <div>Accepted count: {slotControl.classificationDebug?.acceptedCount ?? "-"}</div>
+          <div>Rejected count: {slotControl.classificationDebug?.rejectedCount ?? "-"}</div>
+          <div>
+            Rejected reasons:{" "}
+            {slotControl.classificationDebug?.rejectionReasons
+              ? JSON.stringify(slotControl.classificationDebug.rejectionReasons)
+              : "-"}
+          </div>
           <div>{slotControl.selectionReason}</div>
         </div>
       </details>
@@ -2200,10 +2356,9 @@ function TopicTransitionProposalCard(props: {
   isLastTopic: boolean;
   maxTimeElapsed: boolean;
   reason: ProposalReason;
-  extended: boolean;
   disabled: boolean;
   onAccept: () => void;
-  onExtend: () => void;
+  onGenerateQuestion: () => void;
   onDismiss: () => void;
 }) {
   const reasonLabel = proposalReasonLabel(props.reason);
@@ -2217,16 +2372,13 @@ function TopicTransitionProposalCard(props: {
           </div>
           <p className="mt-1 text-[15px] font-black leading-relaxed text-stone-950">
             {props.isLastTopic
-              ? "すべてのテーマについてお話ししました。今回の対話を終了して、議事録を作成しますか？"
-              : "このテーマについて、ある程度お話しできたようです。次の話題をAIから提示しますか？"}
+              ? "このテーマの話を続けますか、それとも全体終了確認へ進みますか？"
+              : "このテーマの話を続けますか、それとも次の話題へ移りますか？"}
           </p>
           <div className="mt-1 flex flex-wrap gap-1.5 text-[11px] font-bold text-stone-600">
             <span className="rounded-full bg-white px-2 py-0.5">
               {reasonLabel}
             </span>
-            {props.extended ? (
-              <span className="rounded-full bg-white px-2 py-0.5">延長中</span>
-            ) : null}
             {props.maxTimeElapsed ? (
               <span className="rounded-full bg-white px-2 py-0.5">
                 最大時間到達
@@ -2242,16 +2394,16 @@ function TopicTransitionProposalCard(props: {
             className="min-h-9 rounded-md bg-stone-950 px-3 text-[12px] font-black text-white disabled:bg-stone-300"
           >
             {props.isLastTopic
-              ? "対話を終了して議事録を作成する"
-              : "AIに次の話題を提示してもらう"}
+              ? "全体終了確認へ進む"
+              : "次の話題へ進む"}
           </button>
           <button
             type="button"
-            onClick={props.onExtend}
+            onClick={props.onGenerateQuestion}
             disabled={props.disabled}
             className="min-h-9 rounded-md border border-amber-300 bg-white px-3 text-[12px] font-black text-amber-900 disabled:text-stone-400"
           >
-            もう少し話す
+            質問を生成して、このテーマを続ける
           </button>
           <button
             type="button"
@@ -2259,7 +2411,7 @@ function TopicTransitionProposalCard(props: {
             disabled={props.disabled}
             className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 disabled:text-stone-400"
           >
-            閉じる
+            今の質問のまま、このテーマを続ける
           </button>
         </div>
       </div>
@@ -2295,17 +2447,17 @@ function SessionCompletionPanel(props: {
   }
 
   return (
-    <section className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
-      <div className="text-[13px] font-black text-emerald-800">対話完了</div>
-      <p className="mt-1 text-[13px] font-bold text-emerald-900">
-        議事録を作成して保存しました。
+    <section className="rounded-md border border-emerald-200 bg-white px-5 py-5 shadow-sm">
+      <div className="text-[20px] font-black text-stone-950">話し合いが終了しました</div>
+      <p className="mt-2 text-[14px] font-bold leading-relaxed text-stone-700">
+        今回の話し合いの議事録を作成しました。名前を設定してPDFとして保存できます。
       </p>
       {props.finalMinutes ? (
         <>
           <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
             <label className="block">
               <span className="text-[11px] font-black text-emerald-800">
-                PDFファイル名
+                議事録名 / PDFファイル名
               </span>
               <input
                 value={pdfFileName}
@@ -2321,7 +2473,7 @@ function SessionCompletionPanel(props: {
               }
               className="min-h-9 self-end rounded-md bg-emerald-700 px-3 text-[12px] font-black text-white active:scale-[0.99]"
             >
-              PDFとして保存
+              PDFをダウンロード
             </button>
           </div>
           {acpMinutes ? (
@@ -2589,16 +2741,16 @@ function TopicTimer(props: {
 function getPendingPrompt(buttonType: ButtonType): PromptPanelState {
   if (buttonType === "next_question") {
     return {
-      title: "AIからの質問",
-      body: "質問を生成しています。",
+      title: "次の質問",
+      body: "現在テーマを続けるか、次のテーマへ進むかを確認しています。",
       tone: "status",
     };
   }
 
   if (buttonType === "switch_topic") {
     return {
-      title: "次の話題へ",
-      body: "今の話題を終えてよいか確認し、必要なら追加質問を生成しています。",
+      title: "質問生成",
+      body: "今聞く価値のある質問を生成しています。",
       tone: "status",
     };
   }
@@ -2612,8 +2764,8 @@ function getPendingPrompt(buttonType: ButtonType): PromptPanelState {
   }
 
   return {
-    title: "議事録更新",
-    body: "会話ログから議事録を更新しています。",
+    title: "議事録生成",
+    body: "会話ログから議事録を生成しています。",
     tone: "status",
   };
 }
@@ -3194,13 +3346,14 @@ function mergeUtterances(current: Utterance[], incoming: Utterance[]) {
 }
 
 function getTransitionProposalReason(input: {
-  baseTimeElapsed: boolean;
+  decisionTimeElapsed: boolean;
   maxTimeElapsed: boolean;
+  isFirstTopic: boolean;
   currentTopicSlot?: SlotState;
   utterances: Utterance[];
 }): ProposalReason | null {
-  if (input.maxTimeElapsed) return "max_time_elapsed";
-  if (input.baseTimeElapsed && isTerminalSlotStatus(input.currentTopicSlot?.status)) {
+  if (input.isFirstTopic && input.maxTimeElapsed) return "max_time_elapsed";
+  if (input.decisionTimeElapsed && isTerminalSlotStatus(input.currentTopicSlot?.status)) {
     return "core_slots_completed";
   }
 
@@ -3208,9 +3361,77 @@ function getTransitionProposalReason(input: {
   if (hasPreferNotToAnswer(latestText)) return "prefer_not_to_answer";
   if (hasNoMoreToAdd(latestText)) return "no_more_to_add";
   if (hasNotConsidered(latestText)) return "not_considered";
-  if (input.baseTimeElapsed) return "base_time_elapsed";
+  if (input.decisionTimeElapsed) return "base_time_elapsed";
 
   return null;
+}
+
+function decideConversationAction(input: {
+  intent: "next_question" | "generate_question" | "check_end" | "minutes";
+  currentTopicIndex: number;
+  slotControl: SlotControlDebugState | null;
+}): ConversationAction {
+  const allTopicsPresented = input.currentTopicIndex >= DISCUSSION_TOPICS.length - 1;
+  const currentTopic = DISCUSSION_TOPICS[input.currentTopicIndex] ?? DISCUSSION_TOPICS[0];
+  const currentMainSlot = input.slotControl?.mainSlots.find(
+    (slot) => slot.topicId === currentTopic.id,
+  );
+  const currentCoreNeedsQuestion = (currentMainSlot?.subSlots ?? []).some(
+    (slot) =>
+      slot.priority === "core" &&
+      slot.canAskAgain &&
+      (slot.status === "unanswered" ||
+        slot.status === "partially_answered" ||
+        slot.status === "needs_follow_up" ||
+        slot.status === "deferred"),
+  );
+  const anyCoreNeedsQuestion = input.slotControl?.mainSlots.some((mainSlot) =>
+    mainSlot.subSlots.some(
+      (slot) =>
+        slot.priority === "core" &&
+        slot.canAskAgain &&
+        (slot.status === "unanswered" ||
+          slot.status === "partially_answered" ||
+          slot.status === "needs_follow_up" ||
+          slot.status === "deferred"),
+    ),
+  ) ?? false;
+
+  if (allTopicsPresented && !anyCoreNeedsQuestion) {
+    return { type: "complete_session", reason: "6テーマ提示済みで重要なcore不足がありません。" };
+  }
+
+  if (input.intent === "check_end" || input.intent === "minutes") {
+    return anyCoreNeedsQuestion
+      ? { type: "generate_question", reason: "終了前に確認すべきcore項目があります。" }
+      : { type: "complete_session", reason: "終了可能です。" };
+  }
+
+  if (input.intent === "generate_question") {
+    return { type: "generate_question", reason: "現在の会話から確認価値のある質問を生成します。" };
+  }
+
+  if (currentCoreNeedsQuestion) {
+    return { type: "generate_question", reason: "現在テーマに確認すべきcore項目があります。" };
+  }
+
+  if (!allTopicsPresented) {
+    return { type: "switch_topic", reason: "現在テーマは十分話せているため次テーマへ進みます。" };
+  }
+
+  return { type: "generate_question", reason: "終了前に不足確認を行います。" };
+}
+
+function calculateTopicCarryMs(topicBudgetMs: number, topicElapsedMs: number) {
+  return Math.max(0, topicBudgetMs - topicElapsedMs);
+}
+
+function calculateNextTopicBudget(topicBudgetMs: number, topicElapsedMs: number) {
+  return BASE_TOPIC_DURATION_MS + calculateTopicCarryMs(topicBudgetMs, topicElapsedMs);
+}
+
+function calculateTopicDecisionAtMs(topicBudgetMs: number) {
+  return Math.floor(topicBudgetMs * DECISION_RATIO);
 }
 
 function isTerminalSlotStatus(status: unknown) {

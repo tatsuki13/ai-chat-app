@@ -152,12 +152,7 @@ const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
   "提供された mainSlotId と subSlotId だけを使用してください。新しいID、スロット名、類似名、別名を作ってはいけません。",
   "発話内容を要約・正規化して正式な内容として返してはいけません。",
   "根拠は必ず conversation_log に存在する utterance.id で返してください。発話IDがない根拠は返さないでください。",
-  "一つの発話につき分類は最大3件までにしてください。該当しない発話は unmatchedUtteranceIds に入れてください。",
-  "completion は none / partial / complete のみです。",
-  "responseState は answered / no_response / explicit_none / not_considered / unable_to_verbalize / declined / ambiguous / conflicting のみです。",
-  "reasonCode は not_discussed / time_limit / topic_changed / explicit_none / not_considered / unable_to_verbalize / declined / insufficient_detail / ambiguous / conflicting / null のみです。",
-  "完全回答は complete + answered、部分回答は partial + answered、曖昧は partial + ambiguous、矛盾は partial + conflicting としてください。",
-  "「特にない」は none + explicit_none + explicit_none、「まだ考えていない」は none + not_considered + not_considered、「言葉にできない」は none + unable_to_verbalize + unable_to_verbalize、「話したくない」は none + declined + declined としてください。",
+  "一つの発話につき分類は最大 maxClassificationsPerUtterance 件までにしてください。該当しない発話は unmatchedUtteranceIds に入れてください。",
   "介護者の解釈だけを本人意思にしないでください。介護者要約に本人が明確に同意した場合のみ、介護者要約発話IDと本人同意発話IDを両方 evidenceUtteranceIds に含めてください。",
   "Do not classify caregiver speech alone as the elder's preference. If caregiver speech is used as evidence, evidenceUtteranceIds must also include a nearby later elder agreement or elaboration utterance.",
   "A single elder utterance may support multiple aspects or themes. Return every supported classification, up to maxClassificationsPerUtterance, instead of forcing a single best aspect.",
@@ -167,11 +162,8 @@ const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
   "Ignore currentSubSlotStates when extracting evidence. Use only the conversation_log evidence for this classification pass.",
   "For caregiver-only reports, return evidenceType caregiver_report_only, but do not treat it as confirmed elder preference.",
   'Use this output shape: {"classifications":[{"mainSlotId":"...","subSlotId":"...","relevantMentionPresent":true,"responsePresent":true,"specificContentPresent":true,"reasonPresent":false,"conditionPresent":false,"examplePresent":false,"ambiguityPresent":false,"conflictPresent":false,"responseMeaning":"preference_expressed | explicit_none | not_considered | unable_to_verbalize | declined | other_response | unknown","evidenceType":"direct_elder_statement | elder_confirmation | caregiver_report_with_elder_confirmation | caregiver_report_only | shared_statement | unknown","evidenceUtteranceIds":["..."],"classificationNote":"optional"}],"unmatchedUtteranceIds":["..."]}',
-  "Ignore any legacy output example that contains completion, responseState, or reasonCode.",
+  "completion、responseState、reasonCode は出力しないでください。これらはコード側で導出します。",
   "出力はJSONのみとしてください。",
-  "",
-  "出力形式:",
-  '{"classifications":[{"mainSlotId":"...","subSlotId":"...","completion":"none | partial | complete","responseState":"answered | no_response | explicit_none | not_considered | unable_to_verbalize | declined | ambiguous | conflicting","reasonCode":"not_discussed | time_limit | topic_changed | explicit_none | not_considered | unable_to_verbalize | declined | insufficient_detail | ambiguous | conflicting | null","evidenceUtteranceIds":["..."],"classificationNote":"任意"}],"unmatchedUtteranceIds":["..."]}',
 ].join("\n");
 
 const SYSTEM_END_CHECK = [
@@ -262,6 +254,12 @@ let client: OpenAI | null = null;
 type SlotClassificationResult = {
   classifications?: SlotClassification[];
   unmatchedUtteranceIds?: string[];
+  __requestMeta?: JsonRequestMeta;
+};
+
+type JsonRequestMeta = {
+  source: "openai" | "fallback" | "error";
+  llmSucceeded: boolean;
 };
 
 type SlotResponseMeaning =
@@ -335,10 +333,14 @@ type SlotStateBundle = {
     }>;
     unmatchedUtteranceIds: string[];
     summary: {
+      source: "openai" | "fallback" | "error";
+      llmSucceeded: boolean;
+      candidateCount: number;
       llmCandidateCount: number;
       acceptedCount: number;
       rejectedCount: number;
       rejectionReasons: Record<string, number>;
+      unmatchedUtteranceCount: number;
       derivedStateCount: number;
       transitionBlockedCount: number;
     };
@@ -367,7 +369,11 @@ export async function updateSlotStateBundleFromConversation(
         accepted: [],
         rejected: [],
         unmatchedUtteranceIds: [],
-        summary: createSlotClassificationDebugSummary([], [], []),
+        summary: createSlotClassificationDebugSummary([], [], [], {
+          source: "fallback",
+          llmSucceeded: false,
+          unmatchedUtteranceCount: 0,
+        }),
       },
     };
   }
@@ -402,9 +408,7 @@ function buildSlotClassificationPayload(
   _subSlotStates: StoredSubSlotState[],
 ) {
   const currentTopic = resolveDiscussionTopic(context.currentTopic);
-  const topicsForClassification = DISCUSSION_TOPICS.filter(
-    (topic) => topic.id === currentTopic.id,
-  );
+  const topicsForClassification = DISCUSSION_TOPICS;
 
   return {
     session: getSessionMetadata(context),
@@ -552,6 +556,11 @@ function applySlotClassifications(input: {
         input.result.classifications ?? [],
         accepted,
         rejected,
+        {
+          source: input.result.__requestMeta?.source ?? "fallback",
+          llmSucceeded: input.result.__requestMeta?.llmSucceeded === true,
+          unmatchedUtteranceCount: normalizeEvidenceIds(input.result.unmatchedUtteranceIds).length,
+        },
       ),
     },
   };
@@ -561,6 +570,11 @@ function createSlotClassificationDebugSummary(
   candidates: SlotClassification[],
   accepted: SlotClassification[],
   rejected: SlotStateBundle["debug"]["rejected"],
+  meta: {
+    source?: "openai" | "fallback" | "error";
+    llmSucceeded?: boolean;
+    unmatchedUtteranceCount?: number;
+  } = {},
 ) {
   const rejectionReasons = rejected.reduce<Record<string, number>>((accumulator, item) => {
     accumulator[item.reason] = (accumulator[item.reason] ?? 0) + 1;
@@ -568,10 +582,14 @@ function createSlotClassificationDebugSummary(
   }, {});
 
   return {
+    source: meta.source ?? "fallback",
+    llmSucceeded: meta.llmSucceeded === true,
+    candidateCount: candidates.length,
     llmCandidateCount: candidates.length,
     acceptedCount: accepted.length,
     rejectedCount: rejected.length,
     rejectionReasons,
+    unmatchedUtteranceCount: meta.unmatchedUtteranceCount ?? 0,
     derivedStateCount: accepted.length,
     transitionBlockedCount: rejectionReasons.invalid_transition ?? 0,
   };
@@ -669,9 +687,7 @@ function deriveStoredSlotState(
     return buildDerivedSlotState("none", "no_response", "not_discussed", depth);
   }
 
-  const completed = rule.completeWhen.every(
-    (requiredField) => classification[requiredField] === true,
-  );
+  const completed = classification.specificContentPresent === true;
 
   if (completed) {
     return buildDerivedSlotState("complete", "answered", null, depth);
@@ -954,28 +970,6 @@ export async function checkConversationEnd(
     reason: nonEmpty(result.reason, fallback.reason),
     remaining_slots: normalizeRemainingSlots(result.remaining_slots, fallback.remaining_slots),
   };
-
-  const endCheckDebug = buildSlotControlDebugState({
-    slots: filterAcpSlotStates(context.slotStates),
-    currentTopic: context.currentTopic,
-    includeBeforeSessionEnd: true,
-    subSlotStates: context.subSlotStates,
-  });
-  const endTargets = endCheckDebug.deferredSlotQueue.filter(
-    (item) => item.canAskAgain,
-  );
-
-  if (output.can_end && endTargets.length > 0) {
-    const labels = [...new Set(endTargets.map((item) => item.mainSlotLabel))].slice(0, 3);
-
-    return {
-      can_end: false,
-      message: `ここまでのお話では、まだ詳しく触れていないことがいくつかあります。${labels.map((label) => `「${label}」`).join("と")}のうち、今のうちに話しておきたいものはありますか。特になければ、このまま終了しても大丈夫です。\n選択肢: 話す / 今回は話さない / このまま終了する`,
-      reason:
-        "再確認可能な保留項目が残っているため、終了前にまとめて確認する段階を提示しました。",
-      remaining_slots: labels,
-    };
-  }
 
   return output;
 }
@@ -1300,7 +1294,12 @@ async function requestJson<T>(
 ): Promise<T> {
   const apiKey = process.env.OPENAI_API_KEY;
 
-  if (!apiKey) return fallback;
+  if (!apiKey) {
+    return attachJsonRequestMeta(fallback, {
+      source: "fallback",
+      llmSucceeded: false,
+    });
+  }
 
   try {
     const openai = getClient(apiKey);
@@ -1315,11 +1314,33 @@ async function requestJson<T>(
     const content = completion.choices[0]?.message?.content;
     const parsed = parseJson(content);
 
-    return parsed ? ({ ...fallback, ...parsed } as T) : fallback;
+    return parsed
+      ? attachJsonRequestMeta({ ...fallback, ...parsed } as T, {
+          source: "openai",
+          llmSucceeded: true,
+        })
+      : attachJsonRequestMeta(fallback, {
+          source: "error",
+          llmSucceeded: false,
+        });
   } catch (error) {
     console.error("LLM request failed", describeLlmError(error));
-    return fallback;
+    return attachJsonRequestMeta(fallback, {
+      source: "error",
+      llmSucceeded: false,
+    });
   }
+}
+
+function attachJsonRequestMeta<T>(value: T, meta: JsonRequestMeta): T {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return {
+      ...(value as Record<string, unknown>),
+      __requestMeta: meta,
+    } as T;
+  }
+
+  return value;
 }
 
 function describeLlmError(error: unknown) {

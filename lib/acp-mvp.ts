@@ -503,6 +503,20 @@ export type SlotControlDebugState = {
   beforeSessionEndTargets: DeferredSlotItem[];
   allSlotReferenceUsed: boolean;
   mainSlots: MainSlotControlState[];
+  classificationDebug?: SlotClassificationDebugSummary;
+};
+
+export type SlotClassificationDebugSummary = {
+  source?: "openai" | "fallback" | "error";
+  llmSucceeded?: boolean;
+  candidateCount?: number;
+  llmCandidateCount?: number;
+  acceptedCount?: number;
+  rejectedCount?: number;
+  rejectionReasons?: Record<string, number>;
+  unmatchedUtteranceCount?: number;
+  derivedStateCount?: number;
+  transitionBlockedCount?: number;
 };
 type SlotControlInputSlot = {
   slot_name: string;
@@ -1101,6 +1115,7 @@ export function buildSlotControlDebugState(input: {
   includeBeforeSessionEnd?: boolean;
   subSlotOverrides?: SubSlotControlOverride[];
   subSlotStates?: StoredSubSlotState[];
+  classificationDebug?: SlotClassificationDebugSummary;
 }): SlotControlDebugState {
   const currentTopic = resolveDiscussionTopic(input.currentTopic);
   const overrideMap = new Map(
@@ -1138,6 +1153,7 @@ export function buildSlotControlDebugState(input: {
       : [],
     allSlotReferenceUsed: false,
     mainSlots,
+    classificationDebug: input.classificationDebug,
   };
 }
 
@@ -1207,8 +1223,12 @@ function buildMainSlotControlState(
         override?.lastUpdatedTopicId ??
         stored?.lastUpdatedTopicId ??
         (slot?.updated_at ? topic.id : undefined),
-      inDeferredQueue: stored?.isDeferred ?? canDeferSlotStatus(aspectStatus),
-      canAskAgain: stored?.canAskAgain ?? canAskAgainStatus(aspectStatus),
+      inDeferredQueue:
+        aspect.priority === "core" &&
+        (stored?.isDeferred ?? canDeferSlotStatus(aspectStatus)),
+      canAskAgain:
+        aspect.priority === "core" &&
+        (stored?.canAskAgain ?? canAskAgainStatus(aspectStatus)),
     };
   });
 
