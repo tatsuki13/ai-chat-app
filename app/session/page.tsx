@@ -131,7 +131,8 @@ type ProposalReason =
   | "core_slots_completed"
   | "no_more_to_add"
   | "not_considered"
-  | "prefer_not_to_answer";
+  | "prefer_not_to_answer"
+  | "ready_to_end";
 
 type TopicTransitionProposal = {
   reason: ProposalReason;
@@ -175,6 +176,19 @@ type UpdateSlotsResponse = {
   sub_slot_states: unknown[];
   slot_control?: SlotControlDebugState;
   slot_classification_debug?: unknown;
+};
+
+type ReplaySessionResponse = {
+  session: SessionInfo;
+  source_session: {
+    participant_code: string | null;
+    started_at: string;
+    ended_at: string | null;
+    utterance_count: number;
+  };
+  utterance_count: number;
+  utterances: Utterance[];
+  slot_states: SlotState[];
 };
 
 const STORAGE_KEY = "acp-hitl-current-session-id";
@@ -316,7 +330,11 @@ function SessionPageClient() {
   const decisionAtMs = calculateTopicDecisionAtMs(topicBudgetMs);
   const decisionTimeElapsed = topicElapsedMs >= decisionAtMs;
   const maxTimeElapsed = topicElapsedMs >= topicBudgetMs;
-  const carryToNextTopicMs = calculateTopicCarryMs(topicBudgetMs, topicElapsedMs);
+  const carryToNextTopicMs = calculateDistributedCarryPerTopicMs(
+    currentTopicIndex,
+    topicBudgetMs,
+    topicElapsedMs,
+  );
   const topicProgress =
     topicBudgetMs > 0
       ? Math.min(1, topicElapsedMs / topicBudgetMs)
@@ -1155,7 +1173,7 @@ function SessionPageClient() {
         });
 
         if (action.type === "complete_session") {
-          await completeSession();
+          showEndConfirmation(action.reason);
           return;
         }
 
@@ -1165,7 +1183,7 @@ function SessionPageClient() {
           return;
         }
 
-        await completeSession();
+        showEndConfirmation("最後のテーマまで提示済みです。");
         return;
       }
 
@@ -1177,7 +1195,7 @@ function SessionPageClient() {
         });
 
         if (action.type === "complete_session") {
-          await completeSession();
+          showEndConfirmation(action.reason);
           return;
         }
 
@@ -1212,7 +1230,7 @@ function SessionPageClient() {
         });
 
         if (action.type === "complete_session") {
-          await completeSession();
+          showEndConfirmation(action.reason);
           return;
         }
 
@@ -1242,7 +1260,7 @@ function SessionPageClient() {
             tone: "question",
           });
         } else {
-          await completeSession();
+          showEndConfirmation(data.suggestion.reason || data.suggestion.message);
           return;
         }
       }
@@ -1254,22 +1272,19 @@ function SessionPageClient() {
           slotControl: updateResult.slot_control ?? developerSlotControl,
         });
 
+        if (action.type === "complete_session") {
+          showEndConfirmation(action.reason);
+          return;
+        }
+
         const data = await postJson<FinalMinutesResponse>("/api/ai/final-minutes", {
           session_id: session.id,
           current_topic: currentTopic.slot_name,
           current_topic_title: currentTopic.title,
-          finalize: action.type === "complete_session",
+          finalize: false,
         });
         setSession(data.session);
         setFinalMinutes(data.final_minutes);
-
-        if (action.type === "complete_session") {
-          setCompletionState("completed");
-          setTopicStartedAt(null);
-          topicStartedAtRef.current = null;
-          setStatusText("完了");
-          return;
-        }
 
         const updatedPrompt = {
           title: "議事録生成",
@@ -1361,6 +1376,11 @@ function SessionPageClient() {
       return;
     }
 
+    if (isReplayParticipantCode(nextId)) {
+      await createReplaySessionFromParticipantCode(nextId);
+      return;
+    }
+
     setBusyAction("id");
     setStatusText("保存中");
     setIdError("");
@@ -1394,6 +1414,62 @@ function SessionPageClient() {
     setIsEditingId(false);
     setIdDraft("");
     setIdError("");
+  }
+
+  async function createReplaySessionFromParticipantCode(replayParticipantCode: string) {
+    const sourceParticipantCode = replayParticipantCode.slice("tatsuki_".length);
+    const confirmed = window.confirm(
+      `${sourceParticipantCode} の過去ログをコピーして、試運転用セッション ${replayParticipantCode} を作成しますか？元ログは変更しません。`,
+    );
+    if (!confirmed) return;
+
+    setBusyAction("id");
+    setStatusText("試運転セッション作成中");
+    setIdError("");
+
+    try {
+      const replay = await postJson<ReplaySessionResponse>("/api/session/replay", {
+        participant_code: replayParticipantCode,
+      });
+
+      window.localStorage.setItem(STORAGE_KEY, replay.session.id);
+      sessionRef.current = replay.session;
+      setSession(replay.session);
+      setUtterances(replay.utterances.slice(-MAX_RENDERED_UTTERANCES));
+      setUtteranceTotal(replay.utterance_count);
+      setDeveloperSlotStates(replay.slot_states);
+      setDeveloperSlotControl(null);
+      setDraft("");
+      setIsEditingId(false);
+      setIdDraft("");
+      resetTopicTiming();
+      setPromptPanel({
+        title: "試運転セッション",
+        body: `${replay.source_session.participant_code ?? sourceParticipantCode} の過去ログ ${replay.source_session.utterance_count} 件をコピーしました。スロット更新や質問生成を試せます。`,
+        tone: "status",
+      });
+      setStatusText("試運転");
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "";
+      const message =
+        errorMessage === "source session not found" ||
+        errorMessage.includes("source session")
+          ? "指定した元ユーザーIDの過去ログが見つかりませんでした。"
+          : "試運転セッションを作成できませんでした。";
+      setIdError(message);
+      setStatusText("保存エラー");
+      setPromptPanel({
+        title: "試運転セッションを作成できません",
+        body: message,
+        tone: "error",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  function isReplayParticipantCode(value: string) {
+    return /^tatsuki_.+/.test(value);
   }
 
   function handleIdKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -1433,10 +1509,15 @@ function SessionPageClient() {
   async function acceptTransitionProposal() {
     if (!session || busyAction || completionState !== "active") return;
 
+    const proposalReason = transitionProposal?.reason;
     setTransitionProposal(null);
 
     if (isLastTopic) {
-      await handleAction("check_end");
+      if (proposalReason === "ready_to_end") {
+        await completeSession();
+      } else {
+        await handleAction("check_end");
+      }
       return;
     }
 
@@ -1481,13 +1562,64 @@ function SessionPageClient() {
   async function generateQuestionFromTransitionProposal() {
     if (!session || busyAction || completionState !== "active") return;
 
+    const shouldForceQuestion = transitionProposal?.reason === "ready_to_end";
     setTransitionProposal(null);
-    await handleAction("switch_topic");
+    if (!shouldForceQuestion) {
+      await handleAction("switch_topic");
+      return;
+    }
+
+    setBusyAction("switch_topic");
+    setStatusText("質問生成中");
+    setPromptPanel(getPendingPrompt("switch_topic"));
+
+    try {
+      await postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
+        session_id: session.id,
+        current_topic: currentTopic.slot_name,
+        current_topic_title: currentTopic.title,
+      });
+      const data = await postJson<NextQuestionResponse>("/api/ai/next-question", {
+        session_id: session.id,
+        current_topic: currentTopic.slot_name,
+        current_topic_title: currentTopic.title,
+      });
+      setPromptPanel({
+        title: "AIからの質問",
+        body: joinPrompt(data.suggestion.transition_phrase, data.suggestion.question),
+        tone: "question",
+      });
+      await refreshDeveloperSlotStates(session.id);
+      setStatusText("保存済み");
+    } catch {
+      setStatusText("保存エラー");
+      setPromptPanel({
+        title: "AI支援を実行できません",
+        body: "通信状態またはデータベース接続を確認してください。",
+        tone: "error",
+      });
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   function dismissTransitionProposal() {
     setTransitionProposal(null);
     setProposalCooldownUntil(Date.now() + PROPOSAL_COOLDOWN_MS);
+  }
+
+  function showEndConfirmation(reason: string) {
+    setTransitionProposal({
+      reason: "ready_to_end",
+      suggestedAt: Date.now(),
+      topicIndex: currentTopicIndex,
+    });
+    setPromptPanel({
+      title: "全体終了確認",
+      body: reason || "今日の話し合いを終了できる状態です。",
+      tone: "end",
+    });
+    setStatusText("終了確認");
   }
 
   async function forceAdvanceFromFirstTopic() {
@@ -1597,14 +1729,15 @@ function SessionPageClient() {
   function advanceTopic() {
     if (!nextTopic) return;
 
-    const nextBudget = calculateNextTopicBudget(topicBudgetMs, topicElapsedMs);
-
     setCurrentTopicIndex((current) =>
       Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
     );
     setTopicBudgets((current) =>
-      current.map((budget, index) =>
-        index === currentTopicIndex + 1 ? nextBudget : budget,
+      calculateDistributedTopicBudgets(
+        current,
+        currentTopicIndex,
+        topicBudgetMs,
+        topicElapsedMs,
       ),
     );
     topicStartedAtRef.current = null;
@@ -1626,6 +1759,8 @@ function SessionPageClient() {
             state={completionState}
             finalMinutes={finalMinutes}
             error={completionError}
+            participantCode={participantCode}
+            sessionId={session?.id ?? ""}
             onRetry={() => void completeSession()}
           />
         </section>
@@ -2365,6 +2500,7 @@ function TopicTransitionProposalCard(props: {
   onDismiss: () => void;
 }) {
   const reasonLabel = proposalReasonLabel(props.reason);
+  const isReadyToEnd = props.reason === "ready_to_end";
 
   return (
     <section className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 shadow-sm">
@@ -2374,7 +2510,9 @@ function TopicTransitionProposalCard(props: {
             AIからの提案
           </div>
           <p className="mt-1 text-[15px] font-black leading-relaxed text-stone-950">
-            {props.isLastTopic
+            {isReadyToEnd
+              ? "話し合いを終了しますか、それとも話し合いを続けますか？"
+              : props.isLastTopic
               ? "このテーマの話を続けますか、それとも全体終了確認へ進みますか？"
               : "このテーマの話を続けますか、それとも次の話題へ移りますか？"}
           </p>
@@ -2396,7 +2534,9 @@ function TopicTransitionProposalCard(props: {
             disabled={props.disabled}
             className="min-h-9 rounded-md bg-stone-950 px-3 text-[12px] font-black text-white disabled:bg-stone-300"
           >
-            {props.isLastTopic
+            {isReadyToEnd
+              ? "話し合いを終了する"
+              : props.isLastTopic
               ? "全体終了確認へ進む"
               : "次の話題へ進む"}
           </button>
@@ -2406,7 +2546,7 @@ function TopicTransitionProposalCard(props: {
             disabled={props.disabled}
             className="min-h-9 rounded-md border border-amber-300 bg-white px-3 text-[12px] font-black text-amber-900 disabled:text-stone-400"
           >
-            質問を生成して、このテーマを続ける
+            {isReadyToEnd ? "質問を生成して続ける" : "質問を生成して、このテーマを続ける"}
           </button>
           <button
             type="button"
@@ -2414,7 +2554,7 @@ function TopicTransitionProposalCard(props: {
             disabled={props.disabled}
             className="min-h-9 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 disabled:text-stone-400"
           >
-            今の質問のまま、このテーマを続ける
+            {isReadyToEnd ? "話し合いを続ける" : "今の質問のまま、このテーマを続ける"}
           </button>
         </div>
       </div>
@@ -2426,13 +2566,10 @@ function SessionCompletionPanel(props: {
   state: SessionCompletionState;
   finalMinutes: { id: string; markdown: string; json?: unknown; created_at: string } | null;
   error: string;
+  participantCode: string;
+  sessionId: string;
   onRetry: () => void;
 }) {
-  const [pdfFileName, setPdfFileName] = useState(() =>
-    createDefaultPdfFileName(),
-  );
-  const acpMinutes = getAcpMinutesFromFinalMinutes(props.finalMinutes);
-
   if (props.state === "failed") {
     return (
       <section className="rounded-md border border-red-200 bg-red-50 px-4 py-3">
@@ -2453,40 +2590,27 @@ function SessionCompletionPanel(props: {
     <section className="rounded-md border border-emerald-200 bg-white px-5 py-5 shadow-sm">
       <div className="text-[20px] font-black text-stone-950">話し合いが終了しました</div>
       <p className="mt-2 text-[14px] font-bold leading-relaxed text-stone-700">
-        今回の話し合いの議事録を作成しました。名前を設定してPDFとして保存できます。
+        今回の話し合いから議事録を作成しました。議事録では、本人の考えだけでなく、背景・理由・迷い・条件・根拠となった発言を確認できます。
       </p>
+      <div className="mt-3 rounded-md border border-stone-200 bg-stone-50 px-3 py-2 text-[13px] font-bold text-stone-700">
+        参加者ID: <span className="font-black text-stone-950">{props.participantCode}</span>
+      </div>
       {props.finalMinutes ? (
-        <>
-          <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-            <label className="block">
-              <span className="text-[11px] font-black text-emerald-800">
-                議事録名 / PDFファイル名
-              </span>
-              <input
-                value={pdfFileName}
-                onChange={(event) => setPdfFileName(event.target.value)}
-                className="mt-1 h-9 w-full rounded-md border border-emerald-200 bg-white px-3 text-[13px] font-bold text-stone-900 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
-                placeholder="ACP議事録"
-              />
-            </label>
-            <button
-              type="button"
-              onClick={() =>
-                void downloadFinalMinutesPdf(props.finalMinutes, pdfFileName)
-              }
-              className="min-h-9 self-end rounded-md bg-emerald-700 px-3 text-[12px] font-black text-white active:scale-[0.99]"
-            >
-              PDFをダウンロード
-            </button>
-          </div>
-          {acpMinutes ? (
-            <ACPMinutesPreview minutes={acpMinutes} />
-          ) : (
-            <div className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md border border-emerald-100 bg-white px-3 py-2 text-[12px] font-semibold text-stone-700">
-              {props.finalMinutes.markdown}
-            </div>
-          )}
-        </>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <a
+            href={`/minutes?sessionId=${encodeURIComponent(props.sessionId)}`}
+            className="rounded-md bg-emerald-700 px-4 py-2 text-[13px] font-black text-white"
+          >
+            議事録を確認する
+          </a>
+          <button
+            type="button"
+            onClick={() => window.location.assign("/session")}
+            className="rounded-md border border-stone-300 bg-white px-4 py-2 text-[13px] font-black text-stone-700"
+          >
+            新しい対話を開始する
+          </button>
+        </div>
       ) : null}
     </section>
   );
@@ -3431,8 +3555,41 @@ function calculateTopicCarryMs(topicBudgetMs: number, topicElapsedMs: number) {
   return Math.max(0, topicBudgetMs - topicElapsedMs);
 }
 
-function calculateNextTopicBudget(topicBudgetMs: number, topicElapsedMs: number) {
-  return BASE_TOPIC_DURATION_MS + calculateTopicCarryMs(topicBudgetMs, topicElapsedMs);
+function calculateDistributedTopicBudgets(
+  currentBudgets: number[],
+  currentTopicIndex: number,
+  topicBudgetMs: number,
+  topicElapsedMs: number,
+) {
+  const remainingTopicCount = getRemainingTopicCount(currentTopicIndex);
+  if (remainingTopicCount === 0) return currentBudgets;
+
+  const carryPerTopicMs = calculateDistributedCarryPerTopicMs(
+    currentTopicIndex,
+    topicBudgetMs,
+    topicElapsedMs,
+  );
+
+  return currentBudgets.map((budget, index) =>
+    index > currentTopicIndex ? budget + carryPerTopicMs : budget,
+  );
+}
+
+function calculateDistributedCarryPerTopicMs(
+  currentTopicIndex: number,
+  topicBudgetMs: number,
+  topicElapsedMs: number,
+) {
+  const remainingTopicCount = getRemainingTopicCount(currentTopicIndex);
+  if (remainingTopicCount === 0) return 0;
+
+  return Math.floor(
+    calculateTopicCarryMs(topicBudgetMs, topicElapsedMs) / remainingTopicCount,
+  );
+}
+
+function getRemainingTopicCount(currentTopicIndex: number) {
+  return Math.max(0, DISCUSSION_TOPICS.length - currentTopicIndex - 1);
 }
 
 function calculateTopicDecisionAtMs(topicBudgetMs: number) {
@@ -3472,18 +3629,34 @@ function proposalReasonLabel(reason: ProposalReason) {
     no_more_to_add: "追加なし",
     not_considered: "保留回答",
     prefer_not_to_answer: "回答回避",
+    ready_to_end: "終了可能",
   };
 
   return labels[reason];
 }
 
-function createDefaultPdfFileName() {
+function createDefaultPdfFileName(participantCode?: string | null) {
+  const normalizedCode =
+    participantCode && participantCode !== "未設定"
+      ? sanitizeParticipantCodeForFileName(participantCode)
+      : "";
+  if (normalizedCode) return `ACP議事録-${normalizedCode}`;
+
   const date = new Date();
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
 
   return `ACP議事録-${year}-${month}-${day}`;
+}
+
+function sanitizeParticipantCodeForFileName(value: string) {
+  return value
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
 }
 
 async function downloadFinalMinutesPdf(
@@ -3692,5 +3865,6 @@ type EndCheckResponse = {
   suggestion: {
     can_end: boolean;
     message: string;
+    reason?: string;
   };
 };
