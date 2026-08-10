@@ -269,7 +269,7 @@ function MinutesOverview(props: { minutes: ACPMinutesRecord }) {
   const items = [
     ...summaryTexts(props.minutes.overall_summary?.core_values),
     ...summaryTexts(props.minutes.overall_summary?.cross_theme_connections),
-  ].slice(0, 5);
+  ].slice(0, 4);
 
   return (
     <section className="minutes-subsection mt-6 rounded-md border border-emerald-100 bg-emerald-50 px-5 py-4">
@@ -277,7 +277,7 @@ function MinutesOverview(props: { minutes: ACPMinutesRecord }) {
       <p className="mt-2 text-[13px] font-semibold leading-7 text-stone-700">
         この記録の「現在の考え」「背景・理由」などの文章は、話し合いで実際に語られた発言を根拠として、内容を変えない範囲で読みやすく整理しています。
         各テーマの「根拠となった発言」では、整理のもとになった実際の発言を確認できます。
-        この記録だけで本人の意思を断定せず、必要に応じて本人との継続的な話し合いに活用してください。
+        迷いや未決定事項も含め、この記録だけで本人の意思を断定せず、今後の継続的な話し合いに活用してください。
       </p>
       {items.length > 0 ? (
         <ul className="mt-3 space-y-2">
@@ -368,7 +368,7 @@ function MinutesEvidenceList(props: { evidence: EvidenceRecord[] }) {
     <section className="minutes-subsection">
       <h3 className="text-[15px] font-black text-stone-950">根拠となった発言</h3>
       <div className="mt-3 space-y-3">
-        {evidence.slice(0, 8).map((item, index) => (
+        {evidence.map((item, index) => (
           <MinutesEvidenceQuote key={`${item.evidenceUtteranceId ?? index}-${index}`} evidence={item} />
         ))}
       </div>
