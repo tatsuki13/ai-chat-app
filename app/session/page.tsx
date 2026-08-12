@@ -1399,11 +1399,12 @@ function SessionPageClient() {
         error instanceof Error && error.message
           ? error.message
           : "通信状態またはデータベース接続を確認してください。";
-      setIdError(message);
+      const displayMessage = message;
+      setIdError(displayMessage);
       setStatusText("保存エラー");
       setPromptPanel({
         title: "参加者IDを保存できません",
-        body: message,
+        body: displayMessage,
         tone: "error",
       });
     } finally {
@@ -1459,11 +1460,12 @@ function SessionPageClient() {
         errorMessage.includes("source session")
           ? "指定した元ユーザーIDの過去ログが見つかりませんでした。"
           : "試運転セッションを作成できませんでした。";
-      setIdError(message);
+      const displayMessage = normalizeReplayErrorMessage(errorMessage || message);
+      setIdError(displayMessage);
       setStatusText("保存エラー");
       setPromptPanel({
         title: "試運転セッションを作成できません",
-        body: message,
+        body: displayMessage,
         tone: "error",
       });
     } finally {
@@ -1473,6 +1475,21 @@ function SessionPageClient() {
 
   function isReplayParticipantCode(value: string) {
     return /^tatsuki_.+/.test(value);
+  }
+
+  function normalizeReplayErrorMessage(errorMessage: string) {
+    if (
+      errorMessage === "source session not found" ||
+      errorMessage.includes("source session")
+    ) {
+      return "指定した元ユーザーIDの過去ログが見つかりませんでした。tatsuki_ の後ろには、既に存在するユーザーIDを入れてください。";
+    }
+
+    if (errorMessage === "replay participant_code already exists as a normal session") {
+      return "この研究用IDは通常セッションとして既に使われています。別の研究用IDにしてください。";
+    }
+
+    return errorMessage || "試運転セッションを作成できませんでした。";
   }
 
   function handleIdKeyDown(event: KeyboardEvent<HTMLInputElement>) {

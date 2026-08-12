@@ -29,20 +29,26 @@ export async function POST(request: Request) {
       );
     }
 
-    const existingReplaySession = await prisma.session.findFirst({
+    const existingSessionWithReplayCode = await prisma.session.findFirst({
       where: {
         participantCode: replayParticipantCode,
-        condition: "replay",
       },
-      select: { id: true },
+      select: { id: true, condition: true },
     });
 
-    if (existingReplaySession) {
+    if (existingSessionWithReplayCode && existingSessionWithReplayCode.condition !== "replay") {
+      return NextResponse.json(
+        { error: "replay participant_code already exists as a normal session" },
+        { status: 409 },
+      );
+    }
+
+    if (existingSessionWithReplayCode) {
       const sourceSession = await findSourceSession(sourceParticipantCode);
 
       return NextResponse.json(
         await buildReplayResponse({
-          sessionId: existingReplaySession.id,
+          sessionId: existingSessionWithReplayCode.id,
           sourceParticipantCode,
           sourceSession,
           reused: true,

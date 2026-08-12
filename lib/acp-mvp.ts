@@ -610,6 +610,34 @@ export type FinalMinutesResult = {
     acp_minutes_llm_meta?: {
       source: "openai" | "fallback" | "error";
       llmSucceeded: boolean;
+      failureReason?: string;
+      errorMessage?: string;
+      rawResponse?: string;
+      narrativeGenerationStatus?: string;
+      fallbackUsed?: boolean;
+    };
+    acp_minutes_narrative_debug?: {
+      status: string;
+      llmAttempted: boolean;
+      llmSucceeded: boolean;
+      rawResponseAvailable: boolean;
+      parseSucceeded: boolean;
+      schemaSucceeded: boolean;
+      fallbackUsed: boolean;
+      failureReason?: string;
+      errorMessage?: string;
+      rawResponse?: string;
+      themes: Array<{
+        themeId: string;
+        inputEvidenceCount: number;
+        inputEvidenceIds: string[];
+        generatedCurrentThought: boolean;
+        generatedBackground: boolean;
+        generatedConditions: boolean;
+        generatedUncertainties: boolean;
+        generatedTensions: boolean;
+        generatedConfirmationNeeded: boolean;
+      }>;
     };
     themes?: ThemeMinutesItem[];
     optional_themes?: ThemeMinutesItem[];
@@ -2059,7 +2087,7 @@ function buildFallbackThemeNarratives(input: ACPMinutesLLMInput): ACPMinutes["na
 
   input.themes.forEach((theme) => {
     const groups = getNarrativeAspectGroups(theme.theme_id);
-    const currentThought = buildGroundedTextFromAspects(theme, groups.currentThought);
+    const currentThought = null;
     const background = buildGroundedTextFromAspects(theme, groups.background);
     const conditions = buildGroundedTextListFromAspects(theme, groups.conditions);
     const uncertainties = buildGroundedTextListFromAspects(theme, groups.uncertainties);
@@ -2077,7 +2105,7 @@ function buildFallbackThemeNarratives(input: ACPMinutesLLMInput): ACPMinutes["na
       background,
       conditions,
       uncertainties,
-      tensions,
+      tensions: tensions.length >= 2 ? tensions : [],
       confirmationNeeded: [],
     };
   });
@@ -2095,11 +2123,15 @@ function buildGroundedTextFromAspects(
       aspect.evidence.map((evidence) => evidence.sourceUtteranceId ?? ""),
     ),
   );
-  const labels = uniqueStrings(sourceAspects.map((aspect) => aspect.label));
-  if (sourceUtteranceIds.length === 0 || labels.length === 0) return null;
+  const evidenceTexts = uniqueStrings(
+    sourceAspects.flatMap((aspect) =>
+      aspect.evidence.map((evidence) => evidence.value || evidence.evidence || ""),
+    ),
+  );
+  if (sourceUtteranceIds.length === 0 || evidenceTexts.length === 0) return null;
 
   return {
-    text: buildFallbackNarrativeText(theme.title, labels),
+    text: buildFallbackNarrativeText(evidenceTexts),
     sourceUtteranceIds,
     sourceAspectIds: uniqueStrings(sourceAspects.map((aspect) => aspect.aspect_id)),
   };
@@ -2161,12 +2193,11 @@ function getNarrativeAspectGroups(themeId: keyof ACPMinutes["themes"]) {
   }
 }
 
-function buildFallbackNarrativeText(themeTitle: string, labels: string[]) {
-  const labelText = labels.length === 1
-    ? labels[0]
-    : `${labels.slice(0, -1).join("、")}、${labels.at(-1)}`;
-
-  return `本人は、「${themeTitle}」について、${labelText}に関する考えを話している。具体的な表現や条件は、下の「根拠となった発言」で確認する。`;
+function buildFallbackNarrativeText(evidenceTexts: string[]) {
+  return evidenceTexts
+    .slice(0, 4)
+    .map((text) => normalizeMinutesSentence(stripSpeakerPrefix(text)))
+    .join("\n");
 }
 
 function normalizeThemeNarratives(
@@ -2283,16 +2314,22 @@ function normalizeGroundedText(
   if (!text || sourceUtteranceIds.length === 0) return null;
 
   if (evidenceIndex) {
-    const valid = sourceUtteranceIds.every((id) => {
+    const validSourceUtteranceIds = sourceUtteranceIds.filter((id) => {
       const evidence = evidenceIndex.get(id);
       if (!evidence || evidence.themeId !== themeId) return false;
       return evidence.speaker === "本人" || evidence.speaker === "家族";
     });
-    if (!valid) return null;
+    if (validSourceUtteranceIds.length === 0) return null;
 
-    if (options.rejectRawCopy && looksLikeRawEvidenceCopy(text, sourceUtteranceIds, evidenceIndex)) {
+    if (options.rejectRawCopy && looksLikeRawEvidenceCopy(text, validSourceUtteranceIds, evidenceIndex)) {
       return null;
     }
+
+    return {
+      text,
+      sourceUtteranceIds: validSourceUtteranceIds,
+      sourceAspectIds: normalizeStringArray(record.sourceAspectIds),
+    };
   }
 
   return {
@@ -2334,11 +2371,7 @@ function looksLikeRawEvidenceCopy(
     const normalizedEvidence = normalizeForMinutesCopyCheck(evidenceText);
     if (normalizedEvidence.length < 12) return false;
 
-    return (
-      normalizedNarrative === normalizedEvidence ||
-      normalizedNarrative.includes(normalizedEvidence) ||
-      normalizedEvidence.includes(normalizedNarrative)
-    );
+    return normalizedNarrative === normalizedEvidence;
   });
 }
 

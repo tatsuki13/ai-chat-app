@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
@@ -22,35 +23,29 @@ type MinutesApiResponse = {
   final_minutes: FinalMinutesPayload | null;
 };
 
-type ACPMinutesRecord = {
-  title?: string;
-  recordType?: string;
-  narratives?: Record<string, ThemeNarrativeRecord | undefined>;
-  overall_summary?: {
-    core_values?: Array<{ text?: string; source_aspects?: string[]; source_utterance_ids?: string[] }>;
-    cross_theme_connections?: Array<{
-      text?: string;
-      source_aspects?: string[];
-      related_themes?: string[];
-      source_utterance_ids?: string[];
-    }>;
-    undecided_things?: string[];
-  };
-};
-
-type GroundedTextRecord = {
+type GroundedText = {
   text?: string;
   sourceUtteranceIds?: string[];
   sourceAspectIds?: string[];
 };
 
-type ThemeNarrativeRecord = {
-  currentThought?: GroundedTextRecord | null;
-  background?: GroundedTextRecord | null;
-  conditions?: GroundedTextRecord[];
-  uncertainties?: GroundedTextRecord[];
-  tensions?: GroundedTextRecord[];
-  confirmationNeeded?: GroundedTextRecord[];
+type ThemeNarrative = {
+  currentThought?: GroundedText | null;
+  background?: GroundedText | null;
+  conditions?: GroundedText[];
+  uncertainties?: GroundedText[];
+  tensions?: GroundedText[];
+  confirmationNeeded?: GroundedText[];
+};
+
+type ACPMinutes = {
+  title?: string;
+  recordType?: string;
+  narratives?: Record<string, ThemeNarrative | undefined>;
+  overall_summary?: {
+    core_values?: Array<{ text?: string }>;
+    cross_theme_connections?: Array<{ text?: string }>;
+  };
 };
 
 type EvidenceRecord = {
@@ -61,54 +56,53 @@ type EvidenceRecord = {
   speaker?: string;
 };
 
-type ThemeDisplay = {
+type ThemeDefinition = {
   id: string;
-  number: number;
   title: string;
-  currentThoughts: string[];
+};
+
+type SectionEvidenceMap = {
+  currentThought: EvidenceRecord[];
+  background: EvidenceRecord[];
+  conditions: EvidenceRecord[];
+  uncertainties: EvidenceRecord[];
+  tensions: EvidenceRecord[];
+  confirmationNeeded: EvidenceRecord[];
+};
+
+type ThemeForDisplay = ThemeDefinition & {
+  number: number;
+  currentThought: string[];
   background: string[];
   conditions: string[];
   uncertainties: string[];
   tensions: string[];
   confirmationNeeded: string[];
   evidence: EvidenceRecord[];
+  evidenceBySection: SectionEvidenceMap;
 };
 
-type ThemeDisplayDefinition = {
-  id: string;
-  title: string;
-};
-
-const THEME_ORDER: readonly ThemeDisplayDefinition[] = [
-  {
-    id: "current_life_values",
-    title: "今の暮らしの中で大切にしていること",
-  },
-  {
-    id: "future_life_continuity",
-    title: "これからも守っていきたい暮らし",
-  },
-  {
-    id: "selfhood",
-    title: "「自分らしく暮らす」ために大切なこと",
-  },
-  {
-    id: "care_support",
-    title: "もし手助けが必要になったら",
-  },
-  {
-    id: "family_communication",
-    title: "家族に伝えておきたいこと",
-  },
+const THEME_ORDER: readonly ThemeDefinition[] = [
+  { id: "current_life_values", title: "今の暮らしの中で大切にしていること" },
+  { id: "future_life_continuity", title: "これからも守っていきたい暮らし" },
+  { id: "selfhood", title: "「自分らしく暮らす」ために大切なこと" },
+  { id: "care_support", title: "もし手助けが必要になったら" },
+  { id: "family_communication", title: "家族に伝えておきたいこと" },
   {
     id: "proxy_decision_support",
     title: "もし自分で医療や介護について決めることが難しくなったら",
   },
-] as const;
+];
 
 export default function MinutesPage() {
   return (
-    <Suspense fallback={<MinutesShell><StatusBlock title="読み込み中" body="議事録を読み込んでいます。" /></MinutesShell>}>
+    <Suspense
+      fallback={
+        <MinutesShell>
+          <StatusBlock title="読み込み中" body="議事録を読み込んでいます。" />
+        </MinutesShell>
+      }
+    >
       <MinutesPageClient />
     </Suspense>
   );
@@ -132,7 +126,7 @@ function MinutesPageClient() {
       }
 
       try {
-        const response = await fetch(`/api/session/${sessionId}/minutes`, {
+        const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}/minutes`, {
           cache: "no-store",
         });
         if (!response.ok) throw new Error(`Failed to load minutes: ${response.status}`);
@@ -153,22 +147,32 @@ function MinutesPageClient() {
   }, [sessionId]);
 
   const minutesJson = data?.final_minutes?.json;
-  const acpMinutes = getAcpMinutes(minutesJson);
-  const themeEvidence = useMemo(() => collectThemeEvidence(minutesJson), [minutesJson]);
+  const minutes = getACPMinutes(minutesJson);
+  const evidenceByTheme = useMemo(() => collectEvidenceByTheme(minutesJson), [minutesJson]);
   const themes = useMemo(
-    () => buildThemeDisplays(acpMinutes, themeEvidence),
-    [acpMinutes, themeEvidence],
+    () => buildThemesForDisplay(minutes, evidenceByTheme),
+    [minutes, evidenceByTheme],
   );
+  const hasNarrativeContent = themes.some(themeHasNarrativeText);
+  const hasEvidenceOnly = !hasNarrativeContent && themes.some((theme) => theme.evidence.length > 0);
 
   if (loading) {
-    return <MinutesShell><StatusBlock title="読み込み中" body="議事録を読み込んでいます。" /></MinutesShell>;
+    return (
+      <MinutesShell>
+        <StatusBlock title="読み込み中" body="議事録を読み込んでいます。" />
+      </MinutesShell>
+    );
   }
 
   if (error) {
-    return <MinutesShell><StatusBlock title="議事録を表示できません" body={error} /></MinutesShell>;
+    return (
+      <MinutesShell>
+        <StatusBlock title="議事録を表示できません" body={error} />
+      </MinutesShell>
+    );
   }
 
-  if (!data?.final_minutes || !acpMinutes) {
+  if (!data?.final_minutes || !minutes) {
     return (
       <MinutesShell>
         <StatusBlock
@@ -203,25 +207,29 @@ function MinutesPageClient() {
         </div>
       </div>
 
-      <article className="rounded-md border border-stone-200 bg-white px-7 py-8 text-stone-800 shadow-sm print:border-0 print:px-0 print:py-0 print:shadow-none">
+      <article className="minutes-document rounded-md border border-stone-200 bg-white px-7 py-8 text-stone-850 shadow-sm print:border-0 print:px-0 print:py-0 print:shadow-none">
         <MinutesHeader
           session={data.session}
           createdAt={data.final_minutes.created_at}
-          title={acpMinutes.title || "これからの暮らしと大切にしたいこと"}
+          title={minutes.title || "これからの暮らしと大切にしたいこと"}
         />
-        <MinutesOverview minutes={acpMinutes} />
-        <div className="mt-8 space-y-7">
-          {themes.map((theme) => (
-            <MinutesThemeSection key={theme.id} theme={theme} />
-          ))}
-        </div>
+        <MinutesOverview minutes={minutes} />
+        {hasEvidenceOnly ? (
+          <MissingNarrativeNotice sessionId={sessionId} />
+        ) : (
+          <div className="mt-9 space-y-8">
+            {themes.map((theme) => (
+              <ThemeSection key={theme.id} theme={theme} />
+            ))}
+          </div>
+        )}
         <MinutesFooter />
       </article>
     </MinutesShell>
   );
 }
 
-function MinutesShell(props: { children: React.ReactNode }) {
+function MinutesShell(props: { children: ReactNode }) {
   return (
     <main className="min-h-dvh bg-[#f7f8f4] px-4 py-6 text-stone-950 print:bg-white print:px-0 print:py-0">
       <section className="mx-auto w-full max-w-[920px] print:max-w-none">
@@ -265,44 +273,38 @@ function MinutesHeader(props: {
   );
 }
 
-function MinutesOverview(props: { minutes: ACPMinutesRecord }) {
-  const items = [
+function MinutesOverview(props: { minutes: ACPMinutes }) {
+  const items = uniqueStrings([
     ...summaryTexts(props.minutes.overall_summary?.core_values),
     ...summaryTexts(props.minutes.overall_summary?.cross_theme_connections),
-  ].slice(0, 4);
+  ]).slice(0, 4);
 
   return (
     <section className="minutes-subsection mt-6 rounded-md border border-emerald-100 bg-emerald-50 px-5 py-4">
-      <h2 className="text-[17px] font-black text-stone-950">今回の話し合いから見えてきたこと</h2>
+      <h2 className="text-[17px] font-black text-stone-950">
+        今回の話し合いから見えてきたこと
+      </h2>
       <p className="mt-2 text-[13px] font-semibold leading-7 text-stone-700">
-        この記録の「現在の考え」「背景・理由」などの文章は、話し合いで実際に語られた発言を根拠として、内容を変えない範囲で読みやすく整理しています。
-        各テーマの「根拠となった発言」では、整理のもとになった実際の発言を確認できます。
-        迷いや未決定事項も含め、この記録だけで本人の意思を断定せず、今後の継続的な話し合いに活用してください。
+        この記録の「現在の考え」「その背景・理由」などの文章は、実際の話し合いで語られた発言を根拠として、内容を変えない範囲で読みやすく整理しています。
+        各テーマ末尾の「根拠となった発言」では、整理のもとになった実際の発言を確認できます。
       </p>
       {items.length > 0 ? (
-        <ul className="mt-3 space-y-2">
+        <div className="mt-4 space-y-3">
           {items.map((item) => (
-            <li key={item} className="text-[14px] font-semibold leading-relaxed text-stone-800">
+            <p key={item} className="text-[14px] font-semibold leading-8 text-stone-800">
               {item}
-            </li>
+            </p>
           ))}
-        </ul>
+        </div>
       ) : null}
     </section>
   );
 }
 
-function MinutesThemeSection(props: { theme: ThemeDisplay }) {
-  const hasAnyContent =
-    props.theme.currentThoughts.length > 0 ||
-    props.theme.background.length > 0 ||
-    props.theme.conditions.length > 0 ||
-    props.theme.uncertainties.length > 0 ||
-    props.theme.tensions.length > 0 ||
-    props.theme.confirmationNeeded.length > 0 ||
-    props.theme.evidence.length > 0;
+function ThemeSection(props: { theme: ThemeForDisplay }) {
+  const hasContent = themeHasNarrativeText(props.theme);
 
-  if (!hasAnyContent) return null;
+  if (!hasContent) return null;
 
   return (
     <section className="minutes-theme border-t border-stone-200 pt-7">
@@ -314,22 +316,71 @@ function MinutesThemeSection(props: { theme: ThemeDisplay }) {
           {props.theme.title}
         </h2>
       </div>
+
       <div className="mt-5 space-y-5">
-        <MinutesSubsection title="現在の考え" values={props.theme.currentThoughts} />
-        <MinutesSubsection title="その背景・理由" values={props.theme.background} />
-        <MinutesSubsection title="条件によって変わること" values={props.theme.conditions} tone="condition" />
-        <MinutesSubsection title="まだ考えている途中のこと" values={props.theme.uncertainties} tone="uncertainty" />
-        <MinutesSubsection title="本人の中に同時にある思い" values={props.theme.tensions} tone="tension" />
-        <MinutesSubsection title="確認しておきたいこと" values={props.theme.confirmationNeeded} tone="attention" />
-        <MinutesEvidenceList evidence={props.theme.evidence} />
+        <TextSection
+          title="現在の考え"
+          values={props.theme.currentThought}
+          evidence={props.theme.evidenceBySection.currentThought}
+        />
+        <TextSection
+          title="その背景・理由"
+          values={props.theme.background}
+          evidence={props.theme.evidenceBySection.background}
+        />
+        <TextSection
+          title="条件によって変わること"
+          values={props.theme.conditions}
+          evidence={props.theme.evidenceBySection.conditions}
+          tone="condition"
+        />
+        <TextSection
+          title="まだ考えている途中のこと"
+          values={props.theme.uncertainties}
+          evidence={props.theme.evidenceBySection.uncertainties}
+          tone="uncertainty"
+        />
+        <TextSection
+          title="本人の中に同時にある思い"
+          values={props.theme.tensions}
+          evidence={props.theme.evidenceBySection.tensions}
+          tone="tension"
+        />
+        <TextSection
+          title="確認しておきたいこと"
+          values={props.theme.confirmationNeeded}
+          evidence={props.theme.evidenceBySection.confirmationNeeded}
+          tone="attention"
+        />
       </div>
     </section>
   );
 }
 
-function MinutesSubsection(props: {
+function MissingNarrativeNotice(props: { sessionId: string }) {
+  return (
+    <section className="mt-9 rounded-md border border-amber-200 bg-amber-50 px-5 py-5">
+      <h2 className="text-[17px] font-black text-stone-950">
+        議事録本文がまだ生成されていません
+      </h2>
+      <p className="mt-2 text-[14px] font-semibold leading-7 text-stone-700">
+        この議事録データには根拠となった発言だけが保存されており、「現在の考え」や「その背景・理由」などの要約本文が入っていません。
+        セッション画面に戻って、議事録をもう一度生成してください。
+      </p>
+      <a
+        href={`/session?sessionId=${encodeURIComponent(props.sessionId)}`}
+        className="mt-4 inline-flex rounded-md bg-stone-950 px-4 py-2 text-[13px] font-black text-white"
+      >
+        セッションへ戻る
+      </a>
+    </section>
+  );
+}
+
+function TextSection(props: {
   title: string;
   values: string[];
+  evidence?: EvidenceRecord[];
   tone?: "condition" | "uncertainty" | "tension" | "attention";
 }) {
   const values = uniqueStrings(props.values);
@@ -340,10 +391,10 @@ function MinutesSubsection(props: {
       ? "border-amber-200 bg-amber-50"
       : props.tone === "uncertainty"
         ? "border-sky-100 bg-sky-50"
-        : props.tone === "condition"
-          ? "border-stone-200 bg-stone-50"
-          : props.tone === "tension"
-            ? "border-rose-100 bg-rose-50"
+        : props.tone === "tension"
+          ? "border-rose-100 bg-rose-50"
+          : props.tone === "condition"
+            ? "border-stone-200 bg-stone-50"
             : "border-transparent bg-white";
 
   return (
@@ -356,34 +407,35 @@ function MinutesSubsection(props: {
           </p>
         ))}
       </div>
+      <EvidenceSection evidence={props.evidence ?? []} />
     </section>
   );
 }
 
-function MinutesEvidenceList(props: { evidence: EvidenceRecord[] }) {
-  const evidence = dedupeEvidenceByUtteranceId(props.evidence).filter((item) => item.evidenceText);
+function EvidenceSection(props: { evidence: EvidenceRecord[] }) {
+  const evidence = dedupeEvidence(props.evidence).filter((item) => item.evidenceText);
   if (evidence.length === 0) return null;
 
   return (
-    <section className="minutes-subsection">
-      <h3 className="text-[15px] font-black text-stone-950">根拠となった発言</h3>
+    <div className="mt-4 border-t border-stone-200 pt-3">
+      <h4 className="text-[13px] font-black text-stone-700">根拠となった発言</h4>
       <div className="mt-3 space-y-3">
         {evidence.map((item, index) => (
-          <MinutesEvidenceQuote key={`${item.evidenceUtteranceId ?? index}-${index}`} evidence={item} />
+          <EvidenceCard key={`${item.evidenceUtteranceId ?? index}-${index}`} evidence={item} />
         ))}
       </div>
-    </section>
+    </div>
   );
 }
 
-function MinutesEvidenceQuote(props: { evidence: EvidenceRecord }) {
+function EvidenceCard(props: { evidence: EvidenceRecord }) {
   const speaker = speakerLabel(props.evidence.speaker);
   const target = speaker === "本人" ? "介護者" : speaker === "介護者" ? "本人" : "相手";
 
   return (
     <blockquote className="evidence-card rounded-md border border-stone-200 border-l-4 border-l-stone-400 bg-stone-50 px-4 py-4">
       <p className="whitespace-pre-wrap text-[14px] font-semibold leading-7 text-stone-800">
-        {quoteEvidenceText(stripEvidenceSpeaker(props.evidence.evidenceText ?? ""))}
+        {quoteText(stripSpeakerPrefix(props.evidence.evidenceText ?? ""))}
       </p>
       <footer className="mt-2 text-[12px] font-black text-stone-500">
         {speaker} → {target}
@@ -395,7 +447,7 @@ function MinutesEvidenceQuote(props: { evidence: EvidenceRecord }) {
 function MinutesFooter() {
   return (
     <footer className="mt-8 border-t border-stone-200 pt-4 text-[12px] font-semibold leading-relaxed text-stone-500">
-      この記録は、話し合い時点で確認できた内容を整理したものです。本人の考えは、体調や生活状況、家族状況によって変化することがあります。
+      迷いや未決定事項も含め、この記録だけで本人の意思を断定せず、今後の継続的な話し合いに活用してください。
     </footer>
   );
 }
@@ -413,9 +465,16 @@ function MinutesPrintStyles() {
           margin: 15mm;
         }
 
-        .minutes-subsection,
+        .minutes-theme {
+          break-before: auto;
+        }
+
         .evidence-card {
           break-inside: avoid;
+        }
+
+        .minutes-subsection {
+          break-inside: auto;
         }
 
         h1,
@@ -433,58 +492,92 @@ function MinutesPrintStyles() {
   );
 }
 
-function getAcpMinutes(value: unknown): ACPMinutesRecord | null {
-  if (!value || typeof value !== "object") return null;
-  const json = value as Record<string, unknown>;
-  const minutes = json.acp_minutes;
-  if (!minutes || typeof minutes !== "object") return null;
-  const record = minutes as ACPMinutesRecord;
-  return record.recordType === "acp_discussion_record" ? record : null;
-}
-
-function buildThemeDisplays(
-  minutes: ACPMinutesRecord | null,
+function buildThemesForDisplay(
+  minutes: ACPMinutes | null,
   evidenceByTheme: Map<string, EvidenceRecord[]>,
-): ThemeDisplay[] {
+): ThemeForDisplay[] {
   return THEME_ORDER.map((definition, index) => {
     const narrative = minutes?.narratives?.[definition.id];
-    const uncertainties = collectNarrativeTexts(narrative?.uncertainties);
-    const conditions = collectNarrativeTexts(narrative?.conditions);
-    const currentThoughts = collectNarrativeTexts(narrative?.currentThought);
-    const background = collectNarrativeTexts(narrative?.background);
-    const tensions = collectNarrativeTexts(narrative?.tensions);
-    const confirmationNeeded = collectNarrativeTexts(narrative?.confirmationNeeded);
+    const themeEvidence = evidenceByTheme.get(definition.id) ?? [];
+    const evidenceBySection: SectionEvidenceMap = {
+      currentThought: filterEvidenceBySourceIds(
+        themeEvidence,
+        collectSourceUtteranceIds(narrative?.currentThought),
+      ),
+      background: filterEvidenceBySourceIds(
+        themeEvidence,
+        collectSourceUtteranceIds(narrative?.background),
+      ),
+      conditions: filterEvidenceBySourceIds(
+        themeEvidence,
+        collectSourceUtteranceIds(narrative?.conditions),
+      ),
+      uncertainties: filterEvidenceBySourceIds(
+        themeEvidence,
+        collectSourceUtteranceIds(narrative?.uncertainties),
+      ),
+      tensions: filterEvidenceBySourceIds(
+        themeEvidence,
+        collectSourceUtteranceIds(narrative?.tensions),
+      ),
+      confirmationNeeded: filterEvidenceBySourceIds(
+        themeEvidence,
+        collectSourceUtteranceIds(narrative?.confirmationNeeded),
+      ),
+    };
 
     return {
-      id: definition.id,
+      ...definition,
       number: index + 1,
-      title: definition.title,
-      currentThoughts,
-      background,
-      conditions,
-      uncertainties,
-      tensions,
-      confirmationNeeded,
-      evidence: evidenceByTheme.get(definition.id) ?? [],
+      currentThought: collectText(narrative?.currentThought),
+      background: collectText(narrative?.background),
+      conditions: collectText(narrative?.conditions),
+      uncertainties: collectText(narrative?.uncertainties),
+      tensions: collectText(narrative?.tensions),
+      confirmationNeeded: collectText(narrative?.confirmationNeeded),
+      evidence: themeEvidence,
+      evidenceBySection,
     };
   });
 }
 
-function collectThemeEvidence(value: unknown) {
+function themeHasNarrativeText(theme: ThemeForDisplay) {
+  return (
+    theme.currentThought.length > 0 ||
+    theme.background.length > 0 ||
+    theme.conditions.length > 0 ||
+    theme.uncertainties.length > 0 ||
+    theme.tensions.length > 0 ||
+    theme.confirmationNeeded.length > 0
+  );
+}
+
+function getACPMinutes(value: unknown): ACPMinutes | null {
+  if (!value || typeof value !== "object") return null;
+  const json = value as Record<string, unknown>;
+  const minutes = json.acp_minutes;
+  if (!minutes || typeof minutes !== "object") return null;
+  const record = minutes as ACPMinutes;
+  return record.recordType === "acp_discussion_record" ? record : null;
+}
+
+function collectEvidenceByTheme(value: unknown) {
   const map = new Map<string, EvidenceRecord[]>();
   if (!value || typeof value !== "object") return map;
+
   const json = value as Record<string, unknown>;
   const themes = Array.isArray(json.themes) ? json.themes : [];
 
   themes.forEach((theme) => {
     if (!theme || typeof theme !== "object") return;
     const themeRecord = theme as Record<string, unknown>;
-    const themeId = typeof themeRecord.theme_id === "string" ? themeRecord.theme_id : "";
+    const themeId = stringValue(themeRecord.theme_id);
     const aspects = Array.isArray(themeRecord.aspects) ? themeRecord.aspects : [];
     const evidence = aspects.flatMap((aspect) => {
       if (!aspect || typeof aspect !== "object") return [];
       const aspectRecord = aspect as Record<string, unknown>;
       const items = Array.isArray(aspectRecord.evidence) ? aspectRecord.evidence : [];
+
       return items
         .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
         .map((item) => ({
@@ -495,41 +588,45 @@ function collectThemeEvidence(value: unknown) {
           speaker: stringValue(item.speaker),
         }));
     });
-    if (themeId && evidence.length > 0) {
-      map.set(themeId, evidence);
-    }
+
+    if (themeId && evidence.length > 0) map.set(themeId, evidence);
   });
 
   return map;
 }
 
-function collectNarrativeTexts(
-  value: GroundedTextRecord | GroundedTextRecord[] | null | undefined,
-) {
+function collectText(value: GroundedText | GroundedText[] | string | string[] | null | undefined) {
   if (!value) return [];
+  if (typeof value === "string") return value.trim() ? [value.trim()] : [];
   const items = Array.isArray(value) ? value : [value];
+
   return uniqueStrings(
     items
-      .filter((item) => Array.isArray(item.sourceUtteranceIds) && item.sourceUtteranceIds.length > 0)
-      .map((item) => item.text?.trim() ?? "")
+      .map((item) => (typeof item === "string" ? item.trim() : item.text?.trim() ?? ""))
       .filter(Boolean),
   );
 }
 
-function dedupeEvidenceByUtteranceId(evidence: EvidenceRecord[]) {
-  const seen = new Set<string>();
-  return evidence.filter((item) => {
-    const key =
-      item.evidenceUtteranceId?.trim() ||
-      [
-        speakerLabel(item.speaker),
-        "target",
-        normalizeEvidenceDedupeText(stripEvidenceSpeaker(item.evidenceText ?? "")),
-      ].join(":");
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+function collectSourceUtteranceIds(
+  value: GroundedText | GroundedText[] | string | string[] | null | undefined,
+) {
+  if (!value || typeof value === "string") return [];
+  const items = Array.isArray(value) ? value : [value];
+
+  return uniqueStrings(
+    items.flatMap((item) =>
+      typeof item === "string" ? [] : (item.sourceUtteranceIds ?? []),
+    ),
+  );
+}
+
+function filterEvidenceBySourceIds(evidence: EvidenceRecord[], sourceIds: string[]) {
+  if (sourceIds.length === 0) return [];
+  const sourceIdSet = new Set(sourceIds);
+
+  return evidence.filter((item) =>
+    item.evidenceUtteranceId ? sourceIdSet.has(item.evidenceUtteranceId) : false,
+  );
 }
 
 function summaryTexts(items: Array<{ text?: string }> | undefined) {
@@ -538,12 +635,18 @@ function summaryTexts(items: Array<{ text?: string }> | undefined) {
     .filter((text): text is string => Boolean(text));
 }
 
-function uniqueStrings(values: string[]) {
-  return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
-}
+function dedupeEvidence(evidence: EvidenceRecord[]) {
+  const seen = new Set<string>();
 
-function stringValue(value: unknown) {
-  return typeof value === "string" ? value : undefined;
+  return evidence.filter((item) => {
+    const key =
+      item.evidenceUtteranceId?.trim() ||
+      [speakerLabel(item.speaker), normalizeForDedupe(stripSpeakerPrefix(item.evidenceText ?? ""))].join(":");
+
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function speakerLabel(value: unknown) {
@@ -552,23 +655,32 @@ function speakerLabel(value: unknown) {
   return "発言者";
 }
 
-function stripEvidenceSpeaker(value: string) {
+function stripSpeakerPrefix(value: string) {
   return value.replace(/^(本人|家族|介護者|その他|elder|caregiver)\s*[:：]\s*/i, "").trim();
 }
 
-function quoteEvidenceText(value: string) {
+function quoteText(value: string) {
   const text = value.trim();
   if (!text) return "";
   return text.startsWith("「") && text.endsWith("」") ? text : `「${text}」`;
 }
 
-function normalizeEvidenceDedupeText(value: string) {
+function normalizeForDedupe(value: string) {
   return value.replace(/\s+/g, "").replace(/[「」『』"']/g, "").trim();
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : undefined;
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
 }
 
 function formatDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "-";
+
   return date.toLocaleDateString("ja-JP", {
     year: "numeric",
     month: "2-digit",

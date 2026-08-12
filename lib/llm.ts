@@ -181,147 +181,49 @@ const SYSTEM_END_CHECK = [
 ].join("\n");
 
 const SYSTEM_FINAL_MINUTES_FROM_STRUCTURED = [
-  "あなたはACPの話し合い記録を整理するシステムです。",
-  "あなたの役割は、ACP対話の根拠発話を、意味を変えず読みやすい記録文へ整理することです。",
-  "入力には、ACP対話から既に抽出され、匿名化された構造化情報と根拠発話IDだけが含まれています。",
-  "入力された情報のみを使用してください。",
-  "入力された発話以外の情報を使用してはいけません。",
-  "新しい事実、希望、価値観、理由、人物関係、医療上の判断を推測・追加してはいけません。",
-  "本人が話していない希望を生成してはいけません。",
-  "発言主体を変更してはいけません。",
-  "各記録文は必ず1件以上のsourceUtteranceIdsを持たなければなりません。",
-  "sourceUtteranceIdsで指定した発話から直接支持できない内容を書いてはいけません。",
-  "本人が「できれば」「まだ」「今のところ」「状況による」「分からない」などと話している場合、その条件・不確実性を削除してはいけません。",
-  "本人の中に異なる考えが同時に存在する場合、一方へ統合してはいけません。",
-  "介護者による解釈を、本人が直接話した内容であるかのように変更してはいけません。",
-  "会話調の冗長さは整理してよいですが、意味・強さ・条件・否定・迷いを変えてはいけません。",
-  "否定表現を肯定表現へ変更してはいけません。",
-  "複数の発言を統合する場合は、その意味が明確に共通していて、根拠aspectが2つ以上ある場合だけ統合してください。",
-  "テーマごとの narratives は、currentThought、background、conditions、uncertainties、tensions、confirmationNeeded に整理してください。",
-  "各themeのaspectsには sub-slot の priority と status が含まれます。coreを優先し、optionalは意味ある根拠がある場合のみ、cross_topicは複数テーマの関係やoverall summaryに必要な場合のみ使ってください。",
-  "この議事録では、情報を短く要約しすぎないでください。目的は情報量を減らすことではなく、ACPとして意味のある内容を適切なセクションへ配置することです。",
-  "「今回の話し合いから見えてきたこと」は全体像を把握するための短い概要です。2〜4項目程度にし、詳細な内容は必ず各テーマに残してください。",
-  "overall_summaryに書いた重要情報でも、theme詳細から削除してはいけません。overall summaryは入口、theme sectionは正式な記録です。",
-  "各テーマでは、取得済みのslot/sub-slot情報を参照し、意味に応じて currentThought、background、conditions、uncertainties、tensions、confirmationNeeded へ分けて記録してください。",
-  "情報をすべてcurrentThoughtにまとめてはいけません。currentThoughtは中心的な考え、backgroundは理由や生活歴、conditionsは条件、uncertaintiesは未決定や保留、tensionsは本人の中に同時にある思い、confirmationNeededは今後の確認事項として分けてください。",
-  "会話の冗長表現は整理して構いませんが、具体的な生活行動、人との関係、本人の理由、避けたいこと、条件、迷い、未決定、家族への配慮、支援への考え、意思決定についての考えを失わないでください。",
-  "currentThought と background は2〜5文程度を目安に、短すぎる単語メモや会話全文の貼り付けにしないでください。",
-  "currentThought と background の text には、発話をそのままコピーした文、引用符つきの発言文、話し言葉の相づちを並べた文を入れてはいけません。",
-  "currentThought と background は「本人は〜と考えている」「本人は〜と話している」のような第三者記録文として整理してください。",
-  "conditions、uncertainties、tensions は本人発話から直接支持できる場合だけ書いてください。slotが空・不整合という理由だけで本人が迷っていると推論しないでください。",
-  "confirmationNeeded は、本人の葛藤ではなく記録上確認が必要なことに限定してください。",
-  "overall_summary の core_values と cross_theme_connections は必ず source_aspects と source_utterance_ids を持たせ、根拠aspectが1つしかない内容は生成しないでください。",
-  "入力に情報がない項目は空配列 [] としてください。",
+  "あなたはACPの話し合い記録を作成するシステムです。",
+  "添付PDFと同じ考え方で、短い全体概要、テーマごとの詳細、必要な整理枠、最後に根拠発言という構成を守ってください。",
+  "今回の目的は情報量を減らすことではありません。ACP対話で得られた情報を、意味に応じて適切なセクションへ配置してください。",
+  "入力されたslot/sub-slot/aspect情報と根拠発話だけを使用してください。入力にない事実、希望、理由、人物関係、医療判断を追加してはいけません。",
+  "overall_summaryは「今回の話し合いから見えてきたこと」に表示する短い概要です。2〜4項目程度、1項目は1〜2文程度にしてください。全sub-slot、条件、迷い、未決定、根拠発話、次回確認事項をここへ詰め込まないでください。",
+  "overall_summaryに書いた内容でも、各テーマの詳細から削除してはいけません。overall_summaryは入口であり、theme sectionが正式な記録です。",
+  "各テーマでは、取得済みのslot/sub-slot/aspectを参照し、以下へ分けて記録してください: currentThought, background, conditions, uncertainties, tensions, confirmationNeeded。",
+  "currentThoughtは、そのテーマの中心的内容です。主にcore sub-slot、本人の明確な希望、大切にしていること、避けたいこと、比較的明確に語られている考えを2〜5文程度で書いてください。テーマ内の情報すべてをcurrentThoughtへ押し込まないでください。",
+  "backgroundは、本人がなぜそう考えているか、生活歴、人との関係、感情、これまでの経験が語られている場合に書いてください。根拠がなければnullにしてください。",
+  "conditionsは、できる間はしたい、重い作業は難しい、状況による、全部今まで通りでなくてもよい等、条件によって変わる内容を書いてください。",
+  "uncertaintiesは、まだ考えていない、まだ決めていない、今は分からない、状況による、その時にならないと分からない等を、欠損ではなく本人の意思形成状態として書いてください。",
+  "tensionsは、本人の中にAを大切にしたい一方でBも気になる、という複数の思いがある場合に書いてください。一方へ統合しないでください。",
+  "confirmationNeededは、発言同士の意味が一致しない、slotと発言が一致しない、本人の発言だけでは複数解釈可能、今回だけでは確定できない、相談相手と代理意思決定者が混在している場合に書いてください。本人の葛藤と記録上の確認事項を混同しないでください。",
+  "会話の冗長表現は整理して構いませんが、具体的な生活行動、人との関係、本人の理由、避けたいこと、条件、迷い、未決定、家族への配慮、支援への考え、意思決定についての考えを削除してはいけません。",
+  "現在の考え、背景・理由、条件、未決定、同時にある思い、確認事項は、発言原文をそのまま並べず、医療・介護従事者が読みやすい第三者記録文として書いてください。",
+  "各生成文章には必ずsourceUtteranceIdsを付与してください。sourceUtteranceIdsで指定した発話から直接支持できない内容は書かないでください。",
+  "根拠がない場合は、文章を作らずnullまたは空配列にしてください。",
   "JSON以外の文章を出力しないでください。",
-  "Return JSON only with this shape: {\"narratives\":{\"current_life_values\":{\"currentThought\":{\"text\":\"...\",\"sourceUtteranceIds\":[\"...\"],\"sourceAspectIds\":[\"...\"]},\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]}},\"overall_summary\":{\"core_values\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"source_utterance_ids\":[\"...\"]}],\"cross_theme_connections\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"related_themes\":[\"...\"],\"source_utterance_ids\":[\"...\"]}],\"undecided_things\":[\"...\"]}}.",
+  "あなたの役割は、ACP対話を浅く要約することではありません。slot / sub-slot / evidenceを材料に、医療・介護従事者が後から内容を理解できる記録文へ整理してください。",
+  "sub-slot名や分類名を本文にそのまま書かないでください。「本人はこのテーマについて考えを話している」のような抽象的な説明文も禁止です。実際に本人が何を話したのかを書いてください。",
+  "currentThoughtには、本人の現在の希望、大切にしていること、続けたいこと、避けたいこと、支援に関する比較的明確な考えを入れてください。",
+  "backgroundには、なぜそう考えるのか、生活歴、人との関係、地域とのつながり、寂しさ、不安、負担感など、理由や背景として語られた内容を入れてください。",
+  "conditionsには、できる範囲、重い作業は難しい、全部今まで通りでなくてもよい、必要なら支援を受けるなど、条件によって変わる内容を入れてください。",
+  "uncertaintiesには、本人が実際に、まだ考えていない、まだ決めていない、分からない、その時にならないと分からない、と話した内容だけを入れてください。slotが未充足という理由だけで作らないでください。",
+  "tensionsには、本人自身の発言から複数の思いが確認できる場合だけ入れてください。Aを大切にしたい一方でBも気になる、という双方を支えるsourceUtteranceIdsが必要です。単一sub-slotがcompleteであることだけを理由に作らないでください。",
+  "confirmationNeededには、本人の葛藤ではなく、記録上の不整合、本人発言とslot状態の不一致、相談相手と代理意思決定者の混在、今回の発言だけでは確定できない事項を入れてください。",
+  "not_decidedというslot状態だけを根拠に、本人が決めていないと本文化しないでください。本人の直接発言または本人確認のあるevidenceが必要です。",
+  "同じutteranceが複数sub-slotに関係していても、根拠発言カードでは1回だけ表示されます。本文では、そのutteranceがどのsectionを支えるかsourceUtteranceIdsで追跡できるようにしてください。",
+  "Narrative writing process: before writing each narrative field, internally convert each evidence utterance into meaning units that are directly confirmable from that utterance, then integrate compatible meaning units into natural Japanese clinical record text.",
+  "Do not quote the original utterances in order, lightly rewrite each utterance one by one, or chain phrases such as 「〜と話している」「〜と述べている」. Your role is to express the confirmed meaning, not to reproduce the transcript.",
+  "You may rephrase for readability, but you must not add intentions, emotions, values, reasons, causal links, medical judgments, or future preferences that are not directly supported by the evidence.",
+  "When the utterance contains uncertainty or conditions such as 「できれば」「今のところ」「家族が大丈夫なら」「体が動くうちは」, preserve that strength and condition. Do not make the preference stronger or more definite than the utterance.",
+  "If multiple utterances point in the same direction, integrate them into one meaning cluster. If the relationship between utterances is unclear, use confirmationNeeded rather than inventing a causal or emotional connection.",
+  "For every narrative field, sourceUtteranceIds must include only the utterances that directly support the final written text for that field. Do not use theme-level evidence IDs just because they are related to the theme.",
+  "Bad currentThought example: 「本人は『できれば家がいい』と話しており、『病院にずっといるのは嫌』と話している。」 This is only a quote list.",
+  "Good currentThought example: 「本人は、可能であれば自宅で家族と普段通りに過ごすことを希望している。長期間病院で過ごすことには抵抗を示している。」 with sourceUtteranceIds limited to the utterances that directly support those meanings.",
+  "Over-interpretation example to avoid: from 「家がいいかな」「家族と一緒がいい」, do not write 「家族に介護してもらいながら自宅で最期を迎えることを希望している」 because care by family and final place of death were not stated.",
+  "currentThought-specific rule: do not copy or list the user's utterances. Write 1 to 3 natural Japanese record sentences that communicate the person's current wishes, values, priorities, things they want to continue, things they want to avoid, or relatively clear views about support/decision-making.",
+  "currentThought-specific rule: include only content directly supported by the person's own utterances. Do not treat a clinician question, caregiver interpretation, or general ACP value as the person's value.",
+  "currentThought-specific rule: sourceUtteranceIds must contain only the utterance IDs that directly support the generated currentThought sentence. Do not include every utterance in the theme, utterances used for background/conditions/uncertainties/tensions/confirmationNeeded, or question-only utterances.",
+  "currentThought-specific rule: if the best output would be the same as an evidence quote, a simple concatenation of quotes, or an unsupported inference, return currentThought as null.",
+  "Return JSON only with this shape: {\"narratives\":{\"current_life_values\":{\"currentThought\":{\"text\":\"...\",\"sourceUtteranceIds\":[\"...\"],\"sourceAspectIds\":[\"...\"]},\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]},\"future_life_continuity\":{\"currentThought\":null,\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]},\"selfhood\":{\"currentThought\":null,\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]},\"care_support\":{\"currentThought\":null,\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]},\"family_communication\":{\"currentThought\":null,\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]},\"proxy_decision_support\":{\"currentThought\":null,\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]}},\"overall_summary\":{\"core_values\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"source_utterance_ids\":[\"...\"]}],\"cross_theme_connections\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"related_themes\":[\"...\"],\"source_utterance_ids\":[\"...\"]}],\"undecided_things\":[]}}.",
 ].join("\n");
-
-const FINAL_MINUTES_RESPONSE_FORMAT = {
-  type: "json_schema",
-  json_schema: {
-    name: "acp_grounded_minutes",
-    strict: true,
-    schema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["narratives", "overall_summary"],
-      properties: {
-        narratives: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "current_life_values",
-            "future_life_continuity",
-            "selfhood",
-            "care_support",
-            "family_communication",
-            "proxy_decision_support",
-          ],
-          properties: {
-            current_life_values: { $ref: "#/$defs/themeNarrative" },
-            future_life_continuity: { $ref: "#/$defs/themeNarrative" },
-            selfhood: { $ref: "#/$defs/themeNarrative" },
-            care_support: { $ref: "#/$defs/themeNarrative" },
-            family_communication: { $ref: "#/$defs/themeNarrative" },
-            proxy_decision_support: { $ref: "#/$defs/themeNarrative" },
-          },
-        },
-        overall_summary: {
-          type: "object",
-          additionalProperties: false,
-          required: ["core_values", "cross_theme_connections", "undecided_things"],
-          properties: {
-            core_values: { type: "array", items: { $ref: "#/$defs/overallItem" } },
-            cross_theme_connections: {
-              type: "array",
-              items: { $ref: "#/$defs/connectionItem" },
-            },
-            undecided_things: { type: "array", items: { type: "string" } },
-          },
-        },
-      },
-      $defs: {
-        groundedText: {
-          type: "object",
-          additionalProperties: false,
-          required: ["text", "sourceUtteranceIds", "sourceAspectIds"],
-          properties: {
-            text: { type: "string" },
-            sourceUtteranceIds: {
-              type: "array",
-              items: { type: "string" },
-            },
-            sourceAspectIds: { type: "array", items: { type: "string" } },
-          },
-        },
-        nullableGroundedText: {
-          anyOf: [{ $ref: "#/$defs/groundedText" }, { type: "null" }],
-        },
-        themeNarrative: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "currentThought",
-            "background",
-            "conditions",
-            "uncertainties",
-            "tensions",
-            "confirmationNeeded",
-          ],
-          properties: {
-            currentThought: { $ref: "#/$defs/nullableGroundedText" },
-            background: { $ref: "#/$defs/nullableGroundedText" },
-            conditions: { type: "array", items: { $ref: "#/$defs/groundedText" } },
-            uncertainties: { type: "array", items: { $ref: "#/$defs/groundedText" } },
-            tensions: { type: "array", items: { $ref: "#/$defs/groundedText" } },
-            confirmationNeeded: { type: "array", items: { $ref: "#/$defs/groundedText" } },
-          },
-        },
-        overallItem: {
-          type: "object",
-          additionalProperties: false,
-          required: ["text", "source_aspects", "source_utterance_ids"],
-          properties: {
-            text: { type: "string" },
-            source_aspects: { type: "array", items: { type: "string" } },
-            source_utterance_ids: { type: "array", items: { type: "string" } },
-          },
-        },
-        connectionItem: {
-          type: "object",
-          additionalProperties: false,
-          required: ["text", "source_aspects", "related_themes", "source_utterance_ids"],
-          properties: {
-            text: { type: "string" },
-            source_aspects: { type: "array", items: { type: "string" } },
-            related_themes: { type: "array", items: { type: "string" } },
-            source_utterance_ids: { type: "array", items: { type: "string" } },
-          },
-        },
-      },
-    },
-  },
-} as const;
 
 const SYSTEM_SLOT_CONTROL_DEBUG = [
   "あなたはACP対話ログを読み、開発確認用にサブスロットの状態を意味判定するAIです。",
@@ -386,6 +288,9 @@ type SlotClassificationResult = {
 type JsonRequestMeta = {
   source: "openai" | "fallback" | "error";
   llmSucceeded: boolean;
+  failureReason?: "missing_api_key" | "api_error" | "parse_error";
+  errorMessage?: string;
+  rawResponse?: string;
 };
 
 type SlotResponseMeaning =
@@ -1123,17 +1028,23 @@ export async function generateFinalMinutes(
   }>(
     SYSTEM_FINAL_MINUTES_FROM_STRUCTURED,
     buildStructuredMinutesPayload(fallback),
-    {
-      overall_summary: baseMinutes.overall_summary,
-      narratives: baseMinutes.narratives,
-    },
-    FINAL_MINUTES_RESPONSE_FORMAT,
+    {},
+    { type: "json_object" },
   );
-  const validatedMinutes = validateACPMinutes({
-    ...baseMinutes,
-    overall_summary: result.overall_summary,
-    narratives: result.narratives,
-  }, fallback.json.acp_minutes_llm_input) ?? baseMinutes;
+  const requestMeta = result.__requestMeta ?? {
+    source: "fallback",
+    llmSucceeded: false,
+  };
+  const llmReturnedNarratives = hasNarrativeObject(result.narratives);
+  const validatedMinutes =
+    requestMeta.source === "openai" && llmReturnedNarratives
+      ? validateACPMinutes({
+          ...baseMinutes,
+          overall_summary: result.overall_summary,
+          narratives: result.narratives,
+        }, fallback.json.acp_minutes_llm_input) ?? baseMinutes
+      : baseMinutes;
+  const narrativeStatus = getNarrativeGenerationStatus(requestMeta, llmReturnedNarratives);
   const markdown = renderACPMinutesMarkdown(
     validatedMinutes,
     fallback.json.generated_at,
@@ -1145,21 +1056,163 @@ export async function generateFinalMinutes(
       json: {
         ...fallback.json,
         acp_minutes: validatedMinutes,
-        acp_minutes_llm_meta: result.__requestMeta ?? {
-          source: "fallback",
-          llmSucceeded: false,
+        acp_minutes_llm_meta: {
+          ...requestMeta,
+          narrativeGenerationStatus: narrativeStatus,
+          fallbackUsed: validatedMinutes === baseMinutes,
         },
+        acp_minutes_narrative_debug: buildFinalMinutesNarrativeDebug({
+          input: fallback.json.acp_minutes_llm_input,
+          rawResponse: result,
+          requestMeta,
+          narrativeStatus,
+          fallbackUsed: validatedMinutes === baseMinutes,
+        }),
       },
     },
     context,
   );
 }
 
+type NarrativeGenerationStatus =
+  | "success"
+  | "no_supported_content"
+  | "api_error"
+  | "parse_error"
+  | "fallback";
+
+function getNarrativeGenerationStatus(
+  meta: JsonRequestMeta,
+  llmReturnedNarratives: boolean,
+): NarrativeGenerationStatus {
+  if (meta.source === "openai" && llmReturnedNarratives) return "success";
+  if (meta.failureReason === "parse_error") return "parse_error";
+  if (meta.failureReason === "api_error" || meta.failureReason === "missing_api_key") {
+    return "api_error";
+  }
+  if (meta.source === "openai" && !llmReturnedNarratives) return "no_supported_content";
+  return "fallback";
+}
+
+function buildFinalMinutesNarrativeDebug(input: {
+  input?: FinalMinutesResult["json"]["acp_minutes_llm_input"];
+  rawResponse: { overall_summary?: unknown; narratives?: unknown; __requestMeta?: JsonRequestMeta };
+  requestMeta: JsonRequestMeta;
+  narrativeStatus: NarrativeGenerationStatus;
+  fallbackUsed: boolean;
+}) {
+  const themes = input.input?.themes ?? [];
+  return {
+    status: input.narrativeStatus,
+    llmAttempted: input.requestMeta.failureReason !== "missing_api_key",
+    llmSucceeded: input.requestMeta.source === "openai",
+    rawResponseAvailable: Boolean(input.requestMeta.rawResponse),
+    parseSucceeded: input.requestMeta.source === "openai",
+    schemaSucceeded: hasNarrativeObject(input.rawResponse.narratives),
+    fallbackUsed: input.fallbackUsed,
+    failureReason: input.requestMeta.failureReason,
+    errorMessage: input.requestMeta.errorMessage,
+    rawResponse: input.requestMeta.rawResponse,
+    themes: themes.map((theme) => ({
+      themeId: theme.theme_id,
+      inputEvidenceCount: theme.aspects.reduce((count, aspect) => count + aspect.evidence.length, 0),
+      inputEvidenceIds: uniqueStringsForDebug(
+        theme.aspects.flatMap((aspect) =>
+          aspect.evidence.map((evidence) => evidence.sourceUtteranceId ?? ""),
+        ),
+      ),
+      generatedCurrentThought: hasGeneratedSection(input.rawResponse.narratives, theme.theme_id, "currentThought"),
+      generatedBackground: hasGeneratedSection(input.rawResponse.narratives, theme.theme_id, "background"),
+      generatedConditions: hasGeneratedSection(input.rawResponse.narratives, theme.theme_id, "conditions"),
+      generatedUncertainties: hasGeneratedSection(input.rawResponse.narratives, theme.theme_id, "uncertainties"),
+      generatedTensions: hasGeneratedSection(input.rawResponse.narratives, theme.theme_id, "tensions"),
+      generatedConfirmationNeeded: hasGeneratedSection(input.rawResponse.narratives, theme.theme_id, "confirmationNeeded"),
+    })),
+  };
+}
+
+function hasGeneratedSection(
+  narratives: unknown,
+  themeId: string,
+  section: string,
+) {
+  if (!narratives || typeof narratives !== "object" || Array.isArray(narratives)) return false;
+  const theme = (narratives as Record<string, unknown>)[themeId];
+  if (!theme || typeof theme !== "object" || Array.isArray(theme)) return false;
+  return hasNarrativeText((theme as Record<string, unknown>)[section]);
+}
+
+function uniqueStringsForDebug(values: string[]) {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function hasNarrativeObject(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).some((theme) => {
+    if (!theme || typeof theme !== "object" || Array.isArray(theme)) return false;
+    return Object.values(theme as Record<string, unknown>).some((section) => hasNarrativeText(section));
+  });
+}
+
+function hasNarrativeText(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some((item) => hasNarrativeText(item));
+  if (!value || typeof value !== "object") return false;
+  const text = (value as Record<string, unknown>).text;
+  return typeof text === "string" && text.trim().length > 0;
+}
+
 function buildStructuredMinutesPayload(minutes: FinalMinutesResult) {
   return {
     generated_at: minutes.json.generated_at,
     acp_minutes_input: minutes.json.acp_minutes_llm_input,
+    writing_process: [
+      "各evidenceを逐語引用ではなく、発言から直接確認できる意味単位に変換する。",
+      "同じ方向性の意味単位を統合し、医療・介護従事者が読める自然な記録文にする。",
+      "原発言にない意思、感情、価値観、理由、因果関係は追加しない。",
+      "各sectionのsourceUtteranceIdsは、そのsectionの本文を直接支える発言IDだけに限定する。",
+    ],
+    section_guide: {
+      currentThought:
+        "本人の現在の希望、価値観、大切にしていること、続けたいこと、避けたいこと、生活・医療・療養・支援・意思決定について比較的明確に語られた考え。発言のコピーや列挙ではなく、医療従事者が共有しやすい1〜3文の記録文にする。sourceUtteranceIdsはその文章を直接裏づける本人発言だけに限定する。",
+      background:
+        "本人がなぜそう考えるのか。生活歴、人との関係、地域とのつながり、感情、寂しさ、不安、負担感、過去からの経緯。",
+      conditions:
+        "できる範囲、状況によること、重い作業は難しいこと、全部今まで通りでなくてもよいこと、必要な支援の条件。",
+      uncertainties:
+        "本人が直接、まだ考えていない、まだ決めていない、分からない、その時にならないと分からない、と話した内容。",
+      tensions:
+        "本人自身の複数の発言から、同時に存在する複数の思いが確認できる場合だけ。単一根拠では作らない。",
+      confirmationNeeded:
+        "記録上の不整合、slotと発言の不一致、相談相手と代理意思決定者の混在、今回の記録だけでは確定できない事項。",
+    },
+    theme_evidence: buildMinutesEvidenceGuide(minutes.json.acp_minutes_llm_input),
   };
+}
+
+function buildMinutesEvidenceGuide(input: FinalMinutesResult["json"]["acp_minutes_llm_input"]) {
+  return (input?.themes ?? []).map((theme) => ({
+    themeId: theme.theme_id,
+    title: theme.title,
+    evidence: uniqueStringsForDebug(
+      theme.aspects.flatMap((aspect) =>
+        aspect.evidence.map((evidence) => evidence.sourceUtteranceId ?? ""),
+      ),
+    ),
+    aspects: theme.aspects.map((aspect) => ({
+      aspectId: aspect.aspect_id,
+      label: aspect.label,
+      priority: aspect.priority,
+      status: aspect.status,
+      evidence: aspect.evidence.map((evidence) => ({
+        sourceUtteranceId: evidence.sourceUtteranceId,
+        speaker: evidence.speaker,
+        certainty: evidence.certainty,
+        condition: evidence.condition,
+        value: evidence.value,
+        text: evidence.evidence,
+      })),
+    })),
+  }));
 }
 
 function summarizeStructuredThemes(themes: ThemeMinutesItem[] = []) {
@@ -1431,13 +1484,19 @@ async function requestJson<T>(
   payload: unknown,
   fallback: T,
   responseFormat: unknown = { type: "json_object" },
+  options: { throwOnFailure?: boolean } = {},
 ): Promise<T> {
   const apiKey = process.env.OPENAI_API_KEY;
 
   if (!apiKey) {
+    if (options.throwOnFailure) {
+      throw new Error("OPENAI_API_KEY is not configured");
+    }
     return attachJsonRequestMeta(fallback, {
       source: "fallback",
       llmSucceeded: false,
+      failureReason: "missing_api_key",
+      errorMessage: "OPENAI_API_KEY is not configured",
     });
   }
 
@@ -1458,18 +1517,44 @@ async function requestJson<T>(
       ? attachJsonRequestMeta({ ...fallback, ...parsed } as T, {
           source: "openai",
           llmSucceeded: true,
+          rawResponse: content ?? "",
         })
-      : attachJsonRequestMeta(fallback, {
-          source: "error",
-          llmSucceeded: false,
+      : handleJsonRequestFailure(fallback, options, "LLM returned invalid JSON", {
+          failureReason: "parse_error",
+          rawResponse: content ?? "",
         });
   } catch (error) {
-    console.error("LLM request failed", describeLlmError(error));
+    const detail = describeLlmError(error);
+    console.error("LLM request failed", detail);
+    if (options.throwOnFailure) {
+      throw error instanceof Error ? error : new Error("LLM request failed");
+    }
     return attachJsonRequestMeta(fallback, {
       source: "error",
       llmSucceeded: false,
+      failureReason: "api_error",
+      errorMessage: detail.message ?? "LLM request failed",
     });
   }
+}
+
+function handleJsonRequestFailure<T>(
+  fallback: T,
+  options: { throwOnFailure?: boolean },
+  message: string,
+  meta: Pick<JsonRequestMeta, "failureReason" | "rawResponse">,
+): T {
+  if (options.throwOnFailure) {
+    throw new Error(message);
+  }
+
+  return attachJsonRequestMeta(fallback, {
+    source: "error",
+    llmSucceeded: false,
+    failureReason: meta.failureReason,
+    errorMessage: message,
+    rawResponse: meta.rawResponse,
+  });
 }
 
 function attachJsonRequestMeta<T>(value: T, meta: JsonRequestMeta): T {
@@ -1978,6 +2063,10 @@ function ensureFinalMinutesIncludeTopic(
     minutes.json && typeof minutes.json === "object"
       ? (minutes.json as Record<string, unknown>)
       : {};
+  const minutesInput =
+    rawJson.acp_minutes_llm_input && typeof rawJson.acp_minutes_llm_input === "object"
+      ? (rawJson.acp_minutes_llm_input as FinalMinutesResult["json"]["acp_minutes_llm_input"])
+      : fallback.json.acp_minutes_llm_input;
 
   return {
     markdown: minutes.markdown,
@@ -1990,11 +2079,16 @@ function ensureFinalMinutesIncludeTopic(
       discussion_topic: DISCUSSION_TOPIC,
       utterances: context.utterances,
       slots: filterAcpSlotStates(context.slotStates),
-      acp_minutes: validateACPMinutes(rawJson.acp_minutes) ?? fallback.json.acp_minutes,
-      acp_minutes_llm_input:
-        rawJson.acp_minutes_llm_input && typeof rawJson.acp_minutes_llm_input === "object"
-          ? (rawJson.acp_minutes_llm_input as FinalMinutesResult["json"]["acp_minutes_llm_input"])
-          : fallback.json.acp_minutes_llm_input,
+      acp_minutes: validateACPMinutes(rawJson.acp_minutes, minutesInput) ?? fallback.json.acp_minutes,
+      acp_minutes_llm_input: minutesInput,
+      acp_minutes_llm_meta:
+        rawJson.acp_minutes_llm_meta && typeof rawJson.acp_minutes_llm_meta === "object"
+          ? (rawJson.acp_minutes_llm_meta as FinalMinutesResult["json"]["acp_minutes_llm_meta"])
+          : fallback.json.acp_minutes_llm_meta,
+      acp_minutes_narrative_debug:
+        rawJson.acp_minutes_narrative_debug && typeof rawJson.acp_minutes_narrative_debug === "object"
+          ? (rawJson.acp_minutes_narrative_debug as FinalMinutesResult["json"]["acp_minutes_narrative_debug"])
+          : fallback.json.acp_minutes_narrative_debug,
       themes: Array.isArray(rawJson.themes)
         ? (rawJson.themes as FinalMinutesResult["json"]["themes"])
         : fallback.json.themes,
