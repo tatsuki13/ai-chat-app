@@ -175,6 +175,48 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 }
 
+export async function DELETE(_request: Request, context: RouteContext) {
+  try {
+    const { id } = await context.params;
+    const session = await prisma.session.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        _count: {
+          select: {
+            utterances: true,
+            finalMinutes: true,
+          },
+        },
+      },
+    });
+
+    if (!session) {
+      return NextResponse.json({ discarded: false, reason: "not_found" });
+    }
+
+    if (session._count.utterances > 0 || session._count.finalMinutes > 0) {
+      return NextResponse.json({
+        discarded: false,
+        reason: "session_has_content",
+      });
+    }
+
+    await prisma.session.delete({
+      where: { id },
+    });
+
+    return NextResponse.json({ discarded: true });
+  } catch (error) {
+    console.error("Failed to discard unused session", error);
+
+    return NextResponse.json(
+      { error: "Failed to discard unused session" },
+      { status: 500 },
+    );
+  }
+}
+
 function normalizeParticipantCode(value: unknown) {
   if (typeof value !== "string") return null;
 

@@ -192,7 +192,14 @@ type ReplaySessionResponse = {
   slot_states: SlotState[];
 };
 
-const STORAGE_KEY = "acp-hitl-current-session-id";
+type SessionLookupResponse = {
+  session: (SessionInfo & {
+    utterance_count: number;
+    has_final_minutes: boolean;
+  }) | null;
+};
+
+const STORAGE_KEY = "acp-hitl-pending-auto-session-id";
 const MAX_RENDERED_UTTERANCES = 30;
 const BASE_TOPIC_DURATION_MS = 5 * 60 * 1000;
 const DECISION_RATIO = 0.6;
@@ -356,20 +363,15 @@ function SessionPageClient() {
 
     async function boot() {
       try {
-        const savedId = window.localStorage.getItem(STORAGE_KEY);
-        const sessionId = requestedSessionId || savedId;
+        const pendingAutoSessionId = window.localStorage.getItem(STORAGE_KEY);
 
-        if (!sessionId) {
-          router.replace("/");
-          return;
-        }
-
-        if (sessionId) {
+        if (requestedSessionId) {
           try {
-            const restored = await fetchSessionDetail(sessionId);
+            await discardUnusedSession(pendingAutoSessionId);
+            const restored = await fetchSessionDetail(requestedSessionId);
 
             if (!ignore) {
-              window.localStorage.setItem(STORAGE_KEY, restored.session.id);
+              window.localStorage.removeItem(STORAGE_KEY);
               setSession(restored.session);
               setUtterances(restored.utterances);
               setUtteranceTotal(restored.utterance_count);
@@ -381,17 +383,22 @@ function SessionPageClient() {
 
             return;
           } catch {
-            if (!requestedSessionId || requestedSessionId === savedId) {
-              window.localStorage.removeItem(STORAGE_KEY);
-            }
-
-            if (!requestedSessionId) {
-              router.replace("/");
-              return;
-            }
-
             throw new Error("Failed to restore session");
           }
+        }
+
+        await discardUnusedSession(pendingAutoSessionId);
+        const created = await startSession();
+
+        if (!ignore) {
+          window.localStorage.setItem(STORAGE_KEY, created.id);
+          sessionRef.current = created;
+          setSession(created);
+          setUtterances([]);
+          setUtteranceTotal(0);
+          resetTopicTiming();
+          setStatusText("保存済み");
+          setBusyAction(null);
         }
       } catch {
         if (!ignore) {
@@ -737,6 +744,7 @@ function SessionPageClient() {
         [...current, utterance].slice(-MAX_RENDERED_UTTERANCES),
       );
       setUtteranceTotal((current) => current + 1);
+      markSessionUsed(session.id);
       setStatusText("保存済み");
     } catch {
       setDraft(text);
@@ -1070,6 +1078,7 @@ function SessionPageClient() {
           .slice(-MAX_RENDERED_UTTERANCES),
       );
       setUtteranceTotal((current) => current + 1);
+      markSessionUsed(currentSession.id);
       setStatusText("保存済み");
     } catch (error) {
       console.warn("Voice audio transcription failed", error);
@@ -1306,12 +1315,42 @@ function SessionPageClient() {
   async function handleNewSession() {
     if (busyAction) return;
 
-    const confirmed = window.confirm("新しいセッションを開始しますか？参加者IDの入力画面へ戻ります。");
+    const confirmed = window.confirm("新しいセッションを開始しますか？未使用の自動作成IDは破棄されます。");
     if (!confirmed) return;
 
     stopVoiceAudioInput();
-    window.localStorage.removeItem(STORAGE_KEY);
-    router.push("/");
+    setBusyAction("start");
+    setStatusText("準備中");
+    setPromptPanel(createOpeningPrompt());
+
+    try {
+      await discardUnusedSession(sessionRef.current?.id);
+      const created = await startSession();
+      window.localStorage.setItem(STORAGE_KEY, created.id);
+      sessionRef.current = created;
+      setSession(created);
+      setUtterances([]);
+      setUtteranceTotal(0);
+      setDraft("");
+      setDeveloperSlotStates([]);
+      setDeveloperSlotControl(null);
+      setDeveloperSlotError("");
+      resetTopicTiming();
+      setCompletionState("active");
+      setFinalMinutes(null);
+      setCompletionError("");
+      setStatusText("保存済み");
+      router.replace("/session");
+    } catch {
+      setStatusText("接続エラー");
+      setPromptPanel({
+        title: "セッションを開始できません",
+        body: "DATABASE_URL とデータベース接続を確認してください。",
+        tone: "error",
+      });
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   function startEditingId() {
@@ -1347,6 +1386,31 @@ function SessionPageClient() {
     setIdError("");
 
     try {
+      const existing = await lookupSessionByParticipantCode(nextId);
+
+      if (existing && existing.id !== session.id) {
+        if (existing.utterance_count === 0 && !existing.has_final_minutes) {
+          await discardUnusedSession(existing.id);
+        } else {
+          await discardUnusedSession(session.id);
+          const restored = await fetchSessionDetail(existing.id);
+          window.localStorage.removeItem(STORAGE_KEY);
+          sessionRef.current = restored.session;
+          setSession(restored.session);
+          setUtterances(restored.utterances);
+          setUtteranceTotal(restored.utterance_count);
+          setDeveloperSlotStates([]);
+          setDeveloperSlotControl(null);
+          setDraft("");
+          resetTopicTiming();
+          applyDialogueStartedAt(restored.session.dialogue_started_at);
+          setIsEditingId(false);
+          setStatusText("保存済み");
+          router.replace(`/session?sessionId=${encodeURIComponent(restored.session.id)}`);
+          return;
+        }
+      }
+
       const updated = await updateSessionDisplayId(session.id, nextId);
       setSession(updated);
       setUtterances([]);
@@ -1394,7 +1458,7 @@ function SessionPageClient() {
         participant_code: replayParticipantCode,
       });
 
-      window.localStorage.setItem(STORAGE_KEY, replay.session.id);
+      window.localStorage.removeItem(STORAGE_KEY);
       sessionRef.current = replay.session;
       setSession(replay.session);
       setUtterances(replay.utterances.slice(-MAX_RENDERED_UTTERANCES));
@@ -3170,6 +3234,59 @@ async function updateSessionDisplayId(
   );
 
   return data.session;
+}
+
+async function startSession(): Promise<SessionInfo> {
+  const data = await postJson<{ session: SessionInfo }>("/api/session/start", {
+    condition: "mvp",
+  });
+
+  return data.session;
+}
+
+async function lookupSessionByParticipantCode(
+  participantCode: string,
+): Promise<SessionLookupResponse["session"]> {
+  const response = await fetch(
+    `/api/session/lookup?participant_code=${encodeURIComponent(participantCode)}`,
+    { cache: "no-store" },
+  );
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null);
+    const errorText =
+      errorBody && typeof errorBody.error === "string"
+        ? errorBody.error
+        : "Failed to lookup session";
+
+    throw new Error(toUserFacingError(errorText));
+  }
+
+  const data = (await response.json()) as SessionLookupResponse;
+
+  return data.session;
+}
+
+async function discardUnusedSession(sessionId?: string | null) {
+  if (!sessionId) return false;
+
+  const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) return false;
+
+  const data = (await response.json().catch(() => null)) as
+    | { discarded?: boolean }
+    | null;
+
+  return data?.discarded === true;
+}
+
+function markSessionUsed(sessionId: string) {
+  if (window.localStorage.getItem(STORAGE_KEY) === sessionId) {
+    window.localStorage.removeItem(STORAGE_KEY);
+  }
 }
 
 async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {
