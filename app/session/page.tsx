@@ -178,20 +178,6 @@ type UpdateSlotsResponse = {
   slot_classification_debug?: unknown;
 };
 
-type ReplaySessionResponse = {
-  reused?: boolean;
-  session: SessionInfo;
-  source_session: {
-    participant_code: string | null;
-    started_at: string;
-    ended_at: string | null;
-    utterance_count: number;
-  };
-  utterance_count: number;
-  utterances: Utterance[];
-  slot_states: SlotState[];
-};
-
 type SessionLookupResponse = {
   session: (SessionInfo & {
     utterance_count: number;
@@ -1376,8 +1362,8 @@ function SessionPageClient() {
       return;
     }
 
-    if (isReplayParticipantCode(nextId)) {
-      await createReplaySessionFromParticipantCode(nextId);
+    if (isRecallParticipantCode(nextId)) {
+      await restoreSessionFromRecallCode(nextId);
       return;
     }
 
@@ -1386,36 +1372,8 @@ function SessionPageClient() {
     setIdError("");
 
     try {
-      const existing = await lookupSessionByParticipantCode(nextId);
-
-      if (existing && existing.id !== session.id) {
-        if (existing.utterance_count === 0 && !existing.has_final_minutes) {
-          await discardUnusedSession(existing.id);
-        } else {
-          await discardUnusedSession(session.id);
-          const restored = await fetchSessionDetail(existing.id);
-          window.localStorage.removeItem(STORAGE_KEY);
-          sessionRef.current = restored.session;
-          setSession(restored.session);
-          setUtterances(restored.utterances);
-          setUtteranceTotal(restored.utterance_count);
-          setDeveloperSlotStates([]);
-          setDeveloperSlotControl(null);
-          setDraft("");
-          resetTopicTiming();
-          applyDialogueStartedAt(restored.session.dialogue_started_at);
-          setIsEditingId(false);
-          setStatusText("保存済み");
-          router.replace(`/session?sessionId=${encodeURIComponent(restored.session.id)}`);
-          return;
-        }
-      }
-
       const updated = await updateSessionDisplayId(session.id, nextId);
       setSession(updated);
-      setUtterances([]);
-      setUtteranceTotal(0);
-      resetTopicTiming();
       setIsEditingId(false);
       setStatusText("保存済み");
     } catch (error) {
@@ -1442,53 +1400,61 @@ function SessionPageClient() {
     setIdError("");
   }
 
-  async function createReplaySessionFromParticipantCode(replayParticipantCode: string) {
-    const sourceParticipantCode = replayParticipantCode.slice("tatsuki_".length);
+  async function restoreSessionFromRecallCode(recallCode: string) {
+    const sourceParticipantCode = recallCode.slice("tatsu_".length).trim();
+    if (!sourceParticipantCode) {
+      setIdError("tatsu_ の後ろに、呼び出したい以前のIDを入れてください。");
+      return;
+    }
+
     const confirmed = window.confirm(
-      `${sourceParticipantCode} の過去ログを使って、試運転用セッション ${replayParticipantCode} を作成または再開しますか？元ログは変更しません。`,
+      `${sourceParticipantCode} の過去ログを呼び出しますか？現在の自動作成セッションが未使用なら破棄します。`,
     );
     if (!confirmed) return;
 
     setBusyAction("id");
-    setStatusText("試運転セッション作成中");
+    setStatusText("過去ログ呼び出し中");
     setIdError("");
 
     try {
-      const replay = await postJson<ReplaySessionResponse>("/api/session/replay", {
-        participant_code: replayParticipantCode,
-      });
+      const existing = await lookupSessionByParticipantCode(sourceParticipantCode);
+      if (!existing) {
+        throw new Error("source session not found");
+      }
 
+      await discardUnusedSession(session?.id);
+      const restored = await fetchSessionDetail(existing.id);
       window.localStorage.removeItem(STORAGE_KEY);
-      sessionRef.current = replay.session;
-      setSession(replay.session);
-      setUtterances(replay.utterances.slice(-MAX_RENDERED_UTTERANCES));
-      setUtteranceTotal(replay.utterance_count);
-      setDeveloperSlotStates(replay.slot_states);
+      sessionRef.current = restored.session;
+      setSession(restored.session);
+      setUtterances(restored.utterances);
+      setUtteranceTotal(restored.utterance_count);
+      setDeveloperSlotStates([]);
       setDeveloperSlotControl(null);
       setDraft("");
       setIsEditingId(false);
       setIdDraft("");
       resetTopicTiming();
+      applyDialogueStartedAt(restored.session.dialogue_started_at);
       setPromptPanel({
-        title: replay.reused ? "試運転セッションを再開しました" : "試運転セッション",
-        body: replay.reused
-          ? `${replayParticipantCode} の既存の試運転セッションを開きました。前回のスロット更新や試運転の続きから確認できます。`
-          : `${replay.source_session.participant_code ?? sourceParticipantCode} の過去ログ ${replay.source_session.utterance_count} 件をコピーしました。スロット更新や質問生成を試せます。`,
+        title: "過去ログを呼び出しました",
+        body: `${sourceParticipantCode} のログ ${restored.utterance_count} 件を開きました。`,
         tone: "status",
       });
-      setStatusText("試運転");
+      setStatusText("保存済み");
+      router.replace(`/session?sessionId=${encodeURIComponent(restored.session.id)}`);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "";
       const message =
         errorMessage === "source session not found" ||
         errorMessage.includes("source session")
-          ? "指定した元ユーザーIDの過去ログが見つかりませんでした。"
-          : "試運転セッションを作成できませんでした。";
-      const displayMessage = normalizeReplayErrorMessage(errorMessage || message);
+          ? "指定したIDの過去ログが見つかりませんでした。"
+          : "過去ログを呼び出せませんでした。";
+      const displayMessage = normalizeRecallErrorMessage(errorMessage || message);
       setIdError(displayMessage);
       setStatusText("保存エラー");
       setPromptPanel({
-        title: "試運転セッションを作成できません",
+        title: "過去ログを呼び出せません",
         body: displayMessage,
         tone: "error",
       });
@@ -1497,23 +1463,19 @@ function SessionPageClient() {
     }
   }
 
-  function isReplayParticipantCode(value: string) {
-    return /^tatsuki_.+/.test(value);
+  function isRecallParticipantCode(value: string) {
+    return /^tatsu_.+/.test(value);
   }
 
-  function normalizeReplayErrorMessage(errorMessage: string) {
+  function normalizeRecallErrorMessage(errorMessage: string) {
     if (
       errorMessage === "source session not found" ||
       errorMessage.includes("source session")
     ) {
-      return "指定した元ユーザーIDの過去ログが見つかりませんでした。tatsuki_ の後ろには、既に存在するユーザーIDを入れてください。";
+      return "指定したIDの過去ログが見つかりませんでした。tatsu_ の後ろには、既に存在するIDを入れてください。";
     }
 
-    if (errorMessage === "replay participant_code already exists as a normal session") {
-      return "この研究用IDは通常セッションとして既に使われています。別の研究用IDにしてください。";
-    }
-
-    return errorMessage || "試運転セッションを作成できませんでした。";
+    return errorMessage || "過去ログを呼び出せませんでした。";
   }
 
   function handleIdKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -3269,6 +3231,7 @@ async function lookupSessionByParticipantCode(
 
 async function discardUnusedSession(sessionId?: string | null) {
   if (!sessionId) return false;
+  if (window.localStorage.getItem(STORAGE_KEY) !== sessionId) return false;
 
   const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}`, {
     method: "DELETE",

@@ -111,40 +111,10 @@ export async function PATCH(request: Request, context: RouteContext) {
       );
     }
 
-    const [, , session] = await prisma.$transaction([
-      prisma.sessionUtterance.deleteMany({
-        where: { sessionId: id },
-      }),
-      prisma.finalMinute.deleteMany({
-        where: { sessionId: id },
-      }),
-      prisma.session.update({
-        where: { id },
-        data: {
-          participantCode,
-          dialogueStartedAt: null,
-        },
-      }),
-    ]);
-
-    await prisma.slotState.updateMany({
-      where: { sessionId: id },
+    const session = await prisma.session.update({
+      where: { id },
       data: {
-        status: "unanswered",
-        summary: "",
-        evidenceUtterance: null,
-      },
-    });
-    await prisma.slotSubState.updateMany({
-      where: { sessionId: id },
-      data: {
-        completion: "none",
-        responseState: "no_response",
-        reasonCode: "not_discussed",
-        evidenceUtteranceIds: [],
-        canAskAgain: true,
-        isDeferred: false,
-        lastUpdatedTopicId: null,
+        participantCode,
       },
     });
 
@@ -186,6 +156,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
           select: {
             utterances: true,
             finalMinutes: true,
+            remoteMicTokens: true,
           },
         },
       },
@@ -195,7 +166,11 @@ export async function DELETE(_request: Request, context: RouteContext) {
       return NextResponse.json({ discarded: false, reason: "not_found" });
     }
 
-    if (session._count.utterances > 0 || session._count.finalMinutes > 0) {
+    if (
+      session._count.utterances > 0 ||
+      session._count.finalMinutes > 0 ||
+      session._count.remoteMicTokens > 0
+    ) {
       return NextResponse.json({
         discarded: false,
         reason: "session_has_content",
