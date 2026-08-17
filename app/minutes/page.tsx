@@ -62,6 +62,20 @@ type AspectSourceRecord = {
   aspect_id?: string;
   label?: string;
   status?: string;
+  completion?: "none" | "partial" | "complete";
+  responseState?:
+    | "answered"
+    | "no_response"
+    | "explicit_none"
+    | "not_considered"
+    | "unable_to_verbalize"
+    | "declined"
+    | "ambiguous"
+    | "conflicting";
+  reasonCode?: string | null;
+  canAskAgain?: boolean;
+  isDeferred?: boolean;
+  evidence?: EvidenceRecord[];
 };
 
 type EvidenceRecord = {
@@ -550,7 +564,7 @@ function FollowUpSection(props: { items: string[] }) {
     <section className="minutes-subsection mt-10 border-t border-stone-200 pt-6">
       <h2 className="text-[19px] font-black text-stone-950">今後確認したいこと</h2>
       <p className="mt-2 text-[12px] font-semibold leading-6 text-stone-600">
-        ここには、本人が迷っている内容ではなく、今回の対話では十分に確認できていない情報を整理しています。
+        ここには、今回の対話で未確認の情報と、確認を見送った項目や保留として残した項目を整理しています。
       </p>
       <ul className="mt-4 space-y-2">
         {props.items.map((item) => (
@@ -725,16 +739,85 @@ function buildFollowUpItems(value: unknown) {
     const themeTitle = theme.title || "このテーマ";
     const aspects = Array.isArray(theme.aspects) ? theme.aspects : [];
     return aspects
-      .filter((aspect) => shouldShowFollowUp(aspect.status))
-      .map((aspect) => `${themeTitle}について、「${aspect.label || "未確認の項目"}」はまだ十分に確認されていません。`);
+      .map((aspect) => buildFollowUpItem(themeTitle, aspect))
+      .filter((item): item is string => Boolean(item));
   });
 
   return uniqueStrings(items).slice(0, 8);
 }
 
-function shouldShowFollowUp(status: unknown) {
-  const value = typeof status === "string" ? status : "";
-  return value !== "" && !["filled", "complete", "answered"].includes(value);
+function buildFollowUpItem(themeTitle: string, aspect: AspectSourceRecord) {
+  const label = aspect.label || "未確認の項目";
+  const completion = aspect.completion;
+  const responseState = aspect.responseState;
+  const status = typeof aspect.status === "string" ? aspect.status : "";
+
+  if (completion === "complete" || ["filled", "complete", "answered"].includes(status)) {
+    return null;
+  }
+
+  const prefix = `${themeTitle}について、「${label}」は`;
+  const evidenceText = buildFollowUpEvidenceText(aspect.evidence);
+  const deferredText =
+    aspect.isDeferred && aspect.canAskAgain !== false
+      ? "関連する話題になったときに、自然に確認できる内容として残します。"
+      : "";
+
+  switch (responseState) {
+    case "answered":
+      return [
+        evidenceText
+          ? `${prefix}${evidenceText}という発言から一部確認できていますが、まだ部分的な確認にとどまっています。`
+          : `${prefix}発言はありますが、まだ部分的な確認にとどまっています。`,
+        deferredText,
+      ].filter(Boolean).join("");
+    case "no_response":
+      return [
+        `${prefix}今回の対話ではまだ話題になっていません。`,
+        deferredText,
+      ].filter(Boolean).join("");
+    case "explicit_none":
+      return `${prefix}本人から特にない、または該当するものはないとの意向が示されています。`;
+    case "not_considered":
+      return `${prefix}現時点ではまだ具体的には考えていない、または分からないとのことです。`;
+    case "unable_to_verbalize":
+      return `${prefix}今回は十分に言葉にすることが難しい状態でした。`;
+    case "declined":
+      return `${prefix}今回は話したくないとの意向が示されたため、それ以上の確認は行っていません。`;
+    case "ambiguous":
+      return [
+        `${prefix}発言はありますが、今回の対話では意向を十分に明確化できていません。`,
+        deferredText,
+      ].filter(Boolean).join("");
+    case "conflicting":
+      return [
+        `${prefix}複数の発言があり、現時点では考えが一つに整理されていません。`,
+        deferredText,
+      ].filter(Boolean).join("");
+    default:
+      if (status === "partial") {
+        return [
+          evidenceText
+            ? `${prefix}${evidenceText}という発言から一部確認できていますが、まだ部分的な確認にとどまっています。`
+            : `${prefix}一部確認できていますが、まだ部分的な確認にとどまっています。`,
+          deferredText,
+        ].filter(Boolean).join("");
+      }
+      if (status === "empty") {
+        return [
+          `${prefix}今回の対話ではまだ話題になっていません。`,
+          deferredText,
+        ].filter(Boolean).join("");
+      }
+      return null;
+  }
+}
+
+function buildFollowUpEvidenceText(evidence: EvidenceRecord[] | undefined) {
+  const first = evidence?.[0]?.evidenceText;
+  if (!first) return "";
+  const text = firstSentence(stripSpeakerPrefix(first)).replace(/[。.!?！？]$/, "");
+  return text ? `「${text}」` : "";
 }
 
 function themeHasNarrativeText(theme: ThemeForDisplay) {

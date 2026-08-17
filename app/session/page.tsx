@@ -1422,7 +1422,10 @@ function SessionPageClient() {
         throw new Error("source session not found");
       }
 
-      await discardUnusedSession(session?.id);
+      if (existing.id !== session?.id) {
+        await discardUnusedSession(session?.id);
+      }
+
       const restored = await fetchSessionDetail(existing.id);
       window.localStorage.removeItem(STORAGE_KEY);
       sessionRef.current = restored.session;

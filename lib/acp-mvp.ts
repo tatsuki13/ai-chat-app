@@ -663,6 +663,11 @@ export type AspectMinutesItem = {
   label: string;
   priority: AspectPriority;
   status: AspectStatus;
+  completion?: SlotCompletion;
+  responseState?: SlotClassificationResponseState;
+  reasonCode?: SlotReasonCode | null;
+  canAskAgain?: boolean;
+  isDeferred?: boolean;
   evidence: EvidenceReference[];
 };
 
@@ -809,6 +814,11 @@ export type ACPMinutesLLMInput = {
       label: string;
       priority: AspectPriority;
       status: AspectStatus;
+      completion?: SlotCompletion;
+      responseState?: SlotClassificationResponseState;
+      reasonCode?: SlotReasonCode | null;
+      canAskAgain?: boolean;
+      isDeferred?: boolean;
       evidence: ACPAspectEvidence[];
     }>;
   }>;
@@ -1707,6 +1717,11 @@ function buildThemeMinutesItems(
         label: aspect.label,
         priority: aspect.priority,
         status,
+        completion: stored?.completion,
+        responseState: stored?.responseState,
+        reasonCode: stored?.reasonCode,
+        canAskAgain: stored?.canAskAgain,
+        isDeferred: stored?.isDeferred,
         evidence: aspectEvidence,
       };
     });
@@ -1746,6 +1761,11 @@ export function buildACPMinutesLLMInput(themes: ThemeMinutesItem[]): ACPMinutesL
             label: aspect.label,
             priority: aspect.priority,
             status: aspect.status,
+            completion: aspect.completion,
+            responseState: aspect.responseState,
+            reasonCode: aspect.reasonCode,
+            canAskAgain: aspect.canAskAgain,
+            isDeferred: aspect.isDeferred,
             evidence: aspect.evidence
               .map((evidence) => toACPAspectEvidence(evidence))
               .filter((evidence): evidence is ACPAspectEvidence => Boolean(evidence)),
