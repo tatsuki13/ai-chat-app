@@ -569,13 +569,14 @@ export const SLOT_REASON_CODES = [
 ] as const;
 
 export type NextQuestionResult = {
-  question: string;
+  question: string | null;
   transition_phrase: string;
   target_slot: AcpSlotName | string;
   targetMainSlotId?: string;
   targetSubSlotId?: string;
   reason: string;
   sensitivity: Sensitivity;
+  no_relevant_followup?: boolean;
 };
 
 export type TopicSwitchResult = {
@@ -2086,26 +2087,12 @@ function buildFallbackThemeNarratives(input: ACPMinutesLLMInput): ACPMinutes["na
   const narratives: ACPMinutes["narratives"] = {};
 
   input.themes.forEach((theme) => {
-    const groups = getNarrativeAspectGroups(theme.theme_id);
-    const currentThought = null;
-    const background = buildGroundedTextFromAspects(theme, groups.background);
-    const conditions = buildGroundedTextListFromAspects(theme, groups.conditions);
-    const uncertainties = buildGroundedTextListFromAspects(theme, groups.uncertainties);
-    const tensions = buildGroundedTextListFromAspects(
-      theme,
-      theme.aspects
-        .filter((aspect) =>
-          aspect.evidence.some((evidence) => evidence.certainty === "迷いあり"),
-        )
-        .map((aspect) => aspect.aspect_id),
-    );
-
     narratives[theme.theme_id] = {
-      currentThought,
-      background,
-      conditions,
-      uncertainties,
-      tensions: tensions.length >= 2 ? tensions : [],
+      currentThought: null,
+      background: null,
+      conditions: [],
+      uncertainties: [],
+      tensions: [],
       confirmationNeeded: [],
     };
   });
@@ -2226,10 +2213,10 @@ function normalizeThemeNarratives(
               normalizeGroundedText((themeNarrative as Record<string, unknown>).background, themeId, evidenceIndex, { rejectRawCopy: true }) ??
               fallbackTheme.background ??
               null,
-            conditions: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).conditions, themeId, evidenceIndex, fallbackTheme.conditions),
-            uncertainties: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).uncertainties, themeId, evidenceIndex, fallbackTheme.uncertainties),
-            tensions: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).tensions, themeId, evidenceIndex, fallbackTheme.tensions),
-            confirmationNeeded: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).confirmationNeeded, themeId, evidenceIndex, fallbackTheme.confirmationNeeded),
+            conditions: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).conditions, themeId, evidenceIndex, fallbackTheme.conditions, { rejectRawCopy: true }),
+            uncertainties: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).uncertainties, themeId, evidenceIndex, fallbackTheme.uncertainties, { rejectRawCopy: true, section: "uncertainties" }),
+            tensions: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).tensions, themeId, evidenceIndex, fallbackTheme.tensions, { rejectRawCopy: true, section: "tensions" }),
+            confirmationNeeded: normalizeGroundedTextArray((themeNarrative as Record<string, unknown>).confirmationNeeded, themeId, evidenceIndex, fallbackTheme.confirmationNeeded, { rejectRawCopy: true }),
           }
         : fallbackTheme;
   });
@@ -2290,12 +2277,14 @@ function groundedTextDebugRows(
 function normalizeGroundedTextArray(
   value: unknown,
   themeId: keyof ACPMinutes["themes"],
-  evidenceIndex: Map<string, { themeId: string; speaker?: ACPAspectSpeaker }> | null,
+  evidenceIndex: Map<string, { themeId: string; speaker?: ACPAspectSpeaker; text?: string }> | null,
   fallback: GroundedMinutesText[] = [],
+  options: { rejectRawCopy?: boolean; section?: "uncertainties" | "tensions" } = {},
 ) {
   if (!Array.isArray(value)) return fallback;
   const items = value
-    .map((item) => normalizeGroundedText(item, themeId, evidenceIndex))
+    .map((item) => normalizeGroundedText(item, themeId, evidenceIndex, options))
+    .map((item) => filterGroundedTextBySectionRules(item, options.section, evidenceIndex))
     .filter((item): item is GroundedMinutesText => Boolean(item));
 
   return items.length > 0 ? items : fallback;
@@ -2339,6 +2328,37 @@ function normalizeGroundedText(
   };
 }
 
+function filterGroundedTextBySectionRules(
+  item: GroundedMinutesText | null,
+  section: "uncertainties" | "tensions" | undefined,
+  evidenceIndex: Map<string, { text?: string }> | null,
+) {
+  if (!item || !section) return item;
+  const sourceTexts = evidenceIndex
+    ? item.sourceUtteranceIds.map((id) => evidenceIndex.get(id)?.text ?? "").join("\n")
+    : "";
+  const combinedText = `${item.text}\n${sourceTexts}`;
+
+  if (section === "uncertainties" && !hasExplicitUncertaintyForMinutes(combinedText)) {
+    return null;
+  }
+
+  if (section === "tensions") {
+    if (item.sourceUtteranceIds.length < 2) return null;
+    if (!hasExplicitTensionForMinutes(combinedText)) return null;
+  }
+
+  return item;
+}
+
+function hasExplicitUncertaintyForMinutes(text: string) {
+  return /(分からない|わからない|分かんない|まだ.*(?:決め|考え)|決めていない|決まっていない|考えたことがない|迷っている|迷う|何とも言えない|なんとも言えない)/.test(text);
+}
+
+function hasExplicitTensionForMinutes(text: string) {
+  return /(一方|反面|ただ|ただし|しかし|でも|けれど|けど|両方|同時に|迷|悩|気になる|心配|不安|負担|避けたい|したくない)/.test(text);
+}
+
 function buildMinutesEvidenceIndex(input: ACPMinutesLLMInput) {
   const index = new Map<string, { themeId: string; speaker?: ACPAspectSpeaker; text?: string }>();
   input.themes.forEach((theme) => {
@@ -2365,13 +2385,38 @@ function looksLikeRawEvidenceCopy(
   if (!normalizedNarrative) return false;
   if (/^「.*」$/.test(narrativeText.trim())) return true;
 
+  const normalizedEvidenceTexts = sourceUtteranceIds
+    .map((id) => evidenceIndex.get(id)?.text ?? "")
+    .map((text) => normalizeForMinutesCopyCheck(text))
+    .filter((text) => text.length >= 10);
+  if (normalizedEvidenceTexts.length === 0) return false;
+
+  if (normalizedEvidenceTexts.some((evidenceText) => {
+    if (evidenceText.length < 12) return false;
+    if (normalizedNarrative === evidenceText) return true;
+    if (evidenceText.length >= 18 && normalizedNarrative.includes(evidenceText)) return true;
+    return false;
+  })) {
+    return true;
+  }
+
+  const includedEvidenceTexts = normalizedEvidenceTexts.filter((evidenceText) =>
+    evidenceText.length >= 12 && normalizedNarrative.includes(evidenceText),
+  );
+  if (includedEvidenceTexts.length >= 2) return true;
+
+  const copiedLength = includedEvidenceTexts.reduce((total, evidenceText) => total + evidenceText.length, 0);
+  if (sourceUtteranceIds.length >= 2 && copiedLength / normalizedNarrative.length >= 0.55) {
+    return true;
+  }
+
   return sourceUtteranceIds.some((id) => {
     const evidenceText = evidenceIndex.get(id)?.text;
     if (!evidenceText) return false;
     const normalizedEvidence = normalizeForMinutesCopyCheck(evidenceText);
-    if (normalizedEvidence.length < 12) return false;
+    if (normalizedEvidence.length < 10) return false;
 
-    return normalizedNarrative === normalizedEvidence;
+    return similarityRatio(normalizedNarrative, normalizedEvidence) >= 0.92;
   });
 }
 
@@ -2381,6 +2426,39 @@ function normalizeForMinutesCopyCheck(value: string) {
     .replace(/[「」『』"'\s、。,.，．！？!?]/g, "")
     .toLowerCase()
     .trim();
+}
+
+function similarityRatio(a: string, b: string) {
+  if (!a || !b) return 0;
+  const longer = a.length >= b.length ? a : b;
+  const shorter = a.length >= b.length ? b : a;
+  if (shorter.length === 0) return 0;
+  if (longer.includes(shorter)) return shorter.length / longer.length;
+
+  const distance = levenshteinDistance(longer, shorter);
+  return 1 - distance / longer.length;
+}
+
+function levenshteinDistance(a: string, b: string) {
+  const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  const current = Array.from({ length: b.length + 1 }, () => 0);
+
+  for (let i = 1; i <= a.length; i += 1) {
+    current[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + cost,
+      );
+    }
+    for (let j = 0; j <= b.length; j += 1) {
+      previous[j] = current[j];
+    }
+  }
+
+  return previous[b.length];
 }
 
 function getSourceUtteranceIdsForAspects(

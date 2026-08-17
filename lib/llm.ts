@@ -136,14 +136,16 @@ const SYSTEM_NEXT_QUESTION = [
   "質問は高齢者を責めず、答えやすく、介護者がそのまま読み上げられる日本語にしてください。",
   "重すぎる話題へ急に飛ばず、既に十分話されている内容を繰り返さないでください。",
   "next_question_input.askableSubSlots に含まれる mainSlotId/subSlotId の組み合わせだけを targetMainSlotId/targetSubSlotId に指定してください。",
-  "askableSubSlots が空の場合は、追加質問ではなく話題転換や終了確認を促す短い文にしてください。",
+  "askableSubSlots は、アプリケーション側が現在テーマ内かつ直近発話と自然に関連すると判断した候補です。askableSubSlots が空の場合は question を null、no_relevant_followup を true にしてください。",
+  "未確認であることだけを理由に質問してはいけません。直近発話や会話文脈と自然につながる候補だけを質問してください。",
+  "質問生成処理では次テーマへの遷移を実行・提案しないでください。関連候補がなければ追加質問なしとして返してください。",
   "出力はJSONのみとしてください。",
   "",
   "出力形式:",
   "Use next_question_input.slotBackedMemory as the stable record of what has already been captured in slots.",
   "Use next_question_input.unassignedRecentUtterances as possible conversational cues, but do not treat them as confirmed slot content unless the utterance itself clearly supports the question.",
   "When slotBackedMemory and recentUtterances conflict, prefer slotBackedMemory for coverage decisions and recentUtterances for natural wording.",
-  '{"question":"...","transition_phrase":"...","target_slot":"...","targetMainSlotId":"...","targetSubSlotId":"...","reason":"...","sensitivity":"low | medium | high"}',
+  '{"question":"... | null","transition_phrase":"...","target_slot":"...","targetMainSlotId":"...","targetSubSlotId":"...","reason":"...","sensitivity":"low | medium | high","no_relevant_followup":false}',
 ].join("\n");
 
 const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
@@ -210,13 +212,20 @@ const SYSTEM_FINAL_MINUTES_FROM_STRUCTURED = [
   "not_decidedというslot状態だけを根拠に、本人が決めていないと本文化しないでください。本人の直接発言または本人確認のあるevidenceが必要です。",
   "同じutteranceが複数sub-slotに関係していても、根拠発言カードでは1回だけ表示されます。本文では、そのutteranceがどのsectionを支えるかsourceUtteranceIdsで追跡できるようにしてください。",
   "Narrative writing process: before writing each narrative field, internally convert each evidence utterance into meaning units that are directly confirmable from that utterance, then integrate compatible meaning units into natural Japanese clinical record text.",
+  "narrative.text is not an excerpt area. The original utterances will be shown separately through sourceUtteranceIds, so never put the raw utterance text itself into narrative.text.",
   "Do not quote the original utterances in order, lightly rewrite each utterance one by one, or chain phrases such as 「〜と話している」「〜と述べている」. Your role is to express the confirmed meaning, not to reproduce the transcript.",
+  "Do not create one sentence per source utterance. Do not try to reflect every sourceUtteranceId in the body text. Choose the minimum sufficient utterance IDs for the meaning you actually wrote.",
   "You may rephrase for readability, but you must not add intentions, emotions, values, reasons, causal links, medical judgments, or future preferences that are not directly supported by the evidence.",
   "When the utterance contains uncertainty or conditions such as 「できれば」「今のところ」「家族が大丈夫なら」「体が動くうちは」, preserve that strength and condition. Do not make the preference stronger or more definite than the utterance.",
   "If multiple utterances point in the same direction, integrate them into one meaning cluster. If the relationship between utterances is unclear, use confirmationNeeded rather than inventing a causal or emotional connection.",
   "For every narrative field, sourceUtteranceIds must include only the utterances that directly support the final written text for that field. Do not use theme-level evidence IDs just because they are related to the theme.",
+  "Field boundary rule: currentThought is for what the person currently values, hopes for, or wants to maintain. background is only for directly stated reasons, life history, relationships, or meaning behind that currentThought. conditions is only for explicit conditions or limits. uncertainties is only for explicit not-knowing or undecided statements. tensions is only for genuinely different wishes or concerns coexisting in the person; related wishes pointing in the same direction are not tensions. confirmationNeeded is for record-level ambiguity or missing interpretive conditions, not the person's psychological conflict.",
   "Bad currentThought example: 「本人は『できれば家がいい』と話しており、『病院にずっといるのは嫌』と話している。」 This is only a quote list.",
   "Good currentThought example: 「本人は、可能であれば自宅で家族と普段通りに過ごすことを希望している。長期間病院で過ごすことには抵抗を示している。」 with sourceUtteranceIds limited to the utterances that directly support those meanings.",
+  "Garden example: utterances about seeing garden flowers, caring for flowers, talking with neighbors, and preferring ordinary days should be integrated as 「本人は、庭の花を見たり世話をしたり、近所の人と会話したりする、これまで通りの日常生活を大切にしている。特別なことよりも、普段通りの暮らしを続けられることを望んでいる。」 Do not list the utterances themselves.",
+  "Garden background example: long-term flower growing, long-term neighborhood relationships, and feeling that flower care and neighbor conversations mean ordinary life can continue should be background, not separate currentThought items.",
+  "Garden condition example: 「できる間は庭のことは自分でやりたい」 should become a conditions item such as 「本人は、身体的に可能な範囲では、庭の世話を自分で続けたいと考えている。」",
+  "Garden tension rule: garden flowers, neighbor conversation, and ordinary daily life all point in the same direction, so tensions must be empty unless a separate conflicting concern is directly stated.",
   "Over-interpretation example to avoid: from 「家がいいかな」「家族と一緒がいい」, do not write 「家族に介護してもらいながら自宅で最期を迎えることを希望している」 because care by family and final place of death were not stated.",
   "currentThought-specific rule: do not copy or list the user's utterances. Write 1 to 3 natural Japanese record sentences that communicate the person's current wishes, values, priorities, things they want to continue, things they want to avoid, or relatively clear views about support/decision-making.",
   "currentThought-specific rule: include only content directly supported by the person's own utterances. Do not treat a clinician question, caregiver interpretation, or general ACP value as the person's value.",
@@ -965,6 +974,7 @@ export async function generateNextQuestion(
     context.utterances,
     context.slotStates,
     context.currentTopic,
+    context.subSlotStates,
   );
   const result = await requestJson<Partial<NextQuestionResult>>(
     SYSTEM_NEXT_QUESTION,
@@ -1030,6 +1040,9 @@ export async function generateFinalMinutes(
     buildStructuredMinutesPayload(fallback),
     {},
     { type: "json_object" },
+    {
+      timeoutMs: Number(process.env.FINAL_MINUTES_OPENAI_TIMEOUT_MS || 90000),
+    },
   );
   const requestMeta = result.__requestMeta ?? {
     source: "fallback",
@@ -1064,6 +1077,7 @@ export async function generateFinalMinutes(
         acp_minutes_narrative_debug: buildFinalMinutesNarrativeDebug({
           input: fallback.json.acp_minutes_llm_input,
           rawResponse: result,
+          normalizedMinutes: validatedMinutes,
           requestMeta,
           narrativeStatus,
           fallbackUsed: validatedMinutes === baseMinutes,
@@ -1097,11 +1111,14 @@ function getNarrativeGenerationStatus(
 function buildFinalMinutesNarrativeDebug(input: {
   input?: FinalMinutesResult["json"]["acp_minutes_llm_input"];
   rawResponse: { overall_summary?: unknown; narratives?: unknown; __requestMeta?: JsonRequestMeta };
+  normalizedMinutes?: ACPMinutes;
   requestMeta: JsonRequestMeta;
   narrativeStatus: NarrativeGenerationStatus;
   fallbackUsed: boolean;
 }) {
   const themes = input.input?.themes ?? [];
+  const rawResponseText = input.requestMeta.rawResponse;
+  const parsedRawResponse = rawResponseText ? parseJson(rawResponseText) : null;
   return {
     status: input.narrativeStatus,
     llmAttempted: input.requestMeta.failureReason !== "missing_api_key",
@@ -1113,6 +1130,8 @@ function buildFinalMinutesNarrativeDebug(input: {
     failureReason: input.requestMeta.failureReason,
     errorMessage: input.requestMeta.errorMessage,
     rawResponse: input.requestMeta.rawResponse,
+    parsedResponse: parsedRawResponse,
+    normalizedNarratives: input.normalizedMinutes?.narratives ?? null,
     themes: themes.map((theme) => ({
       themeId: theme.theme_id,
       inputEvidenceCount: theme.aspects.reduce((count, aspect) => count + aspect.evidence.length, 0),
@@ -1170,18 +1189,19 @@ function buildStructuredMinutesPayload(minutes: FinalMinutesResult) {
       "同じ方向性の意味単位を統合し、医療・介護従事者が読める自然な記録文にする。",
       "原発言にない意思、感情、価値観、理由、因果関係は追加しない。",
       "各sectionのsourceUtteranceIdsは、そのsectionの本文を直接支える発言IDだけに限定する。",
+      "sourceUtteranceIdsに含めた全発言を本文へ反映しようとせず、本文と根拠発言の役割を分離する。",
     ],
     section_guide: {
       currentThought:
-        "本人の現在の希望、価値観、大切にしていること、続けたいこと、避けたいこと、生活・医療・療養・支援・意思決定について比較的明確に語られた考え。発言のコピーや列挙ではなく、医療従事者が共有しやすい1〜3文の記録文にする。sourceUtteranceIdsはその文章を直接裏づける本人発言だけに限定する。",
+        "本人の現在の希望、価値観、大切にしていること、続けたいこと、避けたいこと、望んでいる生活。単なる行動の羅列ではなく、複数の具体的行動の背後に共通する意味が確認できる場合は統合する。発言のコピーや列挙ではなく、医療従事者が共有しやすい1〜3文の記録文にする。sourceUtteranceIdsはその文章を直接裏づける最小十分な本人発言だけに限定する。",
       background:
-        "本人がなぜそう考えるのか。生活歴、人との関係、地域とのつながり、感情、寂しさ、不安、負担感、過去からの経緯。",
+        "currentThoughtがなぜ本人にとって大切なのかについて、本人発言から直接確認できる背景、生活歴、理由、意味づけ。単なる別の希望をbackgroundへ入れない。",
       conditions:
-        "できる範囲、状況によること、重い作業は難しいこと、全部今まで通りでなくてもよいこと、必要な支援の条件。",
+        "本人の希望に明示的な条件や制約がある場合だけ。できる範囲、身体が動くうちは、家族が大丈夫なら、必要になれば、今は以前ほどできない等。",
       uncertainties:
         "本人が直接、まだ考えていない、まだ決めていない、分からない、その時にならないと分からない、と話した内容。",
       tensions:
-        "本人自身の複数の発言から、同時に存在する複数の思いが確認できる場合だけ。単一根拠では作らない。",
+        "本人自身の複数の発言から、異なる方向性を持つ希望・価値・懸念が同時に存在すると確認できる場合だけ。庭の花、近所との交流、普段通りの生活のように同じ方向の内容はtensionsではない。",
       confirmationNeeded:
         "記録上の不整合、slotと発言の不一致、相談相手と代理意思決定者の混在、今回の記録だけでは確定できない事項。",
     },
@@ -1484,7 +1504,7 @@ async function requestJson<T>(
   payload: unknown,
   fallback: T,
   responseFormat: unknown = { type: "json_object" },
-  options: { throwOnFailure?: boolean } = {},
+  options: { throwOnFailure?: boolean; timeoutMs?: number } = {},
 ): Promise<T> {
   const apiKey = process.env.OPENAI_API_KEY;
 
@@ -1501,7 +1521,9 @@ async function requestJson<T>(
   }
 
   try {
-    const openai = getClient(apiKey);
+    const openai = options.timeoutMs
+      ? new OpenAI({ apiKey, timeout: options.timeoutMs })
+      : getClient(apiKey);
     const completion = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL || "gpt-4o-mini",
       messages: [
@@ -1622,58 +1644,87 @@ function normalizeNextQuestionResult(
     currentTopic.slot_name as AcpSlotName,
   );
 
-  if (
-    isTerminalSlotStatus(currentSlot?.status) ||
-    followUpCount >= currentTopic.maxFollowUpQuestions
-  ) {
-    return {
-      question:
-        "この話題については、今の時点のお考えを確認できたようです。必要であれば、次の話題へ移ってもよさそうです。",
-      transition_phrase: "",
-      target_slot: currentTopic.slot_name,
-      reason:
-        isTerminalSlotStatus(currentSlot?.status)
-          ? "本人の回答状態が確認できているため、追加質問を停止しました。"
-          : "この話題の追加質問上限に達したため、追加質問を停止しました。",
-      sensitivity: getSlotSensitivity(currentTopic.slot_name as AcpSlotName),
-    };
+  if (followUpCount >= currentTopic.maxFollowUpQuestions) {
+    return noRelevantFollowUpResult(
+      currentTopic.slot_name as AcpSlotName,
+      "この話題の追加質問上限に達したため、追加質問を停止しました。",
+    );
   }
 
-  const targetSlot = normalizeAcpTargetSlot(result.target_slot, fallback.target_slot);
+  const shouldPreferFallbackDepthQuestion =
+    isTerminalSlotStatus(currentSlot?.status) &&
+    looksLikeMoveOnQuestion(result.question);
+  const nextResult = shouldPreferFallbackDepthQuestion ? fallback : result;
+
+  const targetSlot = normalizeAcpTargetSlot(nextResult.target_slot, fallback.target_slot);
   const targetMainSlotId =
-    typeof result.targetMainSlotId === "string" ? result.targetMainSlotId : "";
+    typeof nextResult.targetMainSlotId === "string" ? nextResult.targetMainSlotId : "";
   const targetSubSlotId =
-    typeof result.targetSubSlotId === "string" ? result.targetSubSlotId : "";
-  const askableSubSlots = buildAskableSubSlotsForQuestionPayload(
+    typeof nextResult.targetSubSlotId === "string" ? nextResult.targetSubSlotId : "";
+  const askableSubSlots = buildRelevantAskableSubSlotsForQuestionPayload(
     buildSlotControlDebugState({
       slots: filterAcpSlotStates(context.slotStates),
       currentTopic: currentTopic.slot_name,
       subSlotStates: context.subSlotStates,
     }),
     context.subSlotStates ?? [],
+    context.utterances,
   );
+
+  if (askableSubSlots.length === 0) {
+    return noRelevantFollowUpResult(
+      currentTopic.slot_name as AcpSlotName,
+      "直近発話と自然につながる追加質問候補が現在テーマ内にないため、質問生成を停止しました。",
+    );
+  }
+
   const hasValidTargetSubSlot =
     !targetMainSlotId && !targetSubSlotId
-      ? true
+      ? false
       : askableSubSlots.some(
           (slot) =>
             slot.mainSlotId === targetMainSlotId &&
             slot.subSlotId === targetSubSlotId,
         );
-  const question = nonEmpty(result.question, fallback.question);
+  const question = nonEmptyNullable(nextResult.question, fallback.question);
   const shouldUseFallbackQuestion =
-    isRepeatedQuestion(context.utterances, question, targetSlot) ||
+    (question ? isRepeatedQuestion(context.utterances, question, targetSlot) : false) ||
     !isQuestionRelevantToCurrentTopic(context, targetSlot) ||
     !hasValidTargetSubSlot;
 
   return {
     question: shouldUseFallbackQuestion ? fallback.question : question,
-    transition_phrase: nonEmpty(result.transition_phrase, fallback.transition_phrase),
+    transition_phrase: question
+      ? nonEmpty(nextResult.transition_phrase, fallback.transition_phrase)
+      : "",
     target_slot: shouldUseFallbackQuestion ? fallback.target_slot : targetSlot,
     targetMainSlotId: shouldUseFallbackQuestion ? undefined : targetMainSlotId || undefined,
     targetSubSlotId: shouldUseFallbackQuestion ? undefined : targetSubSlotId || undefined,
-    reason: nonEmpty(result.reason, fallback.reason),
-    sensitivity: normalizeSensitivity(result.sensitivity, fallback.sensitivity),
+    reason: nonEmpty(nextResult.reason, fallback.reason),
+    sensitivity: normalizeSensitivity(nextResult.sensitivity, fallback.sensitivity),
+    no_relevant_followup:
+      shouldUseFallbackQuestion
+        ? fallback.no_relevant_followup
+        : nextResult.no_relevant_followup === true || !question,
+  };
+}
+
+function looksLikeMoveOnQuestion(value: unknown) {
+  const text = typeof value === "string" ? value : "";
+  return /次の話題|移っても|話題転換|終了確認|終えて/.test(text);
+}
+
+function noRelevantFollowUpResult(
+  targetSlot: AcpSlotName,
+  reason: string,
+): NextQuestionResult {
+  return {
+    question: null,
+    transition_phrase: "",
+    target_slot: targetSlot,
+    reason,
+    sensitivity: getSlotSensitivity(targetSlot),
+    no_relevant_followup: true,
   };
 }
 
@@ -1863,9 +1914,10 @@ async function buildQuestionPayload(context: ConversationContext) {
     slotControl,
     fallbackQuestionScope,
   );
-  const askableSubSlots = buildAskableSubSlotsForQuestionPayload(
+  const askableSubSlots = buildRelevantAskableSubSlotsForQuestionPayload(
     slotControl,
     context.subSlotStates ?? [],
+    context.utterances,
   );
   const slotBackedMemory = buildSlotBackedQuestionMemory(
     currentTopic.id,
@@ -1956,6 +2008,147 @@ function buildAskableSubSlotsForQuestionPayload(
         responseState: stored?.responseState ?? "no_response",
       };
     });
+}
+
+function buildRelevantAskableSubSlotsForQuestionPayload(
+  debugState: SlotControlDebugState,
+  subSlotStates: StoredSubSlotState[],
+  utterances: ConversationUtterance[],
+) {
+  const candidates = buildAskableSubSlotsForQuestionPayload(debugState, subSlotStates);
+  const currentMainSlot = debugState.mainSlots.find((slot) => slot.isCurrentTopic);
+  if (!currentMainSlot) return [];
+
+  const latestElderText = latestElderUtteranceText(utterances);
+  const recentText = recentUtterances(utterances, 5)
+    .map((utterance) => utterance.text)
+    .join("\n");
+  const latestIsUncertain = Boolean(classifyUncertainResponse(latestElderText));
+  const statesBySubSlotId = new Map(
+    subSlotStates
+      .filter((state) => state.mainSlotId === currentMainSlot.topicId)
+      .map((state) => [state.subSlotId, state]),
+  );
+
+  const scored = currentMainSlot.subSlots
+    .map((slot) => {
+      const baseCandidate = candidates.find((candidate) => candidate.subSlotId === slot.id);
+      const stored = statesBySubSlotId.get(slot.id);
+      if (!baseCandidate && !canAskOptionalSubSlot(slot.priority, stored)) return null;
+
+      const score = scoreSubSlotRelevance({
+        id: slot.id,
+        label: slot.label,
+        latestText: latestElderText,
+        recentText,
+      });
+      const threshold = latestIsUncertain ? 3 : 2;
+      if (score < threshold) return null;
+
+      return {
+        ...(baseCandidate ?? {
+          mainSlotId: currentMainSlot.topicId,
+          subSlotId: slot.id,
+          label: slot.label,
+          description:
+            resolveSubSlotDefinition(currentMainSlot.topicId, slot.id)?.description ??
+            slot.label,
+          completion: stored?.completion ?? "none",
+          responseState: stored?.responseState ?? "no_response",
+        }),
+        priority: slot.priority,
+        relevanceScore: score,
+        relevanceReason: `直近発話と「${slot.label}」の関連性から候補にしました。`,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    .sort((left, right) => {
+      if (right.relevanceScore !== left.relevanceScore) {
+        return right.relevanceScore - left.relevanceScore;
+      }
+
+      return priorityRank(left.priority) - priorityRank(right.priority);
+    });
+
+  return scored.slice(0, 3);
+}
+
+function canAskOptionalSubSlot(
+  priority: string,
+  state: StoredSubSlotState | undefined,
+) {
+  if (priority === "core") return false;
+  if (!state) return true;
+  if (state.completion === "complete") return false;
+
+  return ![
+    "explicit_none",
+    "declined",
+    "not_considered",
+    "unable_to_verbalize",
+  ].includes(state.responseState);
+}
+
+function priorityRank(priority: string) {
+  if (priority === "core") return 0;
+  if (priority === "optional") return 1;
+  return 2;
+}
+
+function latestElderUtteranceText(utterances: ConversationUtterance[]) {
+  return [...utterances].reverse().find((utterance) => isElderSpeaker(utterance.speaker))?.text ?? "";
+}
+
+function scoreSubSlotRelevance(input: {
+  id: string;
+  label: string;
+  latestText: string;
+  recentText: string;
+}) {
+  const text = `${input.latestText}\n${input.recentText}`;
+  const normalized = normalizeAnswerText(text);
+  if (!normalized) return 0;
+
+  let score = 0;
+  for (const keyword of relevanceKeywordsForSubSlot(input.id, input.label)) {
+    if (normalized.includes(normalizeAnswerText(keyword))) score += 2;
+  }
+
+  if (input.label && normalized.includes(normalizeAnswerText(input.label))) score += 3;
+  if (input.latestText && hasKeyword(input.latestText, relevanceKeywordsForSubSlot(input.id, input.label))) {
+    score += 1;
+  }
+
+  return score;
+}
+
+function relevanceKeywordsForSubSlot(id: string, label: string) {
+  const base = label
+    .split(/[、・\s/]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const byId: Record<string, string[]> = {
+    valued_routine: ["散歩", "毎朝", "毎日", "日課", "習慣", "庭", "手入れ", "畑"],
+    hobby_or_joy: ["楽し", "趣味", "好き", "散歩", "庭", "花", "会う", "話", "うれしい"],
+    relationships: ["近所", "人", "友", "家族", "会う", "話", "交流", "つながり"],
+    role: ["役割", "仕事", "手伝", "頼ら", "任され"],
+    attachment: ["自宅", "家", "地域", "近所", "庭", "住み慣れ"],
+    reason: ["大切", "理由", "なぜ", "支え", "意味", "安心", "楽し"],
+    continued_activity: ["続け", "散歩", "庭", "手入れ", "活動", "趣味"],
+    continued_relationship: ["続け", "近所", "人", "友", "家族", "会う", "交流"],
+    preferred_environment: ["自宅", "家", "地域", "近所", "暮らし"],
+    not_want_to_lose: ["失いたく", "続け", "大切", "できれば", "自宅"],
+    acceptable_support: ["手助け", "支援", "助け", "受け入れ"],
+    unacceptable_support: ["嫌", "避け", "不安", "心配", "受け入れにくい"],
+    support_person: ["誰", "家族", "娘", "息子", "近所", "頼み"],
+    request: ["家族", "お願い", "伝え", "頼み"],
+    burden_concern: ["負担", "迷惑", "心配", "家族"],
+    trusted_person: ["信頼", "相談", "任せ", "家族", "娘", "息子"],
+    trust_reason: ["理由", "なぜ", "信頼", "安心"],
+    values_to_share: ["知って", "価値観", "大切", "伝え"],
+  };
+
+  return [...new Set([...base, ...(byId[id] ?? [])])];
 }
 
 function buildSlotBackedQuestionMemory(
@@ -2121,6 +2314,8 @@ function applyUncertaintyNextQuestionPolicy(
   context: ConversationContext,
   result: NextQuestionResult,
 ): NextQuestionResult {
+  if (result.no_relevant_followup || !result.question) return result;
+
   const response = getLatestUncertainResponse(context);
   if (!response) return result;
 
@@ -2152,6 +2347,7 @@ function fallbackNextQuestion(
   utterances: ConversationUtterance[],
   slotStates: AcpSlotState[],
   currentTopic?: string,
+  subSlotStates: StoredSubSlotState[] = [],
 ): NextQuestionResult {
   const recentText = recentUtterances(utterances, 5)
     .map((utterance) => utterance.text)
@@ -2160,23 +2356,40 @@ function fallbackNextQuestion(
   const preferredSlot = preferredTopic.slot_name as AcpSlotName;
   const preferredState = findSlotState(slotStates, preferredSlot);
   const followUpCount = countPromptsForSlot(utterances, preferredSlot);
-  const canCompletePreferredTheme =
-    Boolean(getSlotResponseState(preferredState)) ||
-    followUpCount >= preferredTopic.maxFollowUpQuestions;
+  const followUpSubSlot = findFallbackFollowUpSubSlot(
+    preferredTopic.id,
+    subSlotStates,
+    utterances,
+    slotStates,
+  );
+  const canCompletePreferredTheme = followUpCount >= preferredTopic.maxFollowUpQuestions;
 
   if (canCompletePreferredTheme) {
+    return noRelevantFollowUpResult(
+      preferredSlot,
+      "この話題の追加質問上限に達したため、追加質問を停止しました。",
+    );
+  }
+
+  if (followUpSubSlot) {
     return {
-      question:
-        "この話題については、今の時点のお考えを確認できたようです。必要であれば、次の話題へ移ってもよさそうです。",
-      transition_phrase: "",
+      question: questionForSubSlotFollowUp(followUpSubSlot.label),
+      transition_phrase: recentText ? "今のお話に関連して、" : "",
       target_slot: preferredSlot,
-      reason:
-        followUpCount >= preferredTopic.maxFollowUpQuestions
-          ? "この話題の追加質問上限に達したため、追加質問を停止しました。"
-          : "本人の回答状態が確認できているため、追加質問を停止しました。",
+      targetMainSlotId: preferredTopic.id,
+      targetSubSlotId: followUpSubSlot.id,
+      reason: `現在テーマのcore項目「${followUpSubSlot.label}」をもう少し確認します。`,
       sensitivity: getSlotSensitivity(preferredSlot),
     };
   }
+
+  if (getSlotResponseState(preferredState)) {
+    return noRelevantFollowUpResult(
+      preferredSlot,
+      "現在テーマは回答済みで、直近発話と自然につながる追加質問候補がありません。",
+    );
+  }
+
   const contextualSlot = ACP_SLOT_NAMES.find((slotName) =>
     hasKeyword(recentText, SLOT_KEYWORDS[slotName]),
   );
@@ -2195,6 +2408,46 @@ function fallbackNextQuestion(
     reason: "直近の会話と未充足スロットの状態から、自然につながりやすい確認項目として選びました。",
     sensitivity: getSlotSensitivity(targetSlot),
   };
+}
+
+function findFallbackFollowUpSubSlot(
+  mainSlotId: string,
+  subSlotStates: StoredSubSlotState[],
+  utterances: ConversationUtterance[],
+  slotStates: AcpSlotState[],
+) {
+  const topic = DISCUSSION_TOPICS.find((item) => item.id === mainSlotId);
+  if (!topic) return null;
+
+  const debugState = buildSlotControlDebugState({
+    slots: filterAcpSlotStates(slotStates),
+    currentTopic: topic.slot_name,
+    subSlotStates,
+  });
+  const [candidate] = buildRelevantAskableSubSlotsForQuestionPayload(
+    debugState,
+    subSlotStates,
+    utterances,
+  );
+  if (!candidate) return null;
+
+  return topic.aspects.find((aspect) => aspect.id === candidate.subSlotId) ?? null;
+}
+
+function questionForSubSlotFollowUp(label: string) {
+  if (/理由|なぜ/.test(label)) {
+    return "それがご本人にとって大切な理由や、そう感じる背景をもう少し聞いてもよいですか。";
+  }
+
+  if (/不安|負担|避け|受け入れにくい|失いたくない|してほしくない/.test(label)) {
+    return "反対に、できれば避けたいことや心配なことはありますか。";
+  }
+
+  if (/誰|人|家族|信頼|相談/.test(label)) {
+    return "そのことで関わってほしい人や、伝えておきたい相手はいますか。";
+  }
+
+  return `今のお話に関連して、「${label}」についてもう少し聞いてもよいですか。`;
 }
 
 function fallbackTopicSwitch(context: ConversationContext): TopicSwitchResult {
@@ -2590,6 +2843,12 @@ function normalizeSensitivity(value: unknown, fallback: Sensitivity): Sensitivit
 }
 
 function nonEmpty(value: unknown, fallback: string) {
+  const text = typeof value === "string" ? value.trim() : "";
+
+  return text || fallback;
+}
+
+function nonEmptyNullable(value: unknown, fallback: string | null) {
   const text = typeof value === "string" ? value.trim() : "";
 
   return text || fallback;

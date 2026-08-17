@@ -48,6 +48,22 @@ type ACPMinutes = {
   };
 };
 
+type MinutesJson = {
+  themes?: ThemeSourceRecord[];
+};
+
+type ThemeSourceRecord = {
+  theme_id?: string;
+  title?: string;
+  aspects?: AspectSourceRecord[];
+};
+
+type AspectSourceRecord = {
+  aspect_id?: string;
+  label?: string;
+  status?: string;
+};
+
 type EvidenceRecord = {
   themeId?: string;
   aspectId?: string;
@@ -59,6 +75,13 @@ type EvidenceRecord = {
 type ThemeDefinition = {
   id: string;
   title: string;
+};
+
+type ThemeGroupDefinition = {
+  id: string;
+  title: string;
+  description: string;
+  themeIds: string[];
 };
 
 type SectionEvidenceMap = {
@@ -91,6 +114,27 @@ const THEME_ORDER: readonly ThemeDefinition[] = [
   {
     id: "proxy_decision_support",
     title: "もし自分で医療や介護について決めることが難しくなったら",
+  },
+];
+
+const THEME_GROUPS: readonly ThemeGroupDefinition[] = [
+  {
+    id: "life",
+    title: "A. 大切にしている暮らし",
+    description: "本人が今大切にしている生活と、これからも続けたいこと。",
+    themeIds: ["current_life_values", "future_life_continuity"],
+  },
+  {
+    id: "support",
+    title: "B. 支援を受けるときに大切にしてほしいこと",
+    description: "本人らしさを保つための支援の受け方や配慮。",
+    themeIds: ["selfhood", "care_support"],
+  },
+  {
+    id: "decision",
+    title: "C. 家族・意思決定について",
+    description: "本人・家族・専門職が意思決定するときに大切にしてほしいこと。",
+    themeIds: ["family_communication", "proxy_decision_support"],
   },
 ];
 
@@ -153,6 +197,10 @@ function MinutesPageClient() {
     () => buildThemesForDisplay(minutes, evidenceByTheme),
     [minutes, evidenceByTheme],
   );
+  const themeGroups = useMemo(() => buildThemeGroups(themes), [themes]);
+  const overviewItems = useMemo(() => buildOverviewItems(minutes, themes), [minutes, themes]);
+  const respectItems = useMemo(() => buildRespectItems(themes), [themes]);
+  const followUpItems = useMemo(() => buildFollowUpItems(minutesJson), [minutesJson]);
   const hasNarrativeContent = themes.some(themeHasNarrativeText);
   const hasEvidenceOnly = !hasNarrativeContent && themes.some((theme) => theme.evidence.length > 0);
 
@@ -213,16 +261,18 @@ function MinutesPageClient() {
           createdAt={data.final_minutes.created_at}
           title={minutes.title || "これからの暮らしと大切にしたいこと"}
         />
-        <MinutesOverview minutes={minutes} />
+        <MinutesOverview items={overviewItems} />
+        <RespectPriorities items={respectItems} />
         {hasEvidenceOnly ? (
           <MissingNarrativeNotice sessionId={sessionId} />
         ) : (
-          <div className="mt-9 space-y-8">
-            {themes.map((theme) => (
-              <ThemeSection key={theme.id} theme={theme} />
+          <div className="mt-10 space-y-10">
+            {themeGroups.map((group) => (
+              <ThemeGroup key={group.id} group={group} />
             ))}
           </div>
         )}
+        <FollowUpSection items={followUpItems} />
         <MinutesFooter />
       </article>
     </MinutesShell>
@@ -273,30 +323,73 @@ function MinutesHeader(props: {
   );
 }
 
-function MinutesOverview(props: { minutes: ACPMinutes }) {
-  const items = uniqueStrings([
-    ...summaryTexts(props.minutes.overall_summary?.core_values),
-    ...summaryTexts(props.minutes.overall_summary?.cross_theme_connections),
-  ]).slice(0, 4);
-
+function MinutesOverview(props: { items: string[] }) {
   return (
-    <section className="minutes-subsection mt-6 rounded-md border border-emerald-100 bg-emerald-50 px-5 py-4">
+    <section className="minutes-subsection mt-6 rounded-md border border-emerald-100 bg-emerald-50 px-5 py-5">
       <h2 className="text-[17px] font-black text-stone-950">
-        今回の話し合いから見えてきたこと
+        今回の対話から見えた本人像
       </h2>
-      <p className="mt-2 text-[13px] font-semibold leading-7 text-stone-700">
-        この記録の「現在の考え」「その背景・理由」などの文章は、実際の話し合いで語られた発言を根拠として、内容を変えない範囲で読みやすく整理しています。
-        各テーマ末尾の「根拠となった発言」では、整理のもとになった実際の発言を確認できます。
-      </p>
-      {items.length > 0 ? (
+      {props.items.length > 0 ? (
         <div className="mt-4 space-y-3">
-          {items.map((item) => (
+          {props.items.map((item) => (
             <p key={item} className="text-[14px] font-semibold leading-8 text-stone-800">
               {item}
             </p>
           ))}
         </div>
-      ) : null}
+      ) : (
+        <p className="mt-3 text-[14px] font-semibold leading-7 text-stone-700">
+          今回の対話から確認できた本人像は、各テーマの詳細に整理されています。
+        </p>
+      )}
+      <p className="mt-4 border-t border-emerald-100 pt-3 text-[12px] font-semibold leading-6 text-stone-600">
+        各文章は、実際の発言を根拠として内容を変えない範囲で整理しています。必要な場合は、各項目の根拠発言を開いて確認できます。
+      </p>
+    </section>
+  );
+}
+
+function RespectPriorities(props: { items: string[] }) {
+  if (props.items.length === 0) return null;
+
+  return (
+    <section className="minutes-subsection mt-5 rounded-md border border-stone-200 bg-white px-5 py-5">
+      <h2 className="text-[17px] font-black text-stone-950">
+        医療・介護で特に尊重したいこと
+      </h2>
+      <ul className="mt-4 grid gap-2 sm:grid-cols-2">
+        {props.items.map((item) => (
+          <li
+            key={item}
+            className="rounded-md border border-stone-200 bg-stone-50 px-3 py-2 text-[13px] font-bold leading-6 text-stone-800"
+          >
+            {item}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ThemeGroup(props: { group: ThemeGroupDefinition & { themes: ThemeForDisplay[] } }) {
+  const visibleThemes = props.group.themes.filter(themeHasNarrativeText);
+  if (visibleThemes.length === 0) return null;
+
+  return (
+    <section className="minutes-group border-t-2 border-stone-900 pt-6">
+      <div>
+        <h2 className="text-[22px] font-black leading-snug text-stone-950">
+          {props.group.title}
+        </h2>
+        <p className="mt-1 text-[13px] font-semibold leading-6 text-stone-600">
+          {props.group.description}
+        </p>
+      </div>
+      <div className="mt-6 space-y-8">
+        {visibleThemes.map((theme) => (
+          <ThemeSection key={theme.id} theme={theme} />
+        ))}
+      </div>
     </section>
   );
 }
@@ -307,7 +400,7 @@ function ThemeSection(props: { theme: ThemeForDisplay }) {
   if (!hasContent) return null;
 
   return (
-    <section className="minutes-theme border-t border-stone-200 pt-7">
+    <section className="minutes-theme rounded-md border border-stone-200 bg-white px-5 py-5">
       <div className="flex items-baseline gap-3">
         <span className="inline-flex h-7 min-w-7 items-center justify-center rounded-md bg-stone-900 px-2 text-[12px] font-black text-white">
           {props.theme.number}
@@ -329,7 +422,7 @@ function ThemeSection(props: { theme: ThemeForDisplay }) {
           evidence={props.theme.evidenceBySection.background}
         />
         <TextSection
-          title="条件によって変わること"
+          title={conditionSectionTitle(props.theme.id)}
           values={props.theme.conditions}
           evidence={props.theme.evidenceBySection.conditions}
           tone="condition"
@@ -417,14 +510,56 @@ function EvidenceSection(props: { evidence: EvidenceRecord[] }) {
   if (evidence.length === 0) return null;
 
   return (
-    <div className="mt-4 border-t border-stone-200 pt-3">
-      <h4 className="text-[13px] font-black text-stone-700">根拠となった発言</h4>
-      <div className="mt-3 space-y-3">
-        {evidence.map((item, index) => (
-          <EvidenceCard key={`${item.evidenceUtteranceId ?? index}-${index}`} evidence={item} />
-        ))}
+    <>
+      <details className="evidence-details print-hidden mt-4 border-t border-stone-200 pt-3">
+        <summary className="cursor-pointer text-[13px] font-black text-stone-700">
+          根拠となった発言（{evidence.length}件）
+        </summary>
+        <div className="mt-3 space-y-3">
+          {evidence.map((item, index) => (
+            <EvidenceCard key={`${item.evidenceUtteranceId ?? index}-${index}`} evidence={item} />
+          ))}
+        </div>
+      </details>
+      <div className="hidden print:block mt-3 border-t border-stone-200 pt-2">
+        <h4 className="text-[11px] font-black text-stone-600">根拠となった発言</h4>
+        <div className="mt-2 space-y-1">
+          {evidence.slice(0, 2).map((item, index) => (
+            <p
+              key={`${item.evidenceUtteranceId ?? index}-print-${index}`}
+              className="text-[10px] font-semibold leading-5 text-stone-700"
+            >
+              {speakerLabel(item.speaker)}: {quoteText(stripSpeakerPrefix(item.evidenceText ?? ""))}
+            </p>
+          ))}
+          {evidence.length > 2 ? (
+            <p className="text-[10px] font-bold text-stone-500">
+              ほか {evidence.length - 2} 件の根拠発言あり
+            </p>
+          ) : null}
+        </div>
       </div>
-    </div>
+    </>
+  );
+}
+
+function FollowUpSection(props: { items: string[] }) {
+  if (props.items.length === 0) return null;
+
+  return (
+    <section className="minutes-subsection mt-10 border-t border-stone-200 pt-6">
+      <h2 className="text-[19px] font-black text-stone-950">今後確認したいこと</h2>
+      <p className="mt-2 text-[12px] font-semibold leading-6 text-stone-600">
+        ここには、本人が迷っている内容ではなく、今回の対話では十分に確認できていない情報を整理しています。
+      </p>
+      <ul className="mt-4 space-y-2">
+        {props.items.map((item) => (
+          <li key={item} className="text-[13px] font-semibold leading-7 text-stone-800">
+            {item}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -541,6 +676,67 @@ function buildThemesForDisplay(
   });
 }
 
+function buildThemeGroups(themes: ThemeForDisplay[]) {
+  const themeById = new Map(themes.map((theme) => [theme.id, theme]));
+
+  return THEME_GROUPS.map((group) => ({
+    ...group,
+    themes: group.themeIds
+      .map((themeId) => themeById.get(themeId))
+      .filter((theme): theme is ThemeForDisplay => Boolean(theme)),
+  }));
+}
+
+function buildOverviewItems(minutes: ACPMinutes | null, themes: ThemeForDisplay[]) {
+  const summaryItems = uniqueStrings([
+    ...summaryTexts(minutes?.overall_summary?.core_values),
+    ...summaryTexts(minutes?.overall_summary?.cross_theme_connections),
+  ]);
+  if (summaryItems.length > 0) return summaryItems.slice(0, 4);
+
+  return uniqueStrings(
+    themes.flatMap((theme) => theme.currentThought).map(firstSentence),
+  ).slice(0, 4);
+}
+
+function buildRespectItems(themes: ThemeForDisplay[]) {
+  const preferredOrder = [
+    "current_life_values",
+    "future_life_continuity",
+    "selfhood",
+    "care_support",
+    "family_communication",
+    "proxy_decision_support",
+  ];
+  const themeById = new Map(themes.map((theme) => [theme.id, theme]));
+  const candidates = preferredOrder.flatMap((themeId) => {
+    const theme = themeById.get(themeId);
+    if (!theme) return [];
+    return [...theme.currentThought, ...theme.conditions].map(firstSentence);
+  });
+
+  return uniqueStrings(candidates.map(toRespectItem)).filter(Boolean).slice(0, 6);
+}
+
+function buildFollowUpItems(value: unknown) {
+  const json = value && typeof value === "object" ? (value as MinutesJson) : {};
+  const themes = Array.isArray(json.themes) ? json.themes : [];
+  const items = themes.flatMap((theme) => {
+    const themeTitle = theme.title || "このテーマ";
+    const aspects = Array.isArray(theme.aspects) ? theme.aspects : [];
+    return aspects
+      .filter((aspect) => shouldShowFollowUp(aspect.status))
+      .map((aspect) => `${themeTitle}について、「${aspect.label || "未確認の項目"}」はまだ十分に確認されていません。`);
+  });
+
+  return uniqueStrings(items).slice(0, 8);
+}
+
+function shouldShowFollowUp(status: unknown) {
+  const value = typeof status === "string" ? status : "";
+  return value !== "" && !["filled", "complete", "answered"].includes(value);
+}
+
 function themeHasNarrativeText(theme: ThemeForDisplay) {
   return (
     theme.currentThought.length > 0 ||
@@ -550,6 +746,14 @@ function themeHasNarrativeText(theme: ThemeForDisplay) {
     theme.tensions.length > 0 ||
     theme.confirmationNeeded.length > 0
   );
+}
+
+function conditionSectionTitle(themeId: string) {
+  if (themeId === "selfhood" || themeId === "care_support") {
+    return "支援や生活の中で配慮してほしいこと";
+  }
+  if (themeId === "future_life_continuity") return "できる範囲・条件";
+  return "状況によって大切になること";
 }
 
 function getACPMinutes(value: unknown): ACPMinutes | null {
@@ -633,6 +837,23 @@ function summaryTexts(items: Array<{ text?: string }> | undefined) {
   return (items ?? [])
     .map((item) => item.text?.trim())
     .filter((text): text is string => Boolean(text));
+}
+
+function firstSentence(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const match = trimmed.match(/^.+?[。.!?！？]/);
+  return (match ? match[0] : trimmed).trim();
+}
+
+function toRespectItem(value: string) {
+  return value
+    .replace(/^本人は、?/, "")
+    .replace(/と考えている。$/, "こと")
+    .replace(/を希望している。$/, "を希望している")
+    .replace(/を大切にしている。$/, "を大切にしている")
+    .replace(/です。$/, "")
+    .trim();
 }
 
 function dedupeEvidence(evidence: EvidenceRecord[]) {

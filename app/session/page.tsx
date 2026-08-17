@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   buildSlotControlDebugState,
   DISCUSSION_TOPIC,
@@ -233,6 +233,7 @@ export default function SessionPage() {
 }
 
 function SessionPageClient() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const requestedSessionId = searchParams.get("sessionId")?.trim() ?? "";
   const [session, setSession] = useState<SessionInfo | null>(null);
@@ -355,11 +356,17 @@ function SessionPageClient() {
 
     async function boot() {
       try {
-        const savedId = requestedSessionId || window.localStorage.getItem(STORAGE_KEY);
+        const savedId = window.localStorage.getItem(STORAGE_KEY);
+        const sessionId = requestedSessionId || savedId;
 
-        if (savedId) {
+        if (!sessionId) {
+          router.replace("/");
+          return;
+        }
+
+        if (sessionId) {
           try {
-            const restored = await fetchSessionDetail(savedId);
+            const restored = await fetchSessionDetail(sessionId);
 
             if (!ignore) {
               window.localStorage.setItem(STORAGE_KEY, restored.session.id);
@@ -374,19 +381,17 @@ function SessionPageClient() {
 
             return;
           } catch {
-            window.localStorage.removeItem(STORAGE_KEY);
+            if (!requestedSessionId || requestedSessionId === savedId) {
+              window.localStorage.removeItem(STORAGE_KEY);
+            }
+
+            if (!requestedSessionId) {
+              router.replace("/");
+              return;
+            }
+
+            throw new Error("Failed to restore session");
           }
-        }
-
-        const created = await startSession();
-
-        if (!ignore) {
-          window.localStorage.setItem(STORAGE_KEY, created.id);
-          setSession(created);
-          setUtteranceTotal(0);
-          resetTopicTiming();
-          setStatusText("保存済み");
-          setBusyAction(null);
         }
       } catch {
         if (!ignore) {
@@ -406,7 +411,7 @@ function SessionPageClient() {
     return () => {
       ignore = true;
     };
-  }, [requestedSessionId]);
+  }, [requestedSessionId, router]);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -1211,16 +1216,7 @@ function SessionPageClient() {
           current_topic: currentTopic.slot_name,
           current_topic_title: currentTopic.title,
         });
-        const body = joinPrompt(
-          data.suggestion.transition_phrase,
-          data.suggestion.question,
-        );
-
-        setPromptPanel({
-          title: "AIからの質問",
-          body,
-          tone: "question",
-        });
+        setPromptPanel(createQuestionPromptPanel(data.suggestion, "AIからの質問"));
       }
 
       if (buttonType === "check_end") {
@@ -1250,16 +1246,10 @@ function SessionPageClient() {
               current_topic_title: currentTopic.title,
             },
           );
-          const body = joinPrompt(
-            questionData.suggestion.transition_phrase,
-            questionData.suggestion.question,
-          );
-
-          setPromptPanel({
-            title: "全体としてもう少し確認",
-            body,
-            tone: "question",
-          });
+          setPromptPanel(createQuestionPromptPanel(
+            questionData.suggestion,
+            "全体としてもう少し確認",
+          ));
         } else {
           showEndConfirmation(data.suggestion.reason || data.suggestion.message);
           return;
@@ -1316,42 +1306,12 @@ function SessionPageClient() {
   async function handleNewSession() {
     if (busyAction) return;
 
-    const confirmed = window.confirm("新しいセッションを開始しますか？");
+    const confirmed = window.confirm("新しいセッションを開始しますか？参加者IDの入力画面へ戻ります。");
     if (!confirmed) return;
 
     stopVoiceAudioInput();
-    setBusyAction("start");
-    setPromptPanel(createOpeningPrompt());
-    setIsEditingId(false);
-    setIdError("");
-    setDeveloperSlotStates([]);
-    setDeveloperSlotControl(null);
-    setDeveloperSlotError("");
-    setDeveloperSlotLoading(false);
-    resetTopicTiming();
-
-    try {
-      const created = await startSession();
-      window.localStorage.setItem(STORAGE_KEY, created.id);
-      sessionRef.current = created;
-      setSession(created);
-      setUtterances([]);
-      setUtteranceTotal(0);
-      setDraft("");
-      setDeveloperSlotStates([]);
-      setDeveloperSlotControl(null);
-      resetTopicTiming();
-      setStatusText("保存済み");
-    } catch {
-      setStatusText("接続エラー");
-      setPromptPanel({
-        title: "セッションを開始できません",
-        body: "DATABASE_URL とデータベース接続を確認してください。",
-        tone: "error",
-      });
-    } finally {
-      setBusyAction(null);
-    }
+    window.localStorage.removeItem(STORAGE_KEY);
+    router.push("/");
   }
 
   function startEditingId() {
@@ -1605,9 +1565,7 @@ function SessionPageClient() {
         current_topic_title: currentTopic.title,
       });
       setPromptPanel({
-        title: "AIからの質問",
-        body: joinPrompt(data.suggestion.transition_phrase, data.suggestion.question),
-        tone: "question",
+        ...createQuestionPromptPanel(data.suggestion, "AIからの質問"),
       });
       await refreshDeveloperSlotStates(session.id);
       setStatusText("保存済み");
@@ -2057,7 +2015,7 @@ function SessionPageClient() {
               }}
             />
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
               <ActionButton
                 label="次の話題へ"
                 tone="emerald"
@@ -2078,13 +2036,6 @@ function SessionPageClient() {
                 busy={busyAction === "check_end"}
                 disabled={!session || Boolean(busyAction)}
                 onClick={() => handleAction("check_end")}
-              />
-              <ActionButton
-                label="議事録生成"
-                tone="stone"
-                busy={busyAction === "update_slots"}
-                disabled={!session || Boolean(busyAction)}
-                onClick={() => handleAction("update_slots")}
               />
             </div>
           </div>
@@ -3008,14 +2959,6 @@ function ActionButton(props: {
   );
 }
 
-async function startSession(): Promise<SessionInfo> {
-  const data = await postJson<{ session: SessionInfo }>("/api/session/start", {
-    condition: "mvp",
-  });
-
-  return data.session;
-}
-
 async function fetchSessionDetail(sessionId: string): Promise<{
   session: SessionInfo;
   utterance_count: number;
@@ -3245,7 +3188,7 @@ async function requestJson<T = unknown>(
   const response = await fetch(url, {
     method,
     headers: {
-      "Content-Type": "application/json",
+      "Content-Type": "application/json; charset=utf-8",
     },
     body: JSON.stringify(body),
   });
@@ -3299,7 +3242,29 @@ function toUserFacingError(error: string) {
   return error;
 }
 
-function joinPrompt(transition: string, question: string) {
+function createQuestionPromptPanel(
+  suggestion: NextQuestionResponse["suggestion"],
+  title: string,
+): PromptPanelState {
+  const body = joinPrompt(suggestion.transition_phrase, suggestion.question);
+
+  if (suggestion.no_relevant_followup || !body) {
+    return {
+      title: "追加質問なし",
+      body: "今の話題では、直近のお話から自然につながる追加質問は見つかりませんでした。必要であれば「次の話題へ」で進めます。",
+      tone: "status",
+    };
+  }
+
+  return {
+    title,
+    body,
+    tone: "question",
+  };
+}
+
+function joinPrompt(transition: string, question: string | null) {
+  if (!question) return "";
   if (!transition) return question;
   return `${transition}${question}`;
 }
@@ -3402,12 +3367,10 @@ function decideConversationAction(input: {
       : { type: "switch_topic", reason: "次のテーマへ進みます。" };
   }
 
-  if (input.intent === "generate_question" && currentCoreNeedsQuestion) {
-    return { type: "generate_question", reason: "現在テーマに確認すべきcore項目があります。" };
-  }
-
-  if (!allTopicsPresented) {
-    return { type: "switch_topic", reason: "現在テーマは十分話せているため、質問生成せず次テーマへ進みます。" };
+  if (input.intent === "generate_question") {
+    return currentCoreNeedsQuestion
+      ? { type: "generate_question", reason: "現在テーマに確認すべきcore項目があります。" }
+      : { type: "generate_question", reason: "現在テーマをもう少し深める質問を生成します。" };
   }
 
   return { type: "generate_question", reason: "終了前に不足確認を行います。" };
@@ -3523,8 +3486,9 @@ function formatTimerSeconds(seconds: number) {
 
 type NextQuestionResponse = {
   suggestion: {
-    question: string;
+    question: string | null;
     transition_phrase: string;
+    no_relevant_followup?: boolean;
   };
 };
 
