@@ -13,6 +13,7 @@ import {
 import { buildSemanticSlotControlDebugState } from "../../../../../lib/llm";
 import { prisma } from "../../../../../lib/prisma";
 import { requireAdminOrSessionAccess } from "../../../../../lib/auth";
+import { hasDatabaseColumn } from "../../../../../lib/db-compat";
 
 export const runtime = "nodejs";
 
@@ -28,20 +29,7 @@ export async function GET(_request: Request, context: RouteContext) {
     const auth = await requireAdminOrSessionAccess(_request, id);
     if ("response" in auth) return auth.response;
 
-    const session = await prisma.session.findUnique({
-      where: { id },
-      include: {
-        utterances: {
-          orderBy: { createdAt: "asc" },
-        },
-        slotStates: true,
-        subSlotStates: true,
-        finalMinutes: {
-          orderBy: { createdAt: "desc" },
-          take: 10,
-        },
-      },
-    });
+    const session = await loadAdminSessionDetail(id);
 
     if (!session) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
@@ -144,6 +132,69 @@ export async function GET(_request: Request, context: RouteContext) {
       { status: 500 },
     );
   }
+}
+
+async function loadAdminSessionDetail(id: string) {
+  const hasProgressColumns = await hasDatabaseColumn("sessions", "current_topic_id");
+  const hasDepthColumn = await hasDatabaseColumn("slot_sub_states", "depth");
+
+  return prisma.session.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      participantCode: true,
+      condition: true,
+      startedAt: true,
+      dialogueStartedAt: true,
+      endedAt: true,
+      ...(hasProgressColumns
+        ? {
+            currentTopicId: true,
+            currentTopicIndex: true,
+            topicStartedAt: true,
+            conversationPhase: true,
+            topicPausedMs: true,
+          }
+        : {}),
+      utterances: {
+        orderBy: { createdAt: "asc" },
+      },
+      slotStates: true,
+      subSlotStates: hasDepthColumn
+        ? true
+        : {
+            select: {
+              id: true,
+              sessionId: true,
+              mainSlotId: true,
+              subSlotId: true,
+              completion: true,
+              responseState: true,
+              reasonCode: true,
+              evidenceUtteranceIds: true,
+              canAskAgain: true,
+              isDeferred: true,
+              lastUpdatedTopicId: true,
+              updatedAt: true,
+            },
+          },
+      finalMinutes: {
+        orderBy: { createdAt: "desc" },
+        take: 10,
+      },
+    },
+  }).then((session) =>
+    session
+      ? {
+          ...session,
+          currentTopicId: hasProgressColumns ? session.currentTopicId : null,
+          currentTopicIndex: hasProgressColumns ? session.currentTopicIndex : 0,
+          topicStartedAt: hasProgressColumns ? session.topicStartedAt : null,
+          conversationPhase: hasProgressColumns ? session.conversationPhase : null,
+          topicPausedMs: hasProgressColumns ? session.topicPausedMs : 0,
+        }
+      : null,
+  );
 }
 
 function optionalString(value: unknown) {

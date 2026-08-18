@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
+import { hasDatabaseTable } from "./db-compat";
 import { toJsonValue } from "./acp-mvp";
 import { AI_POLICY_VERSION, getOpenAIModel } from "./llm";
 
@@ -25,6 +26,8 @@ export async function writeAiActionEvent(input: {
   metadata?: unknown;
 }) {
   try {
+    if (!(await hasDatabaseTable("ai_action_events"))) return;
+
     await prisma.aiActionEvent.create({
       data: {
         sessionId: input.sessionId,

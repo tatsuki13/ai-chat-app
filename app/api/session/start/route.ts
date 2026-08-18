@@ -6,7 +6,11 @@ import { createInitialSlotStates } from "../../../../lib/acp-store";
 import { issueSessionAccessToken } from "../../../../lib/auth";
 import { AI_POLICY_VERSION } from "../../../../lib/llm";
 import { DISCUSSION_TOPICS } from "../../../../lib/acp-mvp";
-import { isMissingColumnError, rememberSessionTokenHash } from "../../../../lib/db-compat";
+import {
+  hasDatabaseColumn,
+  isMissingColumnError,
+  rememberSessionTokenHash,
+} from "../../../../lib/db-compat";
 
 export const runtime = "nodejs";
 
@@ -111,6 +115,23 @@ async function createSessionWithCompat(input: {
   accessTokenHash: string;
   protocolVersion?: string;
 }) {
+  if (!(await hasModernSessionColumns())) {
+    const session = await createLegacySessionRaw({
+      participantCode: input.participantCode,
+      condition: input.condition,
+    });
+    rememberSessionTokenHash(session.id, input.accessTokenHash);
+
+    return {
+      ...session,
+      currentTopicId: DISCUSSION_TOPICS[0]?.id ?? null,
+      currentTopicIndex: 0,
+      topicStartedAt: null,
+      conversationPhase: "created",
+      topicPausedMs: 0,
+    };
+  }
+
   try {
     return await prisma.session.create({
       data: {
@@ -173,6 +194,31 @@ async function createDevSessionWithCompat(input: {
   protocolVersion?: string;
   utterances: Array<{ speaker: string; text: string; createdAt: Date }>;
 }) {
+  if (!(await hasModernSessionColumns())) {
+    const session = await createLegacySessionRaw({
+      participantCode: input.participantCode,
+      condition: "dev",
+    });
+    await prisma.sessionUtterance.createMany({
+      data: input.utterances.map((utterance) => ({
+        sessionId: session.id,
+        speaker: utterance.speaker,
+        text: utterance.text,
+        createdAt: utterance.createdAt,
+      })),
+    });
+    rememberSessionTokenHash(session.id, input.accessTokenHash);
+
+    return {
+      ...session,
+      currentTopicId: DISCUSSION_TOPICS[0]?.id ?? null,
+      currentTopicIndex: 0,
+      topicStartedAt: null,
+      conversationPhase: "created",
+      topicPausedMs: 0,
+    };
+  }
+
   const utterances = {
     create: input.utterances.map((utterance) => ({
       speaker: utterance.speaker,
@@ -282,6 +328,13 @@ function serializeSession(session: {
     topic_paused_ms: session.topicPausedMs,
     ended_at: session.endedAt?.toISOString() ?? null,
   };
+}
+
+async function hasModernSessionColumns() {
+  return (
+    (await hasDatabaseColumn("sessions", "session_access_token_hash")) &&
+    (await hasDatabaseColumn("sessions", "current_topic_id"))
+  );
 }
 
 function optionalString(value: unknown) {

@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
 import { prisma } from "./prisma";
-import { isMissingColumnError } from "./db-compat";
+import { hasDatabaseColumn, isMissingColumnError } from "./db-compat";
 import {
   createEmptySlotStates,
   createEmptySubSlotStates,
@@ -73,6 +73,10 @@ export async function getSessionContext(sessionId: string) {
 }
 
 async function findSessionContextWithCompat(sessionId: string) {
+  if (!(await hasSubSlotDepthColumn())) {
+    return findLegacySessionContext(sessionId);
+  }
+
   try {
     return await prisma.session.findUnique({
       where: { id: sessionId },
@@ -93,38 +97,42 @@ async function findSessionContextWithCompat(sessionId: string) {
   } catch (error) {
     if (!isMissingColumnError(error)) throw error;
 
-    return prisma.session.findUnique({
-      where: { id: sessionId },
-      select: {
-        id: true,
-        participantCode: true,
-        condition: true,
-        startedAt: true,
-        dialogueStartedAt: true,
-        endedAt: true,
-        utterances: {
-          orderBy: { createdAt: "asc" },
-        },
-        slotStates: true,
-        subSlotStates: {
-          select: {
-            id: true,
-            sessionId: true,
-            mainSlotId: true,
-            subSlotId: true,
-            completion: true,
-            responseState: true,
-            reasonCode: true,
-            evidenceUtteranceIds: true,
-            canAskAgain: true,
-            isDeferred: true,
-            lastUpdatedTopicId: true,
-            updatedAt: true,
-          },
+    return findLegacySessionContext(sessionId);
+  }
+}
+
+async function findLegacySessionContext(sessionId: string) {
+  return prisma.session.findUnique({
+    where: { id: sessionId },
+    select: {
+      id: true,
+      participantCode: true,
+      condition: true,
+      startedAt: true,
+      dialogueStartedAt: true,
+      endedAt: true,
+      utterances: {
+        orderBy: { createdAt: "asc" },
+      },
+      slotStates: true,
+      subSlotStates: {
+        select: {
+          id: true,
+          sessionId: true,
+          mainSlotId: true,
+          subSlotId: true,
+          completion: true,
+          responseState: true,
+          reasonCode: true,
+          evidenceUtteranceIds: true,
+          canAskAgain: true,
+          isDeferred: true,
+          lastUpdatedTopicId: true,
+          updatedAt: true,
         },
       },
-    });
-  }
+    },
+  });
 }
 
 export async function createInitialSlotStates(sessionId: string) {
@@ -187,6 +195,13 @@ export async function saveSubSlotStates(
   sessionId: string,
   states: StoredSubSlotState[],
 ) {
+  if (!(await hasSubSlotDepthColumn())) {
+    await Promise.all(
+      states.map((state) => saveLegacySubSlotState(sessionId, state)),
+    );
+    return;
+  }
+
   try {
     await Promise.all(
       states.map((state) =>
@@ -323,6 +338,10 @@ function normalizeStoredDepth(state: unknown, completion: string, responseState:
   const depth = (state as { depth?: unknown }).depth;
 
   return isAnswerDepth(depth) ? depth : inferLegacyDepth(completion, responseState);
+}
+
+async function hasSubSlotDepthColumn() {
+  return hasDatabaseColumn("slot_sub_states", "depth");
 }
 
 function inferLegacyDepth(completion: string, responseState: string) {

@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
 import { requireSessionAccess } from "../../../../lib/auth";
-import { isMissingColumnError } from "../../../../lib/db-compat";
+import { hasDatabaseColumn, isMissingColumnError } from "../../../../lib/db-compat";
 
 export const runtime = "nodejs";
 
@@ -59,6 +59,10 @@ export async function GET(request: Request, context: RouteContext) {
 }
 
 async function loadSessionDetailWithCompat(id: string) {
+  if (!(await hasSessionProgressColumns())) {
+    return loadLegacySessionDetail(id);
+  }
+
   try {
     const [session, utteranceCount, utterances] = await prisma.$transaction([
       prisma.session.findUnique({
@@ -97,49 +101,53 @@ async function loadSessionDetailWithCompat(id: string) {
   } catch (error) {
     if (!isMissingColumnError(error)) throw error;
 
-    const [session, utteranceCount, utterances] = await prisma.$transaction([
-      prisma.session.findUnique({
-        where: { id },
-        select: {
-          id: true,
-          participantCode: true,
-          condition: true,
-          startedAt: true,
-          dialogueStartedAt: true,
-          endedAt: true,
-        },
-      }),
-      prisma.sessionUtterance.count({
-        where: { sessionId: id },
-      }),
-      prisma.sessionUtterance.findMany({
-        where: { sessionId: id },
-        orderBy: { createdAt: "desc" },
-        take: 30,
-        select: {
-          id: true,
-          speaker: true,
-          text: true,
-          createdAt: true,
-        },
-      }),
-    ]);
-
-    return {
-      session: session
-        ? {
-            ...session,
-            currentTopicId: null,
-            currentTopicIndex: 0,
-            topicStartedAt: null,
-            conversationPhase: null,
-            topicPausedMs: 0,
-          }
-        : null,
-      utteranceCount,
-      utterances,
-    };
+    return loadLegacySessionDetail(id);
   }
+}
+
+async function loadLegacySessionDetail(id: string) {
+  const [session, utteranceCount, utterances] = await prisma.$transaction([
+    prisma.session.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        participantCode: true,
+        condition: true,
+        startedAt: true,
+        dialogueStartedAt: true,
+        endedAt: true,
+      },
+    }),
+    prisma.sessionUtterance.count({
+      where: { sessionId: id },
+    }),
+    prisma.sessionUtterance.findMany({
+      where: { sessionId: id },
+      orderBy: { createdAt: "desc" },
+      take: 30,
+      select: {
+        id: true,
+        speaker: true,
+        text: true,
+        createdAt: true,
+      },
+    }),
+  ]);
+
+  return {
+    session: session
+      ? {
+          ...session,
+          currentTopicId: null,
+          currentTopicIndex: 0,
+          topicStartedAt: null,
+          conversationPhase: null,
+          topicPausedMs: 0,
+        }
+      : null,
+    utteranceCount,
+    utterances,
+  };
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
@@ -187,13 +195,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       }
     }
 
-    const session = await prisma.session.update({
-      where: { id },
-      data: {
-        ...(participantCode ? { participantCode } : {}),
-        ...progressPatch,
-      },
-    });
+    const session = await updateSessionWithCompat(id, participantCode, progressPatch);
 
     return NextResponse.json({
       session: {
@@ -275,6 +277,72 @@ export async function DELETE(request: Request, context: RouteContext) {
       { status: 500 },
     );
   }
+}
+
+async function updateSessionWithCompat(
+  id: string,
+  participantCode: string | undefined,
+  progressPatch: ReturnType<typeof buildProgressPatch>,
+) {
+  const canPersistProgress = await hasSessionProgressColumns();
+
+  if (!canPersistProgress) {
+    if (participantCode) {
+      return prisma.session.update({
+        where: { id },
+        data: { participantCode },
+        select: {
+          id: true,
+          participantCode: true,
+          condition: true,
+          startedAt: true,
+          dialogueStartedAt: true,
+          endedAt: true,
+        },
+      }).then((session) => ({
+        ...session,
+        currentTopicId: null,
+        currentTopicIndex: 0,
+        topicStartedAt: null,
+        conversationPhase: null,
+        topicPausedMs: 0,
+      }));
+    }
+
+    const session = await prisma.session.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        participantCode: true,
+        condition: true,
+        startedAt: true,
+        dialogueStartedAt: true,
+        endedAt: true,
+      },
+    });
+    if (!session) throw new Error("Session not found");
+
+    return {
+      ...session,
+      currentTopicId: null,
+      currentTopicIndex: 0,
+      topicStartedAt: null,
+      conversationPhase: null,
+      topicPausedMs: 0,
+    };
+  }
+
+  return prisma.session.update({
+    where: { id },
+    data: {
+      ...(participantCode ? { participantCode } : {}),
+      ...progressPatch,
+    },
+  });
+}
+
+async function hasSessionProgressColumns() {
+  return hasDatabaseColumn("sessions", "current_topic_id");
 }
 
 function normalizeParticipantCode(value: unknown) {
