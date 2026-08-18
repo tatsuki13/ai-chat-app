@@ -8,6 +8,9 @@ import {
   DISCUSSION_TOPICS,
   resolveDiscussionTopic,
 } from "../../../../lib/acp-mvp";
+import { requireSessionAccess } from "../../../../lib/auth";
+import { writeAiActionEvent } from "../../../../lib/ai-action-log";
+import { AI_POLICY_VERSION, getOpenAIModel } from "../../../../lib/llm";
 
 export const runtime = "nodejs";
 
@@ -19,6 +22,9 @@ export async function POST(request: Request) {
     if (!sessionId) {
       return NextResponse.json({ error: "session_id is required" }, { status: 400 });
     }
+
+    const auth = await requireSessionAccess(request, sessionId);
+    if ("response" in auth) return auth.response;
 
     const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
     const currentTopicTitle = optionalString(
@@ -38,6 +44,24 @@ export async function POST(request: Request) {
             nextTopic,
             nextTopicTitle,
           });
+    await writeAiActionEvent({
+      sessionId,
+      actionType: "topic_transition",
+      currentTopicId: currentTopic,
+      currentTopicTitle,
+      generatedText: result.message,
+      reason: result.reason,
+      result: result.should_switch ? "topic_switch" : "stay_on_topic",
+      model: getOpenAIModel(),
+      policyVersion: AI_POLICY_VERSION,
+      metadata: {
+        target_slot: result.target_slot,
+        next_topic: result.next_topic,
+        requested_next_topic: nextTopic,
+        force_switch: forceSwitch,
+        sensitivity: result.sensitivity,
+      },
+    });
 
     return NextResponse.json({
       suggestion: {

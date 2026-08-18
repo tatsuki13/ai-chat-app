@@ -49,8 +49,10 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
+  const [adminSecret, setAdminSecret] = useState("");
 
   useEffect(() => {
+    setAdminSecret(window.localStorage.getItem("acp-hitl-admin-secret") ?? "");
     void loadSessions();
   }, []);
 
@@ -70,7 +72,10 @@ export default function AdminPage() {
     setError("");
 
     try {
-      const data = await fetchJson<{ sessions: SessionSummary[] }>("/api/admin/sessions");
+      const data = await fetchJson<{ sessions: SessionSummary[] }>(
+        "/api/admin/sessions",
+        adminSecret,
+      );
       setSessions(data.sessions);
       setSelectedId((current) => current || data.sessions[0]?.id || "");
     } catch {
@@ -85,7 +90,10 @@ export default function AdminPage() {
     setError("");
 
     try {
-      const data = await fetchJson<AdminDetail>(`/api/admin/session/${encodeURIComponent(id)}`);
+      const data = await fetchJson<AdminDetail>(
+        `/api/admin/session/${encodeURIComponent(id)}`,
+        adminSecret,
+      );
       setDetail(data);
     } catch {
       setError("セッション詳細を取得できません");
@@ -104,6 +112,17 @@ export default function AdminPage() {
             <h1 className="text-[24px] font-black leading-tight">実験者用admin</h1>
           </div>
           <div className="flex items-center gap-2">
+            <input
+              type="password"
+              value={adminSecret}
+              onChange={(event) => {
+                const value = event.target.value;
+                setAdminSecret(value);
+                window.localStorage.setItem("acp-hitl-admin-secret", value);
+              }}
+              placeholder="ADMIN_API_SECRET"
+              className="rounded-lg border border-stone-300 bg-white px-3 py-3 text-[13px] font-bold text-stone-700"
+            />
             <a
               href="/session"
               className="rounded-lg border border-stone-300 bg-white px-4 py-3 text-[15px] font-bold text-stone-700"
@@ -332,8 +351,11 @@ function EmptyLine() {
   return <p className="text-[15px] font-bold text-stone-500">なし</p>;
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { cache: "no-store" });
+async function fetchJson<T>(url: string, adminSecret: string): Promise<T> {
+  const response = await fetch(url, {
+    cache: "no-store",
+    headers: adminSecret ? { "X-Admin-Secret": adminSecret } : undefined,
+  });
 
   if (!response.ok) throw new Error(`Request failed: ${url}`);
   return response.json() as Promise<T>;

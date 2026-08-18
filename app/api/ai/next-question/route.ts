@@ -3,7 +3,9 @@ import {
   getSessionContext,
 } from "../../../../lib/acp-store";
 import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
-import { generateNextQuestion } from "../../../../lib/llm";
+import { generateNextQuestion, getOpenAIModel, AI_POLICY_VERSION } from "../../../../lib/llm";
+import { requireSessionAccess } from "../../../../lib/auth";
+import { writeAiActionEvent } from "../../../../lib/ai-action-log";
 
 export const runtime = "nodejs";
 
@@ -16,6 +18,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "session_id is required" }, { status: 400 });
     }
 
+    const auth = await requireSessionAccess(request, sessionId);
+    if ("response" in auth) return auth.response;
+
     const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
     const currentTopicTitle = optionalString(
       body.current_topic_title ?? body.currentTopicTitle,
@@ -25,6 +30,25 @@ export async function POST(request: Request) {
       ...context,
       currentTopic,
       currentTopicTitle,
+    });
+    await writeAiActionEvent({
+      sessionId,
+      actionType: "next_question",
+      currentTopicId: currentTopic,
+      currentTopicTitle,
+      targetMainSlotId: result.targetMainSlotId,
+      targetSubSlotId: result.targetSubSlotId,
+      generatedText: result.question,
+      reason: result.reason,
+      result: result.no_relevant_followup ? "no_question" : "question_generated",
+      model: getOpenAIModel(),
+      policyVersion: AI_POLICY_VERSION,
+      metadata: {
+        target_slot: result.target_slot,
+        transition_phrase: result.transition_phrase,
+        sensitivity: result.sensitivity,
+        no_relevant_followup: result.no_relevant_followup === true,
+      },
     });
 
     return NextResponse.json({

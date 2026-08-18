@@ -6,6 +6,7 @@ import {
   isSlotClassificationResponseState,
   isSlotCompletion,
   isSlotReasonCode,
+  isAnswerDepth,
   mergeSlotStates,
   normalizeConversationSpeaker,
   normalizeSlotStatus,
@@ -68,7 +69,9 @@ export async function getSessionContext(sessionId: string) {
         evidenceUtteranceIds: normalizeEvidenceIds(state.evidenceUtteranceIds),
         canAskAgain: state.canAskAgain,
         isDeferred: state.isDeferred,
-        depth: inferLegacyDepth(state.completion, state.responseState),
+        depth: state.depth && isAnswerDepth(state.depth)
+          ? state.depth
+          : inferLegacyDepth(state.completion, state.responseState),
         needsOptionalFollowUp: false,
         hasConflict: state.responseState === "conflicting",
         lastUpdatedTopicId: state.lastUpdatedTopicId,
@@ -158,6 +161,7 @@ export async function saveSubSlotStates(
           evidenceUtteranceIds: toJsonValue(state.evidenceUtteranceIds) as Prisma.InputJsonValue,
           canAskAgain: state.canAskAgain,
           isDeferred: state.isDeferred,
+          depth: state.depth ?? inferLegacyDepth(state.completion, state.responseState),
           lastUpdatedTopicId: state.lastUpdatedTopicId,
         },
         update: {
@@ -167,6 +171,7 @@ export async function saveSubSlotStates(
           evidenceUtteranceIds: toJsonValue(state.evidenceUtteranceIds) as Prisma.InputJsonValue,
           canAskAgain: state.canAskAgain,
           isDeferred: state.isDeferred,
+          depth: state.depth ?? inferLegacyDepth(state.completion, state.responseState),
           lastUpdatedTopicId: state.lastUpdatedTopicId,
         },
       }),

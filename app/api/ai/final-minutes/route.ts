@@ -7,9 +7,13 @@ import {
 } from "../../../../lib/acp-store";
 import {
   generateFinalMinutes,
+  getOpenAIModel,
+  AI_POLICY_VERSION,
   updateSlotStateBundleFromConversation,
 } from "../../../../lib/llm";
 import { prisma } from "../../../../lib/prisma";
+import { requireSessionAccess } from "../../../../lib/auth";
+import { writeAiActionEvent } from "../../../../lib/ai-action-log";
 
 export const runtime = "nodejs";
 
@@ -21,6 +25,9 @@ export async function POST(request: Request) {
     if (!sessionId) {
       return NextResponse.json({ error: "session_id is required" }, { status: 400 });
     }
+
+    const auth = await requireSessionAccess(request, sessionId);
+    if ("response" in auth) return auth.response;
 
     const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
     const currentTopicTitle = optionalString(
@@ -35,6 +42,19 @@ export async function POST(request: Request) {
     });
     await saveSlotStates(sessionId, bundle.slotStates);
     await saveSubSlotStates(sessionId, bundle.subSlotStates);
+    await writeAiActionEvent({
+      sessionId,
+      actionType: "update_slots",
+      currentTopicId: currentTopic,
+      currentTopicTitle,
+      result: bundle.debug.summary.source,
+      model: getOpenAIModel(),
+      policyVersion: AI_POLICY_VERSION,
+      metadata: {
+        source: "final_minutes_pre_update",
+        summary: bundle.debug.summary,
+      },
+    });
 
     const context = await getSessionContext(sessionId);
     const minutes = await generateFinalMinutes({
@@ -45,6 +65,20 @@ export async function POST(request: Request) {
       participantCode: context.session.participantCode,
     });
     const savedMinutes = await saveFinalMinutes(sessionId, minutes);
+    await writeAiActionEvent({
+      sessionId,
+      actionType: "final_minutes",
+      currentTopicId: currentTopic,
+      currentTopicTitle,
+      generatedText: minutes.markdown,
+      result: finalize ? "finalized" : "generated",
+      model: getOpenAIModel(),
+      policyVersion: AI_POLICY_VERSION,
+      metadata: {
+        final_minutes_id: savedMinutes.id,
+        finalize,
+      },
+    });
     const session = finalize
       ? await prisma.session.update({
           where: { id: sessionId },

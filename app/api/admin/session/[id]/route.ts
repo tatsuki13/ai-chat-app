@@ -12,6 +12,7 @@ import {
 } from "../../../../../lib/acp-mvp";
 import { buildSemanticSlotControlDebugState } from "../../../../../lib/llm";
 import { prisma } from "../../../../../lib/prisma";
+import { requireAdminOrSessionAccess } from "../../../../../lib/auth";
 
 export const runtime = "nodejs";
 
@@ -24,6 +25,9 @@ type RouteContext = {
 export async function GET(_request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
+    const auth = await requireAdminOrSessionAccess(_request, id);
+    if ("response" in auth) return auth.response;
+
     const session = await prisma.session.findUnique({
       where: { id },
       include: {
@@ -79,6 +83,10 @@ export async function GET(_request: Request, context: RouteContext) {
         : [],
       canAskAgain: state.canAskAgain,
       isDeferred: state.isDeferred,
+      depth:
+        state.depth === "none" || state.depth === "minimal" || state.depth === "elaborated"
+          ? state.depth
+          : undefined,
       lastUpdatedTopicId: state.lastUpdatedTopicId,
       updatedAt: state.updatedAt.toISOString(),
     }));
@@ -100,6 +108,12 @@ export async function GET(_request: Request, context: RouteContext) {
         participant_code: session.participantCode,
         condition: session.condition,
         started_at: session.startedAt.toISOString(),
+        dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
+        current_topic_id: session.currentTopicId,
+        current_topic_index: session.currentTopicIndex,
+        topic_started_at: session.topicStartedAt?.toISOString() ?? null,
+        conversation_phase: session.conversationPhase,
+        topic_paused_ms: session.topicPausedMs,
         ended_at: session.endedAt?.toISOString() ?? null,
       },
       utterances: normalizedUtterances.map((utterance) => ({
