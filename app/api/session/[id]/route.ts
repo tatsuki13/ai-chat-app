@@ -299,14 +299,7 @@ async function updateSessionWithCompat(
           dialogueStartedAt: true,
           endedAt: true,
         },
-      }).then((session) => ({
-        ...session,
-        currentTopicId: null,
-        currentTopicIndex: 0,
-        topicStartedAt: null,
-        conversationPhase: null,
-        topicPausedMs: 0,
-      }));
+      }).then((session) => buildLegacyProgressSession(session, progressPatch));
     }
 
     const session = await prisma.session.findUnique({
@@ -322,14 +315,7 @@ async function updateSessionWithCompat(
     });
     if (!session) throw new Error("Session not found");
 
-    return {
-      ...session,
-      currentTopicId: null,
-      currentTopicIndex: 0,
-      topicStartedAt: null,
-      conversationPhase: null,
-      topicPausedMs: 0,
-    };
+    return buildLegacyProgressSession(session, progressPatch);
   }
 
   return prisma.session.update({
@@ -339,6 +325,33 @@ async function updateSessionWithCompat(
       ...progressPatch,
     },
   });
+}
+
+function buildLegacyProgressSession(
+  session: {
+    id: string;
+    participantCode: string | null;
+    condition: string | null;
+    startedAt: Date;
+    dialogueStartedAt: Date | null;
+    endedAt: Date | null;
+  },
+  progressPatch: ReturnType<typeof buildProgressPatch>,
+) {
+  return {
+    ...session,
+    dialogueStartedAt:
+      progressPatch.dialogueStartedAt === undefined
+        ? session.dialogueStartedAt
+        : progressPatch.dialogueStartedAt,
+    endedAt:
+      progressPatch.endedAt === undefined ? session.endedAt : progressPatch.endedAt,
+    currentTopicId: progressPatch.currentTopicId ?? null,
+    currentTopicIndex: progressPatch.currentTopicIndex ?? 0,
+    topicStartedAt: progressPatch.topicStartedAt ?? null,
+    conversationPhase: progressPatch.conversationPhase ?? null,
+    topicPausedMs: progressPatch.topicPausedMs ?? 0,
+  };
 }
 
 async function hasSessionProgressColumns() {

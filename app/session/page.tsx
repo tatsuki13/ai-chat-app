@@ -192,6 +192,7 @@ type SessionLookupResponse = {
 
 const STORAGE_KEY = "acp-hitl-pending-auto-session-id";
 const SESSION_TOKEN_STORAGE_KEY = "acp-hitl-session-access-tokens";
+const SESSION_PROGRESS_STORAGE_KEY = "acp-hitl-session-progress";
 const MAX_RENDERED_UTTERANCES = 30;
 const BASE_TOPIC_DURATION_MS = 5 * 60 * 1000;
 const DECISION_RATIO = 0.6;
@@ -361,13 +362,14 @@ function SessionPageClient() {
           try {
             await discardUnusedSession(pendingAutoSessionId);
             const restored = await fetchSessionDetail(requestedSessionId);
+            const restoredSession = mergeStoredSessionProgress(restored.session);
 
             if (!ignore) {
               window.localStorage.removeItem(STORAGE_KEY);
-              setSession(restored.session);
+              setSession(restoredSession);
               setUtterances(restored.utterances);
               setUtteranceTotal(restored.utterance_count);
-              restoreSessionProgress(restored.session);
+              restoreSessionProgress(restoredSession);
               setStatusText("保存済み");
               setBusyAction(null);
             }
@@ -410,14 +412,15 @@ function SessionPageClient() {
     const timerId = window.setInterval(() => {
       void fetchSessionDetail(session.id)
         .then((detail) => {
-          setSession(detail.session);
+          const restoredSession = mergeStoredSessionProgress(detail.session);
+          setSession(restoredSession);
           setUtterances((current) =>
             mergeUtterances(current, detail.utterances).slice(
               -MAX_RENDERED_UTTERANCES,
             ),
           );
           setUtteranceTotal(detail.utterance_count);
-          restoreSessionProgress(detail.session, { preservePrompt: true });
+          restoreSessionProgress(restoredSession, { preservePrompt: true });
         })
         .catch(() => {});
     }, REMOTE_MIC_SESSION_SYNC_MS);
@@ -1390,9 +1393,10 @@ function SessionPageClient() {
       }
 
       const restored = await fetchSessionDetail(existing.id);
+      const restoredSession = mergeStoredSessionProgress(restored.session);
       window.localStorage.removeItem(STORAGE_KEY);
-      sessionRef.current = restored.session;
-      setSession(restored.session);
+      sessionRef.current = restoredSession;
+      setSession(restoredSession);
       setUtterances(restored.utterances);
       setUtteranceTotal(restored.utterance_count);
       setDeveloperSlotStates([]);
@@ -1400,14 +1404,14 @@ function SessionPageClient() {
       setDraft("");
       setIsEditingId(false);
       setIdDraft("");
-      restoreSessionProgress(restored.session);
+      restoreSessionProgress(restoredSession);
       setPromptPanel({
         title: "過去ログを呼び出しました",
         body: `${sourceParticipantCode} のログ ${restored.utterance_count} 件を開きました。`,
         tone: "status",
       });
       setStatusText("保存済み");
-      router.replace(`/session?sessionId=${encodeURIComponent(restored.session.id)}`);
+      router.replace(`/session?sessionId=${encodeURIComponent(restoredSession.id)}`);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "";
       const message =
@@ -1696,13 +1700,20 @@ function SessionPageClient() {
     const currentSession = sessionRef.current;
     if (!currentSession) return;
 
+    rememberSessionProgress(currentSession.id, patch);
+
     try {
       const updated = await patchJson<{ session: SessionInfo }>(
         `/api/session/${encodeURIComponent(currentSession.id)}`,
         patch,
       );
-      sessionRef.current = updated.session;
-      setSession(updated.session);
+      const nextSession = mergeStoredSessionProgress({
+        ...currentSession,
+        ...updated.session,
+        ...patch,
+      });
+      sessionRef.current = nextSession;
+      setSession(nextSession);
     } catch (error) {
       console.warn("Failed to save session progress", {
         sessionId: currentSession.id,
@@ -3571,6 +3582,69 @@ function escapeHtml(value: string) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function rememberSessionProgress(sessionId: string, patch: Partial<SessionInfo>) {
+  const progress = pickSessionProgress(patch);
+  if (Object.keys(progress).length === 0) return;
+
+  const allProgress = loadSessionProgress();
+  allProgress[sessionId] = {
+    ...(allProgress[sessionId] ?? {}),
+    ...progress,
+  };
+  window.localStorage.setItem(
+    SESSION_PROGRESS_STORAGE_KEY,
+    JSON.stringify(allProgress),
+  );
+}
+
+function mergeStoredSessionProgress(session: SessionInfo): SessionInfo {
+  const progress = loadSessionProgress()[session.id];
+  if (!progress) return session;
+
+  return {
+    ...session,
+    ...progress,
+  };
+}
+
+function loadSessionProgress() {
+  try {
+    const value = window.localStorage.getItem(SESSION_PROGRESS_STORAGE_KEY);
+    const parsed = value ? JSON.parse(value) : {};
+
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, Partial<SessionInfo>>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function pickSessionProgress(input: Partial<SessionInfo>) {
+  const progress: Partial<SessionInfo> = {};
+
+  if ("current_topic_id" in input) {
+    progress.current_topic_id = input.current_topic_id;
+  }
+  if ("current_topic_index" in input) {
+    progress.current_topic_index = input.current_topic_index;
+  }
+  if ("topic_started_at" in input) {
+    progress.topic_started_at = input.topic_started_at;
+  }
+  if ("conversation_phase" in input) {
+    progress.conversation_phase = input.conversation_phase;
+  }
+  if ("topic_paused_ms" in input) {
+    progress.topic_paused_ms = input.topic_paused_ms;
+  }
+  if ("dialogue_started_at" in input) {
+    progress.dialogue_started_at = input.dialogue_started_at;
+  }
+
+  return progress;
 }
 
 function createInitialTopicBudgets() {
