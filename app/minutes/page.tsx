@@ -23,6 +23,8 @@ type MinutesApiResponse = {
   final_minutes: FinalMinutesPayload | null;
 };
 
+const SESSION_TOKEN_STORAGE_KEY = "acp-hitl-session-access-tokens";
+
 type GroundedText = {
   text?: string;
   sourceUtteranceIds?: string[];
@@ -186,6 +188,7 @@ function MinutesPageClient() {
       try {
         const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}/minutes`, {
           cache: "no-store",
+          headers: sessionAuthHeaders(sessionId),
         });
         if (!response.ok) throw new Error(`Failed to load minutes: ${response.status}`);
         const nextData = (await response.json()) as MinutesApiResponse;
@@ -482,6 +485,25 @@ function MissingNarrativeNotice(props: { sessionId: string }) {
       </a>
     </section>
   );
+}
+
+function sessionAuthHeaders(sessionId: string): HeadersInit {
+  const token = getSessionAccessToken(sessionId);
+
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function getSessionAccessToken(sessionId: string) {
+  try {
+    const value = window.localStorage.getItem(SESSION_TOKEN_STORAGE_KEY);
+    const parsed = value ? JSON.parse(value) : {};
+
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, string>)[sessionId] ?? ""
+      : "";
+  } catch {
+    return "";
+  }
 }
 
 function TextSection(props: {

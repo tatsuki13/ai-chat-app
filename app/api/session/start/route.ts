@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../../lib/prisma";
 import { createInitialSlotStates } from "../../../../lib/acp-store";
+import { issueSessionAccessToken } from "../../../../lib/auth";
+import { AI_POLICY_VERSION } from "../../../../lib/llm";
+import { DISCUSSION_TOPICS } from "../../../../lib/acp-mvp";
 
 export const runtime = "nodejs";
 
@@ -14,6 +17,7 @@ export async function POST(request: Request) {
     const participantCode =
       requestedParticipantCode ?? (await createUniqueParticipantCode());
     const condition = optionalString(body.condition);
+    const accessToken = issueSessionAccessToken();
 
     if (requestedParticipantCode) {
       const existing = await prisma.session.findFirst({
@@ -33,6 +37,13 @@ export async function POST(request: Request) {
       data: {
         participantCode,
         condition,
+        sessionAccessTokenHash: accessToken.tokenHash,
+        currentTopicIndex: 0,
+        currentTopicId: DISCUSSION_TOPICS[0]?.id ?? null,
+        conversationPhase: "created",
+        protocolVersion: optionalString(body.protocol_version ?? body.protocolVersion),
+        appVersion: process.env.npm_package_version ?? null,
+        aiPolicyVersion: AI_POLICY_VERSION,
       },
     });
     const slotStates = await createInitialSlotStates(session.id);
@@ -44,8 +55,14 @@ export async function POST(request: Request) {
         condition: session.condition,
         started_at: session.startedAt.toISOString(),
         dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
+        current_topic_id: session.currentTopicId,
+        current_topic_index: session.currentTopicIndex,
+        topic_started_at: session.topicStartedAt?.toISOString() ?? null,
+        conversation_phase: session.conversationPhase,
+        topic_paused_ms: session.topicPausedMs,
         ended_at: session.endedAt?.toISOString() ?? null,
       },
+      session_access_token: accessToken.token,
       slot_states: slotStates,
     });
   } catch (error) {

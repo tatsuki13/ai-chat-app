@@ -4,6 +4,8 @@ import {
 } from "../../../../lib/acp-store";
 import { checkConversationEnd } from "../../../../lib/llm";
 import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
+import { requireSessionAccess } from "../../../../lib/auth";
+import { writeAiActionEvent } from "../../../../lib/ai-action-log";
 
 export const runtime = "nodejs";
 
@@ -16,6 +18,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "session_id is required" }, { status: 400 });
     }
 
+    const auth = await requireSessionAccess(request, sessionId);
+    if ("response" in auth) return auth.response;
+
     const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
     const currentTopicTitle = optionalString(
       body.current_topic_title ?? body.currentTopicTitle,
@@ -25,6 +30,16 @@ export async function POST(request: Request) {
       ...context,
       currentTopic,
       currentTopicTitle,
+    });
+    await writeAiActionEvent({
+      sessionId,
+      actionType: "check_end",
+      currentTopicId: currentTopic,
+      currentTopicTitle,
+      generatedText: result.message,
+      reason: result.reason,
+      result: result.can_end ? "can_end" : "continue",
+      metadata: { remaining_slots: result.remaining_slots },
     });
 
     return NextResponse.json({

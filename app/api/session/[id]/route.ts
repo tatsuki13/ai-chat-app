@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
+import { requireSessionAccess } from "../../../../lib/auth";
 
 export const runtime = "nodejs";
 
@@ -11,9 +12,12 @@ type RouteContext = {
   }>;
 };
 
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
+    const auth = await requireSessionAccess(request, id);
+    if ("response" in auth) return auth.response;
+
     const [session, utteranceCount, utterances] = await prisma.$transaction([
       prisma.session.findUnique({
         where: { id },
@@ -23,6 +27,11 @@ export async function GET(_request: Request, context: RouteContext) {
           condition: true,
           startedAt: true,
           dialogueStartedAt: true,
+          currentTopicId: true,
+          currentTopicIndex: true,
+          topicStartedAt: true,
+          conversationPhase: true,
+          topicPausedMs: true,
           endedAt: true,
         },
       }),
@@ -53,6 +62,11 @@ export async function GET(_request: Request, context: RouteContext) {
         condition: session.condition,
         started_at: session.startedAt.toISOString(),
         dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
+        current_topic_id: session.currentTopicId,
+        current_topic_index: session.currentTopicIndex,
+        topic_started_at: session.topicStartedAt?.toISOString() ?? null,
+        conversation_phase: session.conversationPhase,
+        topic_paused_ms: session.topicPausedMs,
         ended_at: session.endedAt?.toISOString() ?? null,
       },
       utterance_count: utteranceCount,
@@ -76,45 +90,53 @@ export async function GET(_request: Request, context: RouteContext) {
 export async function PATCH(request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
+    const auth = await requireSessionAccess(request, id);
+    if ("response" in auth) return auth.response;
     const body = await request.json();
 
-    if (!("participant_code" in body) && !("participantCode" in body)) {
+    const hasParticipantCode = "participant_code" in body || "participantCode" in body;
+    const progressPatch = buildProgressPatch(body);
+
+    if (!hasParticipantCode && Object.keys(progressPatch).length === 0) {
       return NextResponse.json(
-        { error: "participant_code is required" },
+        { error: "participant_code or progress field is required" },
         { status: 400 },
       );
     }
 
-    const participantCode = normalizeParticipantCode(
-      body.participant_code ?? body.participantCode,
-    );
+    const participantCode = hasParticipantCode
+      ? normalizeParticipantCode(body.participant_code ?? body.participantCode)
+      : undefined;
 
-    if (!participantCode) {
+    if (hasParticipantCode && !participantCode) {
       return NextResponse.json(
         { error: "participant_code cannot be empty" },
         { status: 400 },
       );
     }
 
-    const existing = await prisma.session.findFirst({
-      where: {
-        participantCode,
-        NOT: { id },
-      },
-      select: { id: true },
-    });
+    if (participantCode) {
+      const existing = await prisma.session.findFirst({
+        where: {
+          participantCode,
+          NOT: { id },
+        },
+        select: { id: true },
+      });
 
-    if (existing) {
-      return NextResponse.json(
-        { error: "participant_code already exists" },
-        { status: 409 },
-      );
+      if (existing) {
+        return NextResponse.json(
+          { error: "participant_code already exists" },
+          { status: 409 },
+        );
+      }
     }
 
     const session = await prisma.session.update({
       where: { id },
       data: {
-        participantCode,
+        ...(participantCode ? { participantCode } : {}),
+        ...progressPatch,
       },
     });
 
@@ -122,10 +144,15 @@ export async function PATCH(request: Request, context: RouteContext) {
       session: {
         id: session.id,
         participant_code: session.participantCode,
-      condition: session.condition,
-      started_at: session.startedAt.toISOString(),
-      dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
-      ended_at: session.endedAt?.toISOString() ?? null,
+        condition: session.condition,
+        started_at: session.startedAt.toISOString(),
+        dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
+        current_topic_id: session.currentTopicId,
+        current_topic_index: session.currentTopicIndex,
+        topic_started_at: session.topicStartedAt?.toISOString() ?? null,
+        conversation_phase: session.conversationPhase,
+        topic_paused_ms: session.topicPausedMs,
+        ended_at: session.endedAt?.toISOString() ?? null,
       },
     });
   } catch (error) {
@@ -145,9 +172,12 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 }
 
-export async function DELETE(_request: Request, context: RouteContext) {
+export async function DELETE(request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
+    const auth = await requireSessionAccess(request, id);
+    if ("response" in auth) return auth.response;
+
     const session = await prisma.session.findUnique({
       where: { id },
       select: {
@@ -198,6 +228,69 @@ function normalizeParticipantCode(value: unknown) {
   const trimmed = value.trim();
 
   return trimmed || null;
+}
+
+function buildProgressPatch(body: Record<string, unknown>) {
+  const patch: {
+    currentTopicId?: string | null;
+    currentTopicIndex?: number | null;
+    topicStartedAt?: Date | null;
+    conversationPhase?: string | null;
+    topicPausedMs?: number;
+    dialogueStartedAt?: Date | null;
+    endedAt?: Date | null;
+  } = {};
+
+  const currentTopicId = optionalString(body.current_topic_id ?? body.currentTopicId);
+  if (currentTopicId !== undefined) patch.currentTopicId = currentTopicId;
+
+  const currentTopicIndex = optionalInteger(
+    body.current_topic_index ?? body.currentTopicIndex,
+  );
+  if (currentTopicIndex !== undefined) patch.currentTopicIndex = currentTopicIndex;
+
+  if ("topic_started_at" in body || "topicStartedAt" in body) {
+    patch.topicStartedAt = optionalDate(body.topic_started_at ?? body.topicStartedAt);
+  }
+
+  const conversationPhase = optionalString(
+    body.conversation_phase ?? body.conversationPhase,
+  );
+  if (conversationPhase !== undefined) patch.conversationPhase = conversationPhase;
+
+  const topicPausedMs = optionalInteger(body.topic_paused_ms ?? body.topicPausedMs);
+  if (topicPausedMs !== undefined) patch.topicPausedMs = topicPausedMs;
+
+  if ("dialogue_started_at" in body || "dialogueStartedAt" in body) {
+    patch.dialogueStartedAt = optionalDate(
+      body.dialogue_started_at ?? body.dialogueStartedAt,
+    );
+  }
+
+  if ("ended_at" in body || "endedAt" in body) {
+    patch.endedAt = optionalDate(body.ended_at ?? body.endedAt);
+  }
+
+  return patch;
+}
+
+function optionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function optionalInteger(value: unknown) {
+  const numericValue = typeof value === "number" ? value : Number(value);
+
+  return Number.isInteger(numericValue) && numericValue >= 0 ? numericValue : undefined;
+}
+
+function optionalDate(value: unknown) {
+  if (value === null) return null;
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
 function isUniqueConstraintError(error: unknown) {

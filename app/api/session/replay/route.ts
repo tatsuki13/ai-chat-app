@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createInitialSlotStates, getSessionContext } from "../../../../lib/acp-store";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
+import { requireAdminAccess } from "../../../../lib/auth";
 
 export const runtime = "nodejs";
 
@@ -9,6 +10,9 @@ const REPLAY_PREFIX = "tatsuki_";
 
 export async function POST(request: Request) {
   try {
+    const auth = requireAdminAccess(request);
+    if ("response" in auth) return auth.response;
+
     const body = await request.json();
     const replayParticipantCode = requiredString(
       body.participant_code ?? body.participantCode,

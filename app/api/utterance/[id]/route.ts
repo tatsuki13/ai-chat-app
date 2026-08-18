@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
+import { requireSessionAccess } from "../../../../lib/auth";
 
 export const runtime = "nodejs";
 
@@ -24,6 +25,17 @@ export async function PATCH(request: Request, context: RouteContext) {
         { status: 400 },
       );
     }
+
+    const existing = await prisma.sessionUtterance.findUnique({
+      where: { id },
+      select: { sessionId: true },
+    });
+    if (!existing) {
+      return NextResponse.json({ error: "Utterance not found" }, { status: 404 });
+    }
+
+    const auth = await requireSessionAccess(request, existing.sessionId);
+    if ("response" in auth) return auth.response;
 
     const utterance = await prisma.sessionUtterance.update({
       where: { id },
@@ -51,19 +63,23 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 }
 
-export async function DELETE(_request: Request, context: RouteContext) {
+export async function DELETE(request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
     const utterance = await prisma.sessionUtterance.findUnique({
       where: { id },
       select: {
         id: true,
+        sessionId: true,
       },
     });
 
     if (!utterance) {
       return NextResponse.json({ error: "Utterance not found" }, { status: 404 });
     }
+
+    const auth = await requireSessionAccess(request, utterance.sessionId);
+    if ("response" in auth) return auth.response;
 
     await prisma.sessionUtterance.delete({
       where: { id },

@@ -6,6 +6,8 @@ import {
 } from "../../../../lib/acp-store";
 import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
 import { updateSlotStateBundleFromConversation } from "../../../../lib/llm";
+import { requireSessionAccess } from "../../../../lib/auth";
+import { writeAiActionEvent } from "../../../../lib/ai-action-log";
 
 export const runtime = "nodejs";
 
@@ -17,6 +19,9 @@ export async function POST(request: Request) {
     if (!sessionId) {
       return NextResponse.json({ error: "session_id is required" }, { status: 400 });
     }
+
+    const auth = await requireSessionAccess(request, sessionId);
+    if ("response" in auth) return auth.response;
 
     const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
     const currentTopicTitle = optionalString(
@@ -30,6 +35,17 @@ export async function POST(request: Request) {
     });
     await saveSlotStates(sessionId, bundle.slotStates);
     await saveSubSlotStates(sessionId, bundle.subSlotStates);
+    await writeAiActionEvent({
+      sessionId,
+      actionType: "update_slots",
+      currentTopicId: currentTopic,
+      currentTopicTitle,
+      result: "updated",
+      metadata: {
+        unmatched_utterance_ids: bundle.debug.unmatchedUtteranceIds,
+        summary: bundle.debug.summary,
+      },
+    });
     const slotControl = buildSlotControlDebugState({
       slots: bundle.slotStates,
       currentTopic,

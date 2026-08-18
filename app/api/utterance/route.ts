@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../lib/prisma";
 import { normalizeConversationSpeaker } from "../../../lib/acp-mvp";
+import { requireSessionAccess } from "../../../lib/auth";
 
 export const runtime = "nodejs";
 
@@ -18,6 +19,9 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+
+    const auth = await requireSessionAccess(request, sessionId);
+    if ("response" in auth) return auth.response;
 
     const utterance = await prisma.sessionUtterance.create({
       data: {

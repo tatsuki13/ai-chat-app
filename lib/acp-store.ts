@@ -68,7 +68,9 @@ export async function getSessionContext(sessionId: string) {
         evidenceUtteranceIds: normalizeEvidenceIds(state.evidenceUtteranceIds),
         canAskAgain: state.canAskAgain,
         isDeferred: state.isDeferred,
-        depth: inferLegacyDepth(state.completion, state.responseState),
+        depth: isAnswerDepth(state.depth)
+          ? state.depth
+          : inferLegacyDepth(state.completion, state.responseState),
         needsOptionalFollowUp: false,
         hasConflict: state.responseState === "conflicting",
         lastUpdatedTopicId: state.lastUpdatedTopicId,
@@ -158,6 +160,7 @@ export async function saveSubSlotStates(
           evidenceUtteranceIds: toJsonValue(state.evidenceUtteranceIds) as Prisma.InputJsonValue,
           canAskAgain: state.canAskAgain,
           isDeferred: state.isDeferred,
+          depth: state.depth ?? inferLegacyDepth(state.completion, state.responseState),
           lastUpdatedTopicId: state.lastUpdatedTopicId,
         },
         update: {
@@ -167,6 +170,7 @@ export async function saveSubSlotStates(
           evidenceUtteranceIds: toJsonValue(state.evidenceUtteranceIds) as Prisma.InputJsonValue,
           canAskAgain: state.canAskAgain,
           isDeferred: state.isDeferred,
+          depth: state.depth ?? inferLegacyDepth(state.completion, state.responseState),
           lastUpdatedTopicId: state.lastUpdatedTopicId,
         },
       }),
@@ -212,4 +216,8 @@ function inferLegacyDepth(completion: string, responseState: string) {
   if (responseState === "no_response") return "none";
   if (completion === "complete" || completion === "partial") return "minimal";
   return "none";
+}
+
+function isAnswerDepth(value: unknown): value is "none" | "minimal" | "elaborated" {
+  return value === "none" || value === "minimal" || value === "elaborated";
 }
