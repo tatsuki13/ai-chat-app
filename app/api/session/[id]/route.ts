@@ -2,8 +2,6 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
-import { requireSessionAccess } from "../../../../lib/auth";
-import { hasDatabaseColumn, isMissingColumnError } from "../../../../lib/db-compat";
 
 export const runtime = "nodejs";
 
@@ -13,14 +11,36 @@ type RouteContext = {
   }>;
 };
 
-export async function GET(request: Request, context: RouteContext) {
+export async function GET(_request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
-    const auth = await requireSessionAccess(request, id);
-    if ("response" in auth) return auth.response;
-
-    const { session, utteranceCount, utterances } =
-      await loadSessionDetailWithCompat(id);
+    const [session, utteranceCount, utterances] = await prisma.$transaction([
+      prisma.session.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          participantCode: true,
+          condition: true,
+          startedAt: true,
+          dialogueStartedAt: true,
+          endedAt: true,
+        },
+      }),
+      prisma.sessionUtterance.count({
+        where: { sessionId: id },
+      }),
+      prisma.sessionUtterance.findMany({
+        where: { sessionId: id },
+        orderBy: { createdAt: "desc" },
+        take: 30,
+        select: {
+          id: true,
+          speaker: true,
+          text: true,
+          createdAt: true,
+        },
+      }),
+    ]);
 
     if (!session) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
@@ -33,11 +53,6 @@ export async function GET(request: Request, context: RouteContext) {
         condition: session.condition,
         started_at: session.startedAt.toISOString(),
         dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
-        current_topic_id: session.currentTopicId,
-        current_topic_index: session.currentTopicIndex,
-        topic_started_at: session.topicStartedAt?.toISOString() ?? null,
-        conversation_phase: session.conversationPhase,
-        topic_paused_ms: session.topicPausedMs,
         ended_at: session.endedAt?.toISOString() ?? null,
       },
       utterance_count: utteranceCount,
@@ -58,158 +73,59 @@ export async function GET(request: Request, context: RouteContext) {
   }
 }
 
-async function loadSessionDetailWithCompat(id: string) {
-  if (!(await hasSessionProgressColumns())) {
-    return loadLegacySessionDetail(id);
-  }
-
-  try {
-    const [session, utteranceCount, utterances] = await prisma.$transaction([
-      prisma.session.findUnique({
-        where: { id },
-        select: {
-          id: true,
-          participantCode: true,
-          condition: true,
-          startedAt: true,
-          dialogueStartedAt: true,
-          currentTopicId: true,
-          currentTopicIndex: true,
-          topicStartedAt: true,
-          conversationPhase: true,
-          topicPausedMs: true,
-          endedAt: true,
-        },
-      }),
-      prisma.sessionUtterance.count({
-        where: { sessionId: id },
-      }),
-      prisma.sessionUtterance.findMany({
-        where: { sessionId: id },
-        orderBy: { createdAt: "desc" },
-        take: 30,
-        select: {
-          id: true,
-          speaker: true,
-          text: true,
-          createdAt: true,
-        },
-      }),
-    ]);
-
-    return { session, utteranceCount, utterances };
-  } catch (error) {
-    if (!isMissingColumnError(error)) throw error;
-
-    return loadLegacySessionDetail(id);
-  }
-}
-
-async function loadLegacySessionDetail(id: string) {
-  const [session, utteranceCount, utterances] = await prisma.$transaction([
-    prisma.session.findUnique({
-      where: { id },
-      select: {
-        id: true,
-        participantCode: true,
-        condition: true,
-        startedAt: true,
-        dialogueStartedAt: true,
-        endedAt: true,
-      },
-    }),
-    prisma.sessionUtterance.count({
-      where: { sessionId: id },
-    }),
-    prisma.sessionUtterance.findMany({
-      where: { sessionId: id },
-      orderBy: { createdAt: "desc" },
-      take: 30,
-      select: {
-        id: true,
-        speaker: true,
-        text: true,
-        createdAt: true,
-      },
-    }),
-  ]);
-
-  return {
-    session: session
-      ? {
-          ...session,
-          currentTopicId: null,
-          currentTopicIndex: 0,
-          topicStartedAt: null,
-          conversationPhase: null,
-          topicPausedMs: 0,
-        }
-      : null,
-    utteranceCount,
-    utterances,
-  };
-}
-
 export async function PATCH(request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
-    const auth = await requireSessionAccess(request, id);
-    if ("response" in auth) return auth.response;
     const body = await request.json();
 
-    const hasParticipantCode = "participant_code" in body || "participantCode" in body;
-    const progressPatch = buildProgressPatch(body);
-
-    if (!hasParticipantCode && Object.keys(progressPatch).length === 0) {
+    if (!("participant_code" in body) && !("participantCode" in body)) {
       return NextResponse.json(
-        { error: "participant_code or progress field is required" },
+        { error: "participant_code is required" },
         { status: 400 },
       );
     }
 
-    const participantCode = hasParticipantCode
-      ? normalizeParticipantCode(body.participant_code ?? body.participantCode)
-      : undefined;
+    const participantCode = normalizeParticipantCode(
+      body.participant_code ?? body.participantCode,
+    );
 
-    if (hasParticipantCode && !participantCode) {
+    if (!participantCode) {
       return NextResponse.json(
         { error: "participant_code cannot be empty" },
         { status: 400 },
       );
     }
 
-    if (participantCode) {
-      const existing = await prisma.session.findFirst({
-        where: {
-          participantCode,
-          NOT: { id },
-        },
-        select: { id: true },
-      });
+    const existing = await prisma.session.findFirst({
+      where: {
+        participantCode,
+        NOT: { id },
+      },
+      select: { id: true },
+    });
 
-      if (existing) {
-        return NextResponse.json(
-          { error: "participant_code already exists" },
-          { status: 409 },
-        );
-      }
+    if (existing) {
+      return NextResponse.json(
+        { error: "participant_code already exists" },
+        { status: 409 },
+      );
     }
 
-    const session = await updateSessionWithCompat(id, participantCode, progressPatch);
+    const session = await prisma.session.update({
+      where: { id },
+      data: {
+        participantCode,
+      },
+    });
 
     return NextResponse.json({
       session: {
         id: session.id,
         participant_code: session.participantCode,
-        condition: session.condition,
-        started_at: session.startedAt.toISOString(),
-        dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
-        current_topic_id: session.currentTopicId,
-        current_topic_index: session.currentTopicIndex,
-        topic_started_at: session.topicStartedAt?.toISOString() ?? null,
-        conversation_phase: session.conversationPhase,
-        topic_paused_ms: session.topicPausedMs,
-        ended_at: session.endedAt?.toISOString() ?? null,
+      condition: session.condition,
+      started_at: session.startedAt.toISOString(),
+      dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
+      ended_at: session.endedAt?.toISOString() ?? null,
       },
     });
   } catch (error) {
@@ -229,12 +145,9 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 }
 
-export async function DELETE(request: Request, context: RouteContext) {
+export async function DELETE(_request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
-    const auth = await requireSessionAccess(request, id);
-    if ("response" in auth) return auth.response;
-
     const session = await prisma.session.findUnique({
       where: { id },
       select: {
@@ -279,154 +192,12 @@ export async function DELETE(request: Request, context: RouteContext) {
   }
 }
 
-async function updateSessionWithCompat(
-  id: string,
-  participantCode: string | undefined,
-  progressPatch: ReturnType<typeof buildProgressPatch>,
-) {
-  const canPersistProgress = await hasSessionProgressColumns();
-
-  if (!canPersistProgress) {
-    if (participantCode) {
-      return prisma.session.update({
-        where: { id },
-        data: { participantCode },
-        select: {
-          id: true,
-          participantCode: true,
-          condition: true,
-          startedAt: true,
-          dialogueStartedAt: true,
-          endedAt: true,
-        },
-      }).then((session) => buildLegacyProgressSession(session, progressPatch));
-    }
-
-    const session = await prisma.session.findUnique({
-      where: { id },
-      select: {
-        id: true,
-        participantCode: true,
-        condition: true,
-        startedAt: true,
-        dialogueStartedAt: true,
-        endedAt: true,
-      },
-    });
-    if (!session) throw new Error("Session not found");
-
-    return buildLegacyProgressSession(session, progressPatch);
-  }
-
-  return prisma.session.update({
-    where: { id },
-    data: {
-      ...(participantCode ? { participantCode } : {}),
-      ...progressPatch,
-    },
-  });
-}
-
-function buildLegacyProgressSession(
-  session: {
-    id: string;
-    participantCode: string | null;
-    condition: string | null;
-    startedAt: Date;
-    dialogueStartedAt: Date | null;
-    endedAt: Date | null;
-  },
-  progressPatch: ReturnType<typeof buildProgressPatch>,
-) {
-  return {
-    ...session,
-    dialogueStartedAt:
-      progressPatch.dialogueStartedAt === undefined
-        ? session.dialogueStartedAt
-        : progressPatch.dialogueStartedAt,
-    endedAt:
-      progressPatch.endedAt === undefined ? session.endedAt : progressPatch.endedAt,
-    currentTopicId: progressPatch.currentTopicId ?? null,
-    currentTopicIndex: progressPatch.currentTopicIndex ?? 0,
-    topicStartedAt: progressPatch.topicStartedAt ?? null,
-    conversationPhase: progressPatch.conversationPhase ?? null,
-    topicPausedMs: progressPatch.topicPausedMs ?? 0,
-  };
-}
-
-async function hasSessionProgressColumns() {
-  return hasDatabaseColumn("sessions", "current_topic_id");
-}
-
 function normalizeParticipantCode(value: unknown) {
   if (typeof value !== "string") return null;
 
   const trimmed = value.trim();
 
   return trimmed || null;
-}
-
-function buildProgressPatch(body: Record<string, unknown>) {
-  const patch: {
-    currentTopicId?: string | null;
-    currentTopicIndex?: number | null;
-    topicStartedAt?: Date | null;
-    conversationPhase?: string | null;
-    topicPausedMs?: number;
-    dialogueStartedAt?: Date | null;
-    endedAt?: Date | null;
-  } = {};
-
-  const currentTopicId = optionalString(body.current_topic_id ?? body.currentTopicId);
-  if (currentTopicId !== undefined) patch.currentTopicId = currentTopicId;
-
-  const currentTopicIndex = optionalInteger(
-    body.current_topic_index ?? body.currentTopicIndex,
-  );
-  if (currentTopicIndex !== undefined) patch.currentTopicIndex = currentTopicIndex;
-
-  if ("topic_started_at" in body || "topicStartedAt" in body) {
-    patch.topicStartedAt = optionalDate(body.topic_started_at ?? body.topicStartedAt);
-  }
-
-  const conversationPhase = optionalString(
-    body.conversation_phase ?? body.conversationPhase,
-  );
-  if (conversationPhase !== undefined) patch.conversationPhase = conversationPhase;
-
-  const topicPausedMs = optionalInteger(body.topic_paused_ms ?? body.topicPausedMs);
-  if (topicPausedMs !== undefined) patch.topicPausedMs = topicPausedMs;
-
-  if ("dialogue_started_at" in body || "dialogueStartedAt" in body) {
-    patch.dialogueStartedAt = optionalDate(
-      body.dialogue_started_at ?? body.dialogueStartedAt,
-    );
-  }
-
-  if ("ended_at" in body || "endedAt" in body) {
-    patch.endedAt = optionalDate(body.ended_at ?? body.endedAt);
-  }
-
-  return patch;
-}
-
-function optionalString(value: unknown) {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function optionalInteger(value: unknown) {
-  const numericValue = typeof value === "number" ? value : Number(value);
-
-  return Number.isInteger(numericValue) && numericValue >= 0 ? numericValue : undefined;
-}
-
-function optionalDate(value: unknown) {
-  if (value === null) return null;
-  if (typeof value !== "string" && typeof value !== "number") return undefined;
-
-  const date = new Date(value);
-
-  return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
 function isUniqueConstraintError(error: unknown) {

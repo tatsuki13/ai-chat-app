@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../../lib/prisma";
-import { requireAdminOrSessionAccess } from "../../../../../lib/auth";
 
 export const runtime = "nodejs";
 
@@ -10,12 +9,9 @@ type RouteContext = {
   }>;
 };
 
-export async function GET(request: Request, context: RouteContext) {
+export async function GET(_request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
-    const auth = await requireAdminOrSessionAccess(request, id);
-    if ("response" in auth) return auth.response;
-
     const session = await prisma.session.findUnique({
       where: { id },
       select: {

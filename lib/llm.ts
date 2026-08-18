@@ -101,12 +101,7 @@ type UncertainResponse = {
   kind: UncertainResponseKind;
 };
 
-export const AI_POLICY_VERSION = "hitl-acp-v1";
-export const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
-
-export function getOpenAIModel() {
-  return process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL;
-}
+const AI_POLICY_VERSION = "hitl-acp-v1";
 
 const COMMON_AI_POLICY = [
   "You are a third-party support assistant for a human-led family ACP conversation.",
@@ -1530,7 +1525,7 @@ async function requestJson<T>(
       ? new OpenAI({ apiKey, timeout: options.timeoutMs })
       : getClient(apiKey);
     const completion = await openai.chat.completions.create({
-      model: getOpenAIModel(),
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
       messages: [
         { role: "system", content: `${COMMON_AI_POLICY}\n\n${systemPrompt}` },
         { role: "user", content: JSON.stringify(payload, null, 2) },

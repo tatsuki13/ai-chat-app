@@ -97,11 +97,6 @@ type SessionInfo = {
   condition: string | null;
   started_at: string;
   dialogue_started_at: string | null;
-  current_topic_id?: string | null;
-  current_topic_index?: number | null;
-  topic_started_at?: string | null;
-  conversation_phase?: string | null;
-  topic_paused_ms?: number | null;
   ended_at: string | null;
 };
 
@@ -191,8 +186,6 @@ type SessionLookupResponse = {
 };
 
 const STORAGE_KEY = "acp-hitl-pending-auto-session-id";
-const SESSION_TOKEN_STORAGE_KEY = "acp-hitl-session-access-tokens";
-const SESSION_PROGRESS_STORAGE_KEY = "acp-hitl-session-progress";
 const MAX_RENDERED_UTTERANCES = 30;
 const BASE_TOPIC_DURATION_MS = 5 * 60 * 1000;
 const DECISION_RATIO = 0.6;
@@ -362,14 +355,14 @@ function SessionPageClient() {
           try {
             await discardUnusedSession(pendingAutoSessionId);
             const restored = await fetchSessionDetail(requestedSessionId);
-            const restoredSession = mergeStoredSessionProgress(restored.session);
 
             if (!ignore) {
               window.localStorage.removeItem(STORAGE_KEY);
-              setSession(restoredSession);
+              setSession(restored.session);
               setUtterances(restored.utterances);
               setUtteranceTotal(restored.utterance_count);
-              restoreSessionProgress(restoredSession);
+              resetTopicTiming();
+              applyDialogueStartedAt(restored.session.dialogue_started_at);
               setStatusText("保存済み");
               setBusyAction(null);
             }
@@ -381,7 +374,18 @@ function SessionPageClient() {
         }
 
         await discardUnusedSession(pendingAutoSessionId);
-        router.replace("/");
+        const created = await startSession();
+
+        if (!ignore) {
+          window.localStorage.setItem(STORAGE_KEY, created.id);
+          sessionRef.current = created;
+          setSession(created);
+          setUtterances([]);
+          setUtteranceTotal(0);
+          resetTopicTiming();
+          setStatusText("保存済み");
+          setBusyAction(null);
+        }
       } catch {
         if (!ignore) {
           setBusyAction(null);
@@ -412,15 +416,14 @@ function SessionPageClient() {
     const timerId = window.setInterval(() => {
       void fetchSessionDetail(session.id)
         .then((detail) => {
-          const restoredSession = mergeStoredSessionProgress(detail.session);
-          setSession(restoredSession);
+          setSession(detail.session);
           setUtterances((current) =>
             mergeUtterances(current, detail.utterances).slice(
               -MAX_RENDERED_UTTERANCES,
             ),
           );
           setUtteranceTotal(detail.utterance_count);
-          restoreSessionProgress(restoredSession, { preservePrompt: true });
+          applyDialogueStartedAt(detail.session.dialogue_started_at);
         })
         .catch(() => {});
     }, REMOTE_MIC_SESSION_SYNC_MS);
@@ -1084,12 +1087,7 @@ function SessionPageClient() {
     setStatusText("保存中");
 
     try {
-      const updated = await updateUtterance(
-        session?.id ?? "",
-        utteranceId,
-        nextSpeaker,
-        text,
-      );
+      const updated = await updateUtterance(utteranceId, nextSpeaker, text);
       setUtterances((current) =>
         current.map((utterance) =>
           utterance.id === utteranceId ? updated : utterance,
@@ -1109,7 +1107,7 @@ function SessionPageClient() {
     setStatusText("保存中");
 
     try {
-      await deleteUtterance(session?.id ?? "", utteranceId);
+      await deleteUtterance(utteranceId);
       setUtterances((current) =>
         current.filter((utterance) => utterance.id !== utteranceId),
       );
@@ -1303,11 +1301,42 @@ function SessionPageClient() {
   async function handleNewSession() {
     if (busyAction) return;
 
-    const confirmed = window.confirm("開始画面へ戻りますか？");
+    const confirmed = window.confirm("新しいセッションを開始しますか？未使用の自動作成IDは破棄されます。");
     if (!confirmed) return;
 
     stopVoiceAudioInput();
-    router.push("/");
+    setBusyAction("start");
+    setStatusText("準備中");
+    setPromptPanel(createOpeningPrompt());
+
+    try {
+      await discardUnusedSession(sessionRef.current?.id);
+      const created = await startSession();
+      window.localStorage.setItem(STORAGE_KEY, created.id);
+      sessionRef.current = created;
+      setSession(created);
+      setUtterances([]);
+      setUtteranceTotal(0);
+      setDraft("");
+      setDeveloperSlotStates([]);
+      setDeveloperSlotControl(null);
+      setDeveloperSlotError("");
+      resetTopicTiming();
+      setCompletionState("active");
+      setFinalMinutes(null);
+      setCompletionError("");
+      setStatusText("保存済み");
+      router.replace("/session");
+    } catch {
+      setStatusText("接続エラー");
+      setPromptPanel({
+        title: "セッションを開始できません",
+        body: "DATABASE_URL とデータベース接続を確認してください。",
+        tone: "error",
+      });
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   function startEditingId() {
@@ -1330,6 +1359,11 @@ function SessionPageClient() {
 
     if (nextId === session.participant_code) {
       setIsEditingId(false);
+      return;
+    }
+
+    if (isRecallParticipantCode(nextId)) {
+      await restoreSessionFromRecallCode(nextId);
       return;
     }
 
@@ -1367,9 +1401,9 @@ function SessionPageClient() {
   }
 
   async function restoreSessionFromRecallCode(recallCode: string) {
-    const sourceParticipantCode = recallCode.slice("dev_".length).trim();
+    const sourceParticipantCode = recallCode.slice("tatsu_".length).trim();
     if (!sourceParticipantCode) {
-      setIdError("dev condition で呼び出したい以前のIDを入力してください。");
+      setIdError("tatsu_ の後ろに、呼び出したい以前のIDを入れてください。");
       return;
     }
 
@@ -1393,10 +1427,9 @@ function SessionPageClient() {
       }
 
       const restored = await fetchSessionDetail(existing.id);
-      const restoredSession = mergeStoredSessionProgress(restored.session);
       window.localStorage.removeItem(STORAGE_KEY);
-      sessionRef.current = restoredSession;
-      setSession(restoredSession);
+      sessionRef.current = restored.session;
+      setSession(restored.session);
       setUtterances(restored.utterances);
       setUtteranceTotal(restored.utterance_count);
       setDeveloperSlotStates([]);
@@ -1404,14 +1437,15 @@ function SessionPageClient() {
       setDraft("");
       setIsEditingId(false);
       setIdDraft("");
-      restoreSessionProgress(restoredSession);
+      resetTopicTiming();
+      applyDialogueStartedAt(restored.session.dialogue_started_at);
       setPromptPanel({
         title: "過去ログを呼び出しました",
         body: `${sourceParticipantCode} のログ ${restored.utterance_count} 件を開きました。`,
         tone: "status",
       });
       setStatusText("保存済み");
-      router.replace(`/session?sessionId=${encodeURIComponent(restoredSession.id)}`);
+      router.replace(`/session?sessionId=${encodeURIComponent(restored.session.id)}`);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "";
       const message =
@@ -1433,7 +1467,7 @@ function SessionPageClient() {
   }
 
   function isRecallParticipantCode(value: string) {
-    return /^dev_.+/.test(value);
+    return /^tatsu_.+/.test(value);
   }
 
   function normalizeRecallErrorMessage(errorMessage: string) {
@@ -1441,7 +1475,7 @@ function SessionPageClient() {
       errorMessage === "source session not found" ||
       errorMessage.includes("source session")
     ) {
-      return "指定したIDの過去ログが見つかりませんでした。既に存在するIDを入力してください。";
+      return "指定したIDの過去ログが見つかりませんでした。tatsu_ の後ろには、既に存在するIDを入れてください。";
     }
 
     return errorMessage || "過去ログを呼び出せませんでした。";
@@ -1684,89 +1718,12 @@ function SessionPageClient() {
 
   function applyDialogueStartedAt(value: string | null) {
     if (!value) return;
-    if (!sessionRef.current || topicStartedAtRef.current !== null) return;
-
-    const now = Date.now();
-    topicStartedAtRef.current = now;
-    timerPausedStartedAtRef.current = null;
-    timerRunningRef.current = true;
-    setTopicPausedMs(0);
-    setTopicTimerSource("text");
-    setTopicStartedAt(now);
-    setTimerNow(now);
-  }
-
-  async function saveSessionProgress(patch: Partial<SessionInfo>) {
-    const currentSession = sessionRef.current;
-    if (!currentSession) return;
-
-    rememberSessionProgress(currentSession.id, patch);
-
-    try {
-      const updated = await patchJson<{ session: SessionInfo }>(
-        `/api/session/${encodeURIComponent(currentSession.id)}`,
-        patch,
-      );
-      const nextSession = mergeStoredSessionProgress({
-        ...currentSession,
-        ...updated.session,
-        ...patch,
-      });
-      sessionRef.current = nextSession;
-      setSession(nextSession);
-    } catch (error) {
-      console.warn("Failed to save session progress", {
-        sessionId: currentSession.id,
-        error,
-      });
-    }
-  }
-
-  function restoreSessionProgress(
-    restoredSession: SessionInfo,
-    options: { preservePrompt?: boolean } = {},
-  ) {
-    const restoredIndex = resolveTopicIndex(
-      restoredSession.current_topic_id,
-      restoredSession.current_topic_index,
-    );
-    const restoredStartedAt = parseTime(restoredSession.topic_started_at);
-
-    setCurrentTopicIndex(restoredIndex);
-    topicStartedAtRef.current = restoredStartedAt;
-    timerPausedStartedAtRef.current = null;
-    timerRunningRef.current = restoredStartedAt !== null;
-    setTopicPausedMs(restoredSession.topic_paused_ms ?? 0);
-    setTopicTimerSource(restoredStartedAt === null ? null : "text");
-    setTopicStartedAt(restoredStartedAt);
-    setTimerNow(Date.now());
-    setTransitionProposal(null);
-    setProposalCooldownUntil(0);
-    setCompletionState(restoredSession.ended_at ? "completed" : "active");
-    setCompletionError("");
-
-    if (!options.preservePrompt && restoredSession.dialogue_started_at) {
-      setPromptPanel(
-        createTopicTransitionPrompt(
-          DISCUSSION_TOPICS[restoredIndex] ?? DISCUSSION_TOPICS[0],
-        ),
-      );
-    }
   }
 
   function markTopicInteractionStarted(source: TopicTimerStartSource) {
     if (!sessionRef.current || topicStartedAtRef.current !== null) return;
 
     const now = Date.now();
-    void saveSessionProgress({
-      current_topic_id: currentTopic.id,
-      current_topic_index: currentTopicIndex,
-      topic_started_at: new Date(now).toISOString(),
-      conversation_phase: "active",
-      topic_paused_ms: 0,
-      dialogue_started_at:
-        sessionRef.current.dialogue_started_at ?? new Date(now).toISOString(),
-    });
     topicStartedAtRef.current = now;
     timerPausedStartedAtRef.current = null;
     timerRunningRef.current = true;
@@ -1779,15 +1736,6 @@ function SessionPageClient() {
   function advanceTopic() {
     if (!nextTopic) return;
 
-    const nextIndex = Math.min(currentTopicIndex + 1, DISCUSSION_TOPICS.length - 1);
-    const nextDiscussionTopic = DISCUSSION_TOPICS[nextIndex] ?? DISCUSSION_TOPICS[0];
-    void saveSessionProgress({
-      current_topic_id: nextDiscussionTopic.id,
-      current_topic_index: nextIndex,
-      topic_started_at: null,
-      conversation_phase: "active",
-      topic_paused_ms: 0,
-    });
     setCurrentTopicIndex((current) =>
       Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
     );
@@ -1863,9 +1811,43 @@ function SessionPageClient() {
                   <span className="text-[12px] font-bold text-stone-500">
                     参加者ID
                   </span>
-                  <span className="max-w-[260px] truncate rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[12px] font-black text-stone-700 shadow-sm">
-                    {participantCode}
-                  </span>
+                  {isEditingId ? (
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <input
+                        ref={idInputRef}
+                        value={idDraft}
+                        onChange={(event) => setIdDraft(event.target.value)}
+                        onKeyDown={handleIdKeyDown}
+                        className="h-8 min-w-0 rounded-md border border-emerald-400 bg-white px-2 text-[13px] font-black text-stone-950 outline-none ring-2 ring-emerald-100"
+                        disabled={busyAction === "id"}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void saveDisplayId()}
+                        disabled={busyAction === "id"}
+                        className="h-8 rounded-md bg-emerald-700 px-3 text-[12px] font-black text-white disabled:bg-stone-300"
+                      >
+                        保存
+                      </button>
+                      <button
+                        type="button"
+                        onClick={cancelEditingId}
+                        disabled={busyAction === "id"}
+                        className="h-8 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 disabled:text-stone-400"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={startEditingId}
+                      disabled={!session || Boolean(busyAction)}
+                      className="max-w-[260px] truncate rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[12px] font-black text-stone-700 shadow-sm disabled:text-stone-400"
+                    >
+                      {participantCode}
+                    </button>
+                  )}
                 </div>
                 {idError ? (
                   <p className="mt-1 text-[12px] font-bold text-red-700">
@@ -1883,7 +1865,7 @@ function SessionPageClient() {
                   disabled={Boolean(busyAction)}
                   className="min-h-8 rounded-md border border-stone-300 bg-white px-3 text-[13px] font-bold text-stone-700 shadow-sm active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
                 >
-                  開始画面へ
+                  新規
                 </button>
               </div>
             </header>
@@ -3013,7 +2995,6 @@ async function fetchSessionDetail(sessionId: string): Promise<{
 }> {
   const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}`, {
     cache: "no-store",
-    headers: sessionAuthHeaders(sessionId),
   });
 
   if (!response.ok) {
@@ -3046,7 +3027,6 @@ async function fetchAdminSessionDetail(
     }`,
     {
       cache: "no-store",
-      headers: sessionAuthHeaders(sessionId),
     },
   );
 
@@ -3072,7 +3052,6 @@ async function addUtterance(
 }
 
 async function updateUtterance(
-  sessionId: string,
   utteranceId: string,
   speaker: Speaker,
   text: string,
@@ -3080,7 +3059,6 @@ async function updateUtterance(
   const data = await patchJson<{ utterance: Utterance }>(
     `/api/utterance/${encodeURIComponent(utteranceId)}`,
     {
-      session_id: sessionId,
       speaker,
       text,
     },
@@ -3089,12 +3067,11 @@ async function updateUtterance(
   return data.utterance;
 }
 
-async function deleteUtterance(sessionId: string, utteranceId: string) {
+async function deleteUtterance(utteranceId: string) {
   const response = await fetch(
     `/api/utterance/${encodeURIComponent(utteranceId)}`,
     {
       method: "DELETE",
-      headers: sessionAuthHeaders(sessionId),
     },
   );
 
@@ -3133,7 +3110,6 @@ async function sendAudioChunkToStt(
 
   const response = await fetch("/api/transcribe-utterance", {
     method: "POST",
-    headers: sessionAuthHeaders(sessionId),
     body: formData,
   });
 
@@ -3226,15 +3202,9 @@ async function updateSessionDisplayId(
 }
 
 async function startSession(): Promise<SessionInfo> {
-  const data = await postJson<{
-    session: SessionInfo;
-    session_access_token?: string;
-  }>("/api/session/start", {
+  const data = await postJson<{ session: SessionInfo }>("/api/session/start", {
     condition: "mvp",
   });
-  if (data.session_access_token) {
-    saveSessionAccessToken(data.session.id, data.session_access_token);
-  }
 
   return data.session;
 }
@@ -3268,7 +3238,6 @@ async function discardUnusedSession(sessionId?: string | null) {
 
   const response = await fetch(`/api/session/${encodeURIComponent(sessionId)}`, {
     method: "DELETE",
-    headers: sessionAuthHeaders(sessionId),
   });
 
   if (!response.ok) return false;
@@ -3303,7 +3272,6 @@ async function requestJson<T = unknown>(
     method,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      ...requestSessionAuthHeaders(url, body),
     },
     body: JSON.stringify(body),
   });
@@ -3584,149 +3552,8 @@ function escapeHtml(value: string) {
     .replace(/'/g, "&#039;");
 }
 
-function rememberSessionProgress(sessionId: string, patch: Partial<SessionInfo>) {
-  const progress = pickSessionProgress(patch);
-  if (Object.keys(progress).length === 0) return;
-
-  const allProgress = loadSessionProgress();
-  allProgress[sessionId] = {
-    ...(allProgress[sessionId] ?? {}),
-    ...progress,
-  };
-  window.localStorage.setItem(
-    SESSION_PROGRESS_STORAGE_KEY,
-    JSON.stringify(allProgress),
-  );
-}
-
-function mergeStoredSessionProgress(session: SessionInfo): SessionInfo {
-  const progress = loadSessionProgress()[session.id];
-  if (!progress) return session;
-
-  return {
-    ...session,
-    ...progress,
-  };
-}
-
-function loadSessionProgress() {
-  try {
-    const value = window.localStorage.getItem(SESSION_PROGRESS_STORAGE_KEY);
-    const parsed = value ? JSON.parse(value) : {};
-
-    return parsed && typeof parsed === "object"
-      ? (parsed as Record<string, Partial<SessionInfo>>)
-      : {};
-  } catch {
-    return {};
-  }
-}
-
-function pickSessionProgress(input: Partial<SessionInfo>) {
-  const progress: Partial<SessionInfo> = {};
-
-  if ("current_topic_id" in input) {
-    progress.current_topic_id = input.current_topic_id;
-  }
-  if ("current_topic_index" in input) {
-    progress.current_topic_index = input.current_topic_index;
-  }
-  if ("topic_started_at" in input) {
-    progress.topic_started_at = input.topic_started_at;
-  }
-  if ("conversation_phase" in input) {
-    progress.conversation_phase = input.conversation_phase;
-  }
-  if ("topic_paused_ms" in input) {
-    progress.topic_paused_ms = input.topic_paused_ms;
-  }
-  if ("dialogue_started_at" in input) {
-    progress.dialogue_started_at = input.dialogue_started_at;
-  }
-
-  return progress;
-}
-
 function createInitialTopicBudgets() {
   return DISCUSSION_TOPICS.map(() => BASE_TOPIC_DURATION_MS);
-}
-
-function resolveTopicIndex(topicId?: string | null, fallbackIndex?: number | null) {
-  const byId = topicId
-    ? DISCUSSION_TOPICS.findIndex(
-        (topic) => topic.id === topicId || topic.slot_name === topicId,
-      )
-    : -1;
-
-  if (byId >= 0) return byId;
-  if (
-    typeof fallbackIndex === "number" &&
-    Number.isInteger(fallbackIndex) &&
-    fallbackIndex >= 0 &&
-    fallbackIndex < DISCUSSION_TOPICS.length
-  ) {
-    return fallbackIndex;
-  }
-
-  return 0;
-}
-
-function parseTime(value?: string | null) {
-  if (!value) return null;
-
-  const time = new Date(value).getTime();
-
-  return Number.isNaN(time) ? null : time;
-}
-
-function saveSessionAccessToken(sessionId: string, token: string) {
-  const tokens = loadSessionAccessTokens();
-  tokens[sessionId] = token;
-  window.localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, JSON.stringify(tokens));
-}
-
-function loadSessionAccessTokens() {
-  try {
-    const value = window.localStorage.getItem(SESSION_TOKEN_STORAGE_KEY);
-    const parsed = value ? JSON.parse(value) : {};
-
-    return parsed && typeof parsed === "object"
-      ? (parsed as Record<string, string>)
-      : {};
-  } catch {
-    return {};
-  }
-}
-
-function getSessionAccessToken(sessionId: string) {
-  return loadSessionAccessTokens()[sessionId] ?? "";
-}
-
-function sessionAuthHeaders(sessionId: string): HeadersInit {
-  const token = getSessionAccessToken(sessionId);
-
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
-function requestSessionAuthHeaders(url: string, body: unknown): HeadersInit {
-  const sessionId = getSessionIdFromBody(body) ?? getSessionIdFromUrl(url);
-
-  return sessionId ? sessionAuthHeaders(sessionId) : {};
-}
-
-function getSessionIdFromBody(body: unknown) {
-  if (!body || typeof body !== "object") return null;
-
-  const record = body as Record<string, unknown>;
-  const value = record.session_id ?? record.sessionId;
-
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function getSessionIdFromUrl(url: string) {
-  const match = url.match(/\/api\/session\/([^/?#]+)/);
-
-  return match ? decodeURIComponent(match[1]) : null;
 }
 
 function getElapsedSeconds(startedAt: number, now = Date.now()) {

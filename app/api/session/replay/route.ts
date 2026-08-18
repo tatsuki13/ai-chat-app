@@ -2,30 +2,32 @@ import { NextResponse } from "next/server";
 import { createInitialSlotStates, getSessionContext } from "../../../../lib/acp-store";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
-import { requireAdminAccess } from "../../../../lib/auth";
 
 export const runtime = "nodejs";
 
+const REPLAY_PREFIX = "tatsuki_";
+
 export async function POST(request: Request) {
   try {
-    const auth = requireAdminAccess(request);
-    if ("response" in auth) return auth.response;
-
     const body = await request.json();
-    const sourceParticipantCode = requiredString(
+    const replayParticipantCode = requiredString(
       body.participant_code ?? body.participantCode,
     );
 
+    if (!replayParticipantCode.startsWith(REPLAY_PREFIX)) {
+      return NextResponse.json(
+        { error: "participant_code must start with tatsuki_" },
+        { status: 400 },
+      );
+    }
+
+    const sourceParticipantCode = replayParticipantCode.slice(REPLAY_PREFIX.length).trim();
     if (!sourceParticipantCode) {
       return NextResponse.json(
         { error: "source participant_code is required" },
         { status: 400 },
       );
     }
-
-    const replayParticipantCode = await createUniqueReplayParticipantCode(
-      sourceParticipantCode,
-    );
 
     const existingSessionWithReplayCode = await prisma.session.findFirst({
       where: {
@@ -115,23 +117,6 @@ export async function POST(request: Request) {
 
 function requiredString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
-}
-
-async function createUniqueReplayParticipantCode(sourceParticipantCode: string) {
-  const normalized = sourceParticipantCode.replace(/[^A-Za-z0-9_-]/g, "-");
-  const base = `dev_${normalized}`;
-
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`;
-    const existing = await prisma.session.findFirst({
-      where: { participantCode: candidate },
-      select: { id: true },
-    });
-
-    if (!existing) return candidate;
-  }
-
-  return `${base}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 }
 
 async function findSourceSession(sourceParticipantCode: string) {

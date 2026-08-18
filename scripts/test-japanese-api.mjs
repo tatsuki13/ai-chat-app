@@ -3,12 +3,11 @@ const TEST_TEXT =
   process.env.JAPANESE_API_TEST_TEXT ??
   "「自宅」で過ごしたい。家族（ACP2026）とも相談したい。";
 
-async function postJson(path, body, token) {
+async function postJson(path, body) {
   const response = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(body),
   });
@@ -16,11 +15,10 @@ async function postJson(path, body, token) {
   return readJson(response, path);
 }
 
-async function getJson(path, token) {
+async function getJson(path) {
   const response = await fetch(`${BASE_URL}${path}`, {
     headers: {
       Accept: "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
   });
 
@@ -43,17 +41,13 @@ const sessionResult = await postJson("/api/session/start", {
   condition: "mvp",
 });
 const sessionId = sessionResult.session.id;
-const sessionToken = sessionResult.session_access_token;
 
 const savedResult = await postJson("/api/utterance", {
   session_id: sessionId,
   speaker: "elder",
   text: TEST_TEXT,
-}, sessionToken);
-const detailResult = await getJson(
-  `/api/session/${encodeURIComponent(sessionId)}`,
-  sessionToken,
-);
+});
+const detailResult = await getJson(`/api/session/${encodeURIComponent(sessionId)}`);
 const retrievedText = detailResult.utterances.at(-1)?.text ?? "";
 
 const responseMatches = savedResult.utterance.text === TEST_TEXT;

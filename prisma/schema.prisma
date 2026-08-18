@@ -12,17 +12,7 @@ model Session {
   condition       String?
   startedAt       DateTime             @default(now()) @map("started_at")
   dialogueStartedAt DateTime?          @map("dialogue_started_at")
-  sessionAccessTokenHash String?       @unique @map("session_access_token_hash")
-  currentTopicId String?               @map("current_topic_id")
-  currentTopicIndex Int?               @map("current_topic_index")
-  topicStartedAt DateTime?             @map("topic_started_at")
-  conversationPhase String?            @map("conversation_phase")
-  topicPausedMs   Int                  @default(0) @map("topic_paused_ms")
-  protocolVersion String?              @map("protocol_version")
-  appVersion      String?              @map("app_version")
-  aiPolicyVersion String?              @map("ai_policy_version")
   endedAt         DateTime?            @map("ended_at")
-  aiActionEvents  AiActionEvent[]
   finalMinutes    FinalMinute[]
   subSlotStates   SlotSubState[]
   slotStates      SlotState[]
@@ -32,31 +22,7 @@ model Session {
   @@index([startedAt])
   @@index([dialogueStartedAt])
   @@index([participantCode])
-  @@index([currentTopicId])
   @@map("sessions")
-}
-
-model AiActionEvent {
-  id                String   @id @default(cuid())
-  sessionId         String   @map("session_id")
-  actionType        String   @map("action_type")
-  currentTopicId    String?  @map("current_topic_id")
-  currentTopicTitle String?  @map("current_topic_title")
-  targetMainSlotId  String?  @map("target_main_slot_id")
-  targetSubSlotId   String?  @map("target_sub_slot_id")
-  generatedText     String?  @map("generated_text")
-  reason            String?
-  result            String?
-  model             String?
-  policyVersion     String?  @map("policy_version")
-  metadata          Json?
-  createdAt         DateTime @default(now()) @map("created_at")
-  session           Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-
-  @@index([sessionId, createdAt])
-  @@index([actionType])
-  @@index([currentTopicId])
-  @@map("ai_action_events")
 }
 
 model RemoteMicJoinToken {
@@ -141,7 +107,6 @@ model SlotSubState {
   evidenceUtteranceIds Json     @map("evidence_utterance_ids")
   canAskAgain          Boolean  @default(true) @map("can_ask_again")
   isDeferred           Boolean  @default(false) @map("is_deferred")
-  depth                String?
   lastUpdatedTopicId   String?  @map("last_updated_topic_id")
   updatedAt            DateTime @updatedAt @map("updated_at")
   session              Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)

@@ -1,14 +1,10 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../lib/prisma";
-import { requireAdminAccess } from "../../../../lib/auth";
 
 export const runtime = "nodejs";
 
-export async function GET(request: Request) {
+export async function GET() {
   try {
-    const auth = requireAdminAccess(request);
-    if ("response" in auth) return auth.response;
-
     const sessions = await prisma.session.findMany({
       orderBy: { startedAt: "desc" },
       take: 100,

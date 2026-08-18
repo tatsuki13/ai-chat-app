@@ -358,10 +358,6 @@ export type SubSlotDefinition = {
 };
 export type SlotCompletion = "none" | "partial" | "complete";
 export type AnswerDepth = "none" | "minimal" | "elaborated";
-
-export function isAnswerDepth(value: unknown): value is AnswerDepth {
-  return value === "none" || value === "minimal" || value === "elaborated";
-}
 export type SubSlotCompletionField =
   | "specificContentPresent"
   | "reasonPresent"

@@ -12,8 +12,6 @@ import {
 } from "../../../../../lib/acp-mvp";
 import { buildSemanticSlotControlDebugState } from "../../../../../lib/llm";
 import { prisma } from "../../../../../lib/prisma";
-import { requireAdminOrSessionAccess } from "../../../../../lib/auth";
-import { hasDatabaseColumn } from "../../../../../lib/db-compat";
 
 export const runtime = "nodejs";
 
@@ -26,10 +24,20 @@ type RouteContext = {
 export async function GET(_request: Request, context: RouteContext) {
   try {
     const { id } = await context.params;
-    const auth = await requireAdminOrSessionAccess(_request, id);
-    if ("response" in auth) return auth.response;
-
-    const session = await loadAdminSessionDetail(id);
+    const session = await prisma.session.findUnique({
+      where: { id },
+      include: {
+        utterances: {
+          orderBy: { createdAt: "asc" },
+        },
+        slotStates: true,
+        subSlotStates: true,
+        finalMinutes: {
+          orderBy: { createdAt: "desc" },
+          take: 10,
+        },
+      },
+    });
 
     if (!session) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
@@ -71,10 +79,6 @@ export async function GET(_request: Request, context: RouteContext) {
         : [],
       canAskAgain: state.canAskAgain,
       isDeferred: state.isDeferred,
-      depth:
-        state.depth === "none" || state.depth === "minimal" || state.depth === "elaborated"
-          ? state.depth
-          : undefined,
       lastUpdatedTopicId: state.lastUpdatedTopicId,
       updatedAt: state.updatedAt.toISOString(),
     }));
@@ -96,12 +100,6 @@ export async function GET(_request: Request, context: RouteContext) {
         participant_code: session.participantCode,
         condition: session.condition,
         started_at: session.startedAt.toISOString(),
-        dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
-        current_topic_id: session.currentTopicId,
-        current_topic_index: session.currentTopicIndex,
-        topic_started_at: session.topicStartedAt?.toISOString() ?? null,
-        conversation_phase: session.conversationPhase,
-        topic_paused_ms: session.topicPausedMs,
         ended_at: session.endedAt?.toISOString() ?? null,
       },
       utterances: normalizedUtterances.map((utterance) => ({
@@ -132,69 +130,6 @@ export async function GET(_request: Request, context: RouteContext) {
       { status: 500 },
     );
   }
-}
-
-async function loadAdminSessionDetail(id: string) {
-  const hasProgressColumns = await hasDatabaseColumn("sessions", "current_topic_id");
-  const hasDepthColumn = await hasDatabaseColumn("slot_sub_states", "depth");
-
-  return prisma.session.findUnique({
-    where: { id },
-    select: {
-      id: true,
-      participantCode: true,
-      condition: true,
-      startedAt: true,
-      dialogueStartedAt: true,
-      endedAt: true,
-      ...(hasProgressColumns
-        ? {
-            currentTopicId: true,
-            currentTopicIndex: true,
-            topicStartedAt: true,
-            conversationPhase: true,
-            topicPausedMs: true,
-          }
-        : {}),
-      utterances: {
-        orderBy: { createdAt: "asc" },
-      },
-      slotStates: true,
-      subSlotStates: hasDepthColumn
-        ? true
-        : {
-            select: {
-              id: true,
-              sessionId: true,
-              mainSlotId: true,
-              subSlotId: true,
-              completion: true,
-              responseState: true,
-              reasonCode: true,
-              evidenceUtteranceIds: true,
-              canAskAgain: true,
-              isDeferred: true,
-              lastUpdatedTopicId: true,
-              updatedAt: true,
-            },
-          },
-      finalMinutes: {
-        orderBy: { createdAt: "desc" },
-        take: 10,
-      },
-    },
-  }).then((session) =>
-    session
-      ? {
-          ...session,
-          currentTopicId: hasProgressColumns ? session.currentTopicId : null,
-          currentTopicIndex: hasProgressColumns ? session.currentTopicIndex : 0,
-          topicStartedAt: hasProgressColumns ? session.topicStartedAt : null,
-          conversationPhase: hasProgressColumns ? session.conversationPhase : null,
-          topicPausedMs: hasProgressColumns ? session.topicPausedMs : 0,
-        }
-      : null,
-  );
 }
 
 function optionalString(value: unknown) {

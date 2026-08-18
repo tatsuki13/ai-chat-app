@@ -5,9 +5,7 @@ import {
   saveSlotStates,
 } from "../../../../lib/acp-store";
 import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
-import { updateSlotStateBundleFromConversation, getOpenAIModel, AI_POLICY_VERSION } from "../../../../lib/llm";
-import { requireSessionAccess } from "../../../../lib/auth";
-import { writeAiActionEvent } from "../../../../lib/ai-action-log";
+import { updateSlotStateBundleFromConversation } from "../../../../lib/llm";
 
 export const runtime = "nodejs";
 
@@ -19,9 +17,6 @@ export async function POST(request: Request) {
     if (!sessionId) {
       return NextResponse.json({ error: "session_id is required" }, { status: 400 });
     }
-
-    const auth = await requireSessionAccess(request, sessionId);
-    if ("response" in auth) return auth.response;
 
     const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
     const currentTopicTitle = optionalString(
@@ -35,21 +30,6 @@ export async function POST(request: Request) {
     });
     await saveSlotStates(sessionId, bundle.slotStates);
     await saveSubSlotStates(sessionId, bundle.subSlotStates);
-    await writeAiActionEvent({
-      sessionId,
-      actionType: "update_slots",
-      currentTopicId: currentTopic,
-      currentTopicTitle,
-      result: bundle.debug.summary.source,
-      model: getOpenAIModel(),
-      policyVersion: AI_POLICY_VERSION,
-      metadata: {
-        summary: bundle.debug.summary,
-        accepted_count: bundle.debug.accepted.length,
-        rejected_count: bundle.debug.rejected.length,
-        unmatched_utterance_ids: bundle.debug.unmatchedUtteranceIds,
-      },
-    });
     const slotControl = buildSlotControlDebugState({
       slots: bundle.slotStates,
       currentTopic,
