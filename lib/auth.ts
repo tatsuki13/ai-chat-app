@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { NextResponse } from "next/server";
 import { prisma } from "./prisma";
+import { getRememberedSessionTokenHash, isMissingColumnError } from "./db-compat";
 
 const SESSION_TOKEN_BYTES = 32;
 
@@ -36,10 +37,27 @@ export async function requireSessionAccess(request: Request, sessionId: string) 
     return failAuth("Session token is required", 401);
   }
 
-  const session = await prisma.session.findUnique({
-    where: { id: sessionId },
-    select: { id: true, sessionAccessTokenHash: true },
-  });
+  let session: { id: string; sessionAccessTokenHash?: string | null } | null = null;
+
+  try {
+    session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { id: true, sessionAccessTokenHash: true },
+    });
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+
+    const legacySession = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { id: true },
+    });
+    session = legacySession
+      ? {
+          id: legacySession.id,
+          sessionAccessTokenHash: getRememberedSessionTokenHash(legacySession.id),
+        }
+      : null;
+  }
 
   if (!session) {
     return failAuth("Session not found", 404);
@@ -54,10 +72,15 @@ export async function requireSessionAccess(request: Request, sessionId: string) 
     return { session };
   }
 
-  const tokenOwner = await prisma.session.findUnique({
-    where: { sessionAccessTokenHash: tokenHash },
-    select: { id: true },
-  });
+  let tokenOwner: { id: string } | null = null;
+  try {
+    tokenOwner = await prisma.session.findUnique({
+      where: { sessionAccessTokenHash: tokenHash },
+      select: { id: true },
+    });
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+  }
 
   return failAuth(tokenOwner ? "Session token is not authorized for this session" : "Invalid session token", tokenOwner ? 403 : 401);
 }

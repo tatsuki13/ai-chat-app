@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
 import { requireSessionAccess } from "../../../../lib/auth";
+import { isMissingColumnError } from "../../../../lib/db-compat";
 
 export const runtime = "nodejs";
 
@@ -18,38 +19,8 @@ export async function GET(request: Request, context: RouteContext) {
     const auth = await requireSessionAccess(request, id);
     if ("response" in auth) return auth.response;
 
-    const [session, utteranceCount, utterances] = await prisma.$transaction([
-      prisma.session.findUnique({
-        where: { id },
-        select: {
-          id: true,
-          participantCode: true,
-          condition: true,
-          startedAt: true,
-          dialogueStartedAt: true,
-          currentTopicId: true,
-          currentTopicIndex: true,
-          topicStartedAt: true,
-          conversationPhase: true,
-          topicPausedMs: true,
-          endedAt: true,
-        },
-      }),
-      prisma.sessionUtterance.count({
-        where: { sessionId: id },
-      }),
-      prisma.sessionUtterance.findMany({
-        where: { sessionId: id },
-        orderBy: { createdAt: "desc" },
-        take: 30,
-        select: {
-          id: true,
-          speaker: true,
-          text: true,
-          createdAt: true,
-        },
-      }),
-    ]);
+    const { session, utteranceCount, utterances } =
+      await loadSessionDetailWithCompat(id);
 
     if (!session) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
@@ -84,6 +55,90 @@ export async function GET(request: Request, context: RouteContext) {
       { error: "Failed to load session" },
       { status: 500 },
     );
+  }
+}
+
+async function loadSessionDetailWithCompat(id: string) {
+  try {
+    const [session, utteranceCount, utterances] = await prisma.$transaction([
+      prisma.session.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          participantCode: true,
+          condition: true,
+          startedAt: true,
+          dialogueStartedAt: true,
+          currentTopicId: true,
+          currentTopicIndex: true,
+          topicStartedAt: true,
+          conversationPhase: true,
+          topicPausedMs: true,
+          endedAt: true,
+        },
+      }),
+      prisma.sessionUtterance.count({
+        where: { sessionId: id },
+      }),
+      prisma.sessionUtterance.findMany({
+        where: { sessionId: id },
+        orderBy: { createdAt: "desc" },
+        take: 30,
+        select: {
+          id: true,
+          speaker: true,
+          text: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    return { session, utteranceCount, utterances };
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+
+    const [session, utteranceCount, utterances] = await prisma.$transaction([
+      prisma.session.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          participantCode: true,
+          condition: true,
+          startedAt: true,
+          dialogueStartedAt: true,
+          endedAt: true,
+        },
+      }),
+      prisma.sessionUtterance.count({
+        where: { sessionId: id },
+      }),
+      prisma.sessionUtterance.findMany({
+        where: { sessionId: id },
+        orderBy: { createdAt: "desc" },
+        take: 30,
+        select: {
+          id: true,
+          speaker: true,
+          text: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    return {
+      session: session
+        ? {
+            ...session,
+            currentTopicId: null,
+            currentTopicIndex: 0,
+            topicStartedAt: null,
+            conversationPhase: null,
+            topicPausedMs: 0,
+          }
+        : null,
+      utteranceCount,
+      utterances,
+    };
   }
 }
 

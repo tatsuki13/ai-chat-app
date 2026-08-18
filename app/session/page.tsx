@@ -1330,11 +1330,6 @@ function SessionPageClient() {
       return;
     }
 
-    if (isRecallParticipantCode(nextId)) {
-      await restoreSessionFromRecallCode(nextId);
-      return;
-    }
-
     setBusyAction("id");
     setStatusText("保存中");
     setIdError("");
@@ -1369,9 +1364,9 @@ function SessionPageClient() {
   }
 
   async function restoreSessionFromRecallCode(recallCode: string) {
-    const sourceParticipantCode = recallCode.slice("tatsu_".length).trim();
+    const sourceParticipantCode = recallCode.slice("dev_".length).trim();
     if (!sourceParticipantCode) {
-      setIdError("tatsu_ の後ろに、呼び出したい以前のIDを入れてください。");
+      setIdError("dev condition で呼び出したい以前のIDを入力してください。");
       return;
     }
 
@@ -1434,7 +1429,7 @@ function SessionPageClient() {
   }
 
   function isRecallParticipantCode(value: string) {
-    return /^tatsu_.+/.test(value);
+    return /^dev_.+/.test(value);
   }
 
   function normalizeRecallErrorMessage(errorMessage: string) {
@@ -1442,7 +1437,7 @@ function SessionPageClient() {
       errorMessage === "source session not found" ||
       errorMessage.includes("source session")
     ) {
-      return "指定したIDの過去ログが見つかりませんでした。tatsu_ の後ろには、既に存在するIDを入れてください。";
+      return "指定したIDの過去ログが見つかりませんでした。既に存在するIDを入力してください。";
     }
 
     return errorMessage || "過去ログを呼び出せませんでした。";

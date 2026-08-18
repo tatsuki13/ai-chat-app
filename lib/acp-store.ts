@@ -1,5 +1,7 @@
 import type { Prisma } from "@prisma/client";
+import { randomUUID } from "crypto";
 import { prisma } from "./prisma";
+import { isMissingColumnError } from "./db-compat";
 import {
   createEmptySlotStates,
   createEmptySubSlotStates,
@@ -21,16 +23,7 @@ import {
 } from "./acp-mvp";
 
 export async function getSessionContext(sessionId: string) {
-  const session = await prisma.session.findUnique({
-    where: { id: sessionId },
-    include: {
-      utterances: {
-        orderBy: { createdAt: "asc" },
-      },
-      slotStates: true,
-      subSlotStates: true,
-    },
-  });
+  const session = await findSessionContextWithCompat(sessionId);
 
   if (!session) {
     throw new Error("Session not found");
@@ -69,9 +62,7 @@ export async function getSessionContext(sessionId: string) {
         evidenceUtteranceIds: normalizeEvidenceIds(state.evidenceUtteranceIds),
         canAskAgain: state.canAskAgain,
         isDeferred: state.isDeferred,
-        depth: state.depth && isAnswerDepth(state.depth)
-          ? state.depth
-          : inferLegacyDepth(state.completion, state.responseState),
+        depth: normalizeStoredDepth(state, state.completion, state.responseState),
         needsOptionalFollowUp: false,
         hasConflict: state.responseState === "conflicting",
         lastUpdatedTopicId: state.lastUpdatedTopicId,
@@ -79,6 +70,61 @@ export async function getSessionContext(sessionId: string) {
       })),
     ),
   };
+}
+
+async function findSessionContextWithCompat(sessionId: string) {
+  try {
+    return await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: {
+        id: true,
+        participantCode: true,
+        condition: true,
+        startedAt: true,
+        dialogueStartedAt: true,
+        endedAt: true,
+        utterances: {
+          orderBy: { createdAt: "asc" },
+        },
+        slotStates: true,
+        subSlotStates: true,
+      },
+    });
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+
+    return prisma.session.findUnique({
+      where: { id: sessionId },
+      select: {
+        id: true,
+        participantCode: true,
+        condition: true,
+        startedAt: true,
+        dialogueStartedAt: true,
+        endedAt: true,
+        utterances: {
+          orderBy: { createdAt: "asc" },
+        },
+        slotStates: true,
+        subSlotStates: {
+          select: {
+            id: true,
+            sessionId: true,
+            mainSlotId: true,
+            subSlotId: true,
+            completion: true,
+            responseState: true,
+            reasonCode: true,
+            evidenceUtteranceIds: true,
+            canAskAgain: true,
+            isDeferred: true,
+            lastUpdatedTopicId: true,
+            updatedAt: true,
+          },
+        },
+      },
+    });
+  }
 }
 
 export async function createInitialSlotStates(sessionId: string) {
@@ -141,42 +187,98 @@ export async function saveSubSlotStates(
   sessionId: string,
   states: StoredSubSlotState[],
 ) {
-  await Promise.all(
-    states.map((state) =>
-      prisma.slotSubState.upsert({
-        where: {
-          sessionId_mainSlotId_subSlotId: {
+  try {
+    await Promise.all(
+      states.map((state) =>
+        prisma.slotSubState.upsert({
+          where: {
+            sessionId_mainSlotId_subSlotId: {
+              sessionId,
+              mainSlotId: state.mainSlotId,
+              subSlotId: state.subSlotId,
+            },
+          },
+          create: {
             sessionId,
             mainSlotId: state.mainSlotId,
             subSlotId: state.subSlotId,
+            completion: state.completion,
+            responseState: state.responseState,
+            reasonCode: state.reasonCode,
+            evidenceUtteranceIds: toJsonValue(state.evidenceUtteranceIds) as Prisma.InputJsonValue,
+            canAskAgain: state.canAskAgain,
+            isDeferred: state.isDeferred,
+            depth: state.depth ?? inferLegacyDepth(state.completion, state.responseState),
+            lastUpdatedTopicId: state.lastUpdatedTopicId,
           },
-        },
-        create: {
-          sessionId,
-          mainSlotId: state.mainSlotId,
-          subSlotId: state.subSlotId,
-          completion: state.completion,
-          responseState: state.responseState,
-          reasonCode: state.reasonCode,
-          evidenceUtteranceIds: toJsonValue(state.evidenceUtteranceIds) as Prisma.InputJsonValue,
-          canAskAgain: state.canAskAgain,
-          isDeferred: state.isDeferred,
-          depth: state.depth ?? inferLegacyDepth(state.completion, state.responseState),
-          lastUpdatedTopicId: state.lastUpdatedTopicId,
-        },
-        update: {
-          completion: state.completion,
-          responseState: state.responseState,
-          reasonCode: state.reasonCode,
-          evidenceUtteranceIds: toJsonValue(state.evidenceUtteranceIds) as Prisma.InputJsonValue,
-          canAskAgain: state.canAskAgain,
-          isDeferred: state.isDeferred,
-          depth: state.depth ?? inferLegacyDepth(state.completion, state.responseState),
-          lastUpdatedTopicId: state.lastUpdatedTopicId,
-        },
-      }),
-    ),
+          update: {
+            completion: state.completion,
+            responseState: state.responseState,
+            reasonCode: state.reasonCode,
+            evidenceUtteranceIds: toJsonValue(state.evidenceUtteranceIds) as Prisma.InputJsonValue,
+            canAskAgain: state.canAskAgain,
+            isDeferred: state.isDeferred,
+            depth: state.depth ?? inferLegacyDepth(state.completion, state.responseState),
+            lastUpdatedTopicId: state.lastUpdatedTopicId,
+          },
+        }),
+      ),
+    );
+    return;
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+  }
+
+  await Promise.all(
+    states.map((state) => saveLegacySubSlotState(sessionId, state)),
   );
+}
+
+async function saveLegacySubSlotState(
+  sessionId: string,
+  state: StoredSubSlotState,
+) {
+  const id = randomUUID();
+  await prisma.$executeRaw`
+    INSERT INTO slot_sub_states (
+      id,
+      session_id,
+      main_slot_id,
+      sub_slot_id,
+      completion,
+      response_state,
+      reason_code,
+      evidence_utterance_ids,
+      can_ask_again,
+      is_deferred,
+      last_updated_topic_id,
+      updated_at
+    )
+    VALUES (
+      ${id},
+      ${sessionId},
+      ${state.mainSlotId},
+      ${state.subSlotId},
+      ${state.completion},
+      ${state.responseState},
+      ${state.reasonCode},
+      ${JSON.stringify(state.evidenceUtteranceIds)}::jsonb,
+      ${state.canAskAgain},
+      ${state.isDeferred},
+      ${state.lastUpdatedTopicId},
+      NOW()
+    )
+    ON CONFLICT (session_id, main_slot_id, sub_slot_id)
+    DO UPDATE SET
+      completion = EXCLUDED.completion,
+      response_state = EXCLUDED.response_state,
+      reason_code = EXCLUDED.reason_code,
+      evidence_utterance_ids = EXCLUDED.evidence_utterance_ids,
+      can_ask_again = EXCLUDED.can_ask_again,
+      is_deferred = EXCLUDED.is_deferred,
+      last_updated_topic_id = EXCLUDED.last_updated_topic_id,
+      updated_at = NOW()
+  `;
 }
 
 export async function saveFinalMinutes(
@@ -211,6 +313,16 @@ function normalizeEvidenceIds(value: unknown) {
   if (!Array.isArray(value)) return [];
 
   return [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))];
+}
+
+function normalizeStoredDepth(state: unknown, completion: string, responseState: string) {
+  if (!state || typeof state !== "object") {
+    return inferLegacyDepth(completion, responseState);
+  }
+
+  const depth = (state as { depth?: unknown }).depth;
+
+  return isAnswerDepth(depth) ? depth : inferLegacyDepth(completion, responseState);
 }
 
 function inferLegacyDepth(completion: string, responseState: string) {

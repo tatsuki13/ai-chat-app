@@ -8,12 +8,14 @@ type SessionInfo = {
   participant_code: string | null;
 };
 
+type Condition = "mvp" | "dev";
+
 const SESSION_TOKEN_STORAGE_KEY = "acp-hitl-session-access-tokens";
 
 export default function Home() {
   const router = useRouter();
   const [participantCode, setParticipantCode] = useState("");
-  const [condition, setCondition] = useState("mvp");
+  const [condition, setCondition] = useState<Condition>("mvp");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -37,7 +39,7 @@ export default function Home() {
         },
         body: JSON.stringify({
           participant_code: code,
-          condition: condition.trim() || "mvp",
+          condition,
         }),
       });
 
@@ -83,7 +85,7 @@ export default function Home() {
 
           <label className="mt-6 block">
             <span className="text-[13px] font-black text-stone-700">
-              参加者ID
+              {condition === "dev" ? "参照元の参加者ID" : "参加者ID"}
             </span>
             <input
               value={participantCode}
@@ -98,13 +100,22 @@ export default function Home() {
             <span className="text-[13px] font-black text-stone-700">
               condition
             </span>
-            <input
+            <select
               value={condition}
-              onChange={(event) => setCondition(event.target.value)}
+              onChange={(event) => setCondition(event.target.value as Condition)}
               disabled={busy}
               className="mt-2 h-10 w-full rounded-md border border-stone-300 bg-white px-3 text-[14px] font-bold outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100"
-            />
+            >
+              <option value="mvp">mvp</option>
+              <option value="dev">dev</option>
+            </select>
           </label>
+
+          {condition === "dev" ? (
+            <p className="mt-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-[12px] font-bold leading-relaxed text-sky-800">
+              devでは入力したIDの過去ログをコピーして検証用セッションを開始します。
+            </p>
+          ) : null}
 
           {error ? (
             <p className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] font-bold text-red-700">
@@ -147,6 +158,10 @@ function loadSessionAccessTokens() {
 function toUserFacingError(error: string) {
   if (error === "participant_code already exists") {
     return "この参加者IDはすでに使われています。別のIDを入力してください。";
+  }
+
+  if (error === "source session not found") {
+    return "参照元の参加者IDが見つかりませんでした。";
   }
 
   return error;
