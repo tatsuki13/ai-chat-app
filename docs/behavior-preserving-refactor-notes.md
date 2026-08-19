@@ -35,17 +35,8 @@ The behavior-owning functions are re-exported from `lib/llm.ts` rather than rewr
 
 Move one behavior function at a time from `lib/llm.ts` into the matching `lib/ai/*` file only after characterization coverage exists for its inputs and outputs.
 
-## Research ID Readability
+## Participant Code Readability
 
-Internal `cuid()` primary keys are still preserved for application joins. For research work, query the `research_*` database views so each row includes `participant_code` next to the internal `session_id`.
+Internal `cuid()` primary keys are still preserved for application joins. Tables that belong to a session also carry a nullable `participant_code` column next to `session_id` in the Prisma schema, so the main tables can be inspected directly by participant code.
 
-- `research_sessions`
-- `research_utterances`
-- `research_ai_intervention_logs`
-- `research_final_minutes`
-- `research_slot_states`
-- `research_slot_sub_states`
-- `research_remote_mic_join_tokens`
-- `research_remote_mic_audio_chunks`
-
-Tables that belong to a session now also carry a nullable `participant_code` column next to `session_id` in the Prisma schema. Database triggers populate it from `sessions.participant_code` on insert and keep it synchronized if the session's participant code is edited.
+Database triggers populate `participant_code` from `sessions.participant_code` on insert and keep it synchronized if the session's participant code is edited.
