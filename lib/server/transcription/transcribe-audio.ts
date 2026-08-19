@@ -1,4 +1,7 @@
-import OpenAI from "openai";
+import {
+  createOpenAIClient,
+  getDefaultOpenAITimeoutMs,
+} from "../../ai/client";
 
 export async function transcribeAudioFile(audio: File) {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -10,9 +13,9 @@ export async function transcribeAudioFile(audio: File) {
     );
   }
 
-  const openai = new OpenAI({
+  const openai = createOpenAIClient({
     apiKey,
-    timeout: Number(process.env.OPENAI_TIMEOUT_MS || 20000),
+    timeout: getDefaultOpenAITimeoutMs(),
   });
 
   console.info("[remote-mic transcription request]", {

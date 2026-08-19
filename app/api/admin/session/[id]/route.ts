@@ -10,7 +10,7 @@ import {
   normalizeSlotStatus,
   type StoredSubSlotState,
 } from "../../../../../lib/acp-mvp";
-import { buildSemanticSlotControlDebugState } from "../../../../../lib/llm";
+import { buildSemanticSlotControlDebugState } from "../../../../../lib/ai/debug";
 import { prisma } from "../../../../../lib/prisma";
 
 export const runtime = "nodejs";
@@ -35,6 +35,10 @@ export async function GET(_request: Request, context: RouteContext) {
         finalMinutes: {
           orderBy: { createdAt: "desc" },
           take: 10,
+        },
+        aiInterventionLogs: {
+          orderBy: { generatedAt: "desc" },
+          take: 100,
         },
       },
     });
@@ -120,6 +124,19 @@ export async function GET(_request: Request, context: RouteContext) {
         markdown: minutes.markdown,
         json: minutes.json,
         created_at: minutes.createdAt.toISOString(),
+      })),
+      ai_intervention_logs: session.aiInterventionLogs.map((log) => ({
+        id: log.id,
+        session_id: log.sessionId,
+        participant_code: session.participantCode,
+        type: log.type,
+        content: log.content,
+        topic_id: log.topicId,
+        requested_at: log.requestedAt?.toISOString() ?? null,
+        generated_at: log.generatedAt.toISOString(),
+        displayed_at: log.displayedAt?.toISOString() ?? null,
+        metadata: log.metadata,
+        created_at: log.createdAt.toISOString(),
       })),
     });
   } catch (error) {

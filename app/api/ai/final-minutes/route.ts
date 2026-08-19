@@ -8,13 +8,15 @@ import {
 import {
   generateFinalMinutes,
   updateSlotStateBundleFromConversation,
-} from "../../../../lib/llm";
+} from "../../../../lib/ai";
+import { logAIIntervention } from "../../../../lib/ai/intervention-log";
 import { prisma } from "../../../../lib/prisma";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
+    const requestedAt = new Date();
     const body = await request.json();
     const sessionId = requiredString(body.session_id ?? body.sessionId);
 
@@ -51,6 +53,22 @@ export async function POST(request: Request) {
           data: { endedAt: context.session.endedAt ?? new Date() },
         })
       : context.session;
+    const generatedAt = savedMinutes.createdAt;
+    await logAIIntervention({
+      sessionId,
+      type: "FINAL_MINUTES",
+      content: savedMinutes.markdown,
+      topicId: currentTopic ?? null,
+      requestedAt,
+      generatedAt,
+      metadata: {
+        currentTopic,
+        currentTopicTitle,
+        finalMinuteId: savedMinutes.id,
+        finalizedSession: finalize,
+        participantCode: session.participantCode,
+      },
+    });
 
     return NextResponse.json({
       session: {

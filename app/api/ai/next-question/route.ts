@@ -3,12 +3,14 @@ import {
   getSessionContext,
 } from "../../../../lib/acp-store";
 import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
-import { generateNextQuestion } from "../../../../lib/llm";
+import { generateNextQuestion } from "../../../../lib/ai/next-question";
+import { logAIIntervention } from "../../../../lib/ai/intervention-log";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
+    const requestedAt = new Date();
     const body = await request.json();
     const sessionId = requiredString(body.session_id ?? body.sessionId);
 
@@ -26,27 +28,46 @@ export async function POST(request: Request) {
       currentTopic,
       currentTopicTitle,
     });
-
-    return NextResponse.json({
-      suggestion: {
-        suggestion_type: "next_question",
-        content: result.question,
-        question: result.question,
-        transition_phrase: result.transition_phrase,
-        target_slot: result.target_slot,
+    const generatedAt = new Date();
+    const suggestion = {
+      suggestion_type: "next_question",
+      content: result.question,
+      question: result.question,
+      transition_phrase: result.transition_phrase,
+      target_slot: result.target_slot,
+      targetMainSlotId: result.targetMainSlotId,
+      targetSubSlotId: result.targetSubSlotId,
+      no_relevant_followup: result.no_relevant_followup === true,
+      reason: result.reason,
+      sensitivity: result.sensitivity,
+      slot_states_updated: false,
+      control_debug: buildSlotControlDebugState({
+        slots: context.slotStates,
+        currentTopic,
+        subSlotStates: context.subSlotStates,
+      }),
+      created_at: generatedAt.toISOString(),
+    };
+    await logAIIntervention({
+      sessionId,
+      type: "NEXT_QUESTION",
+      content: suggestion.content,
+      topicId: currentTopic ?? null,
+      requestedAt,
+      generatedAt,
+      metadata: {
+        currentTopic,
+        currentTopicTitle,
+        targetSlot: result.target_slot,
         targetMainSlotId: result.targetMainSlotId,
         targetSubSlotId: result.targetSubSlotId,
-        no_relevant_followup: result.no_relevant_followup === true,
-        reason: result.reason,
+        noRelevantFollowup: result.no_relevant_followup === true,
         sensitivity: result.sensitivity,
-        slot_states_updated: false,
-        control_debug: buildSlotControlDebugState({
-          slots: context.slotStates,
-          currentTopic,
-          subSlotStates: context.subSlotStates,
-        }),
-        created_at: new Date().toISOString(),
       },
+    });
+
+    return NextResponse.json({
+      suggestion,
     });
   } catch (error) {
     console.error(error);

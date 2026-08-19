@@ -5,7 +5,7 @@ import {
   saveSlotStates,
 } from "../../../../lib/acp-store";
 import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
-import { updateSlotStateBundleFromConversation } from "../../../../lib/llm";
+import { updateSlotStateBundleFromConversation } from "../../../../lib/ai/slot-state";
 
 export const runtime = "nodejs";
 

@@ -2,13 +2,15 @@ import { NextResponse } from "next/server";
 import {
   getSessionContext,
 } from "../../../../lib/acp-store";
-import { checkConversationEnd } from "../../../../lib/llm";
+import { checkConversationEnd } from "../../../../lib/ai/conversation-end";
 import { buildSlotControlDebugState } from "../../../../lib/acp-mvp";
+import { logAIIntervention } from "../../../../lib/ai/intervention-log";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
+    const requestedAt = new Date();
     const body = await request.json();
     const sessionId = requiredString(body.session_id ?? body.sessionId);
 
@@ -26,24 +28,40 @@ export async function POST(request: Request) {
       currentTopic,
       currentTopicTitle,
     });
+    const generatedAt = new Date();
+    const suggestion = {
+      suggestion_type: "check_end",
+      content: result.message,
+      can_end: result.can_end,
+      message: result.message,
+      reason: result.reason,
+      remaining_slots: result.remaining_slots,
+      slot_states_updated: false,
+      control_debug: buildSlotControlDebugState({
+        slots: context.slotStates,
+        currentTopic,
+        includeBeforeSessionEnd: true,
+        subSlotStates: context.subSlotStates,
+      }),
+      created_at: generatedAt.toISOString(),
+    };
+    await logAIIntervention({
+      sessionId,
+      type: "CONVERSATION_END",
+      content: suggestion.content,
+      topicId: currentTopic ?? null,
+      requestedAt,
+      generatedAt,
+      metadata: {
+        currentTopic,
+        currentTopicTitle,
+        canEnd: result.can_end,
+        remainingSlots: result.remaining_slots,
+      },
+    });
 
     return NextResponse.json({
-      suggestion: {
-        suggestion_type: "check_end",
-        content: result.message,
-        can_end: result.can_end,
-        message: result.message,
-        reason: result.reason,
-        remaining_slots: result.remaining_slots,
-        slot_states_updated: false,
-        control_debug: buildSlotControlDebugState({
-          slots: context.slotStates,
-          currentTopic,
-          includeBeforeSessionEnd: true,
-          subSlotStates: context.subSlotStates,
-        }),
-        created_at: new Date().toISOString(),
-      },
+      suggestion,
     });
   } catch (error) {
     console.error(error);

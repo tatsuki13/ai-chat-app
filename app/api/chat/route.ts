@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import { createOpenAIClient } from "../../../lib/ai/client";
 
 export const runtime = "nodejs";
 
@@ -120,7 +120,7 @@ export async function POST(req: Request) {
       });
     }
 
-    const client = new OpenAI({
+    const client = createOpenAIClient({
       apiKey: process.env.OPENAI_API_KEY,
     });
 

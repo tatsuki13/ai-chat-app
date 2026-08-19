@@ -14,6 +14,7 @@ model Session {
   dialogueStartedAt DateTime?          @map("dialogue_started_at")
   endedAt         DateTime?            @map("ended_at")
   finalMinutes    FinalMinute[]
+  aiInterventionLogs AIInterventionLog[]
   subSlotStates   SlotSubState[]
   slotStates      SlotState[]
   utterances      SessionUtterance[]
@@ -132,4 +133,24 @@ model FinalMinute {
   @@index([sessionId])
   @@index([createdAt])
   @@map("final_minutes")
+}
+
+model AIInterventionLog {
+  id          String   @id @default(cuid())
+  sessionId   String   @map("session_id")
+  type        String
+  content     String
+  topicId     String?  @map("topic_id")
+  requestedAt DateTime? @map("requested_at")
+  generatedAt DateTime @map("generated_at")
+  displayedAt DateTime? @map("displayed_at")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+  session     Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, generatedAt])
+  @@index([sessionId, type])
+  @@index([topicId])
+  @@index([createdAt])
+  @@map("ai_intervention_logs")
 }

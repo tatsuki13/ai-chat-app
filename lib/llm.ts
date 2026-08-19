@@ -1,4 +1,9 @@
-import OpenAI from "openai";
+import type OpenAI from "openai";
+import {
+  createOpenAIClient,
+  getDefaultOpenAIModel,
+  getDefaultOpenAITimeoutMs,
+} from "./ai/client";
 import {
   ACP_SLOT_NAMES,
   DISCUSSION_TOPIC,
@@ -1522,10 +1527,10 @@ async function requestJson<T>(
 
   try {
     const openai = options.timeoutMs
-      ? new OpenAI({ apiKey, timeout: options.timeoutMs })
+      ? createOpenAIClient({ apiKey, timeout: options.timeoutMs })
       : getClient(apiKey);
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      model: getDefaultOpenAIModel(),
       messages: [
         { role: "system", content: `${COMMON_AI_POLICY}\n\n${systemPrompt}` },
         { role: "user", content: JSON.stringify(payload, null, 2) },
@@ -1623,9 +1628,9 @@ function describeLlmError(error: unknown) {
 
 function getClient(apiKey: string) {
   if (!client) {
-    client = new OpenAI({
+    client = createOpenAIClient({
       apiKey,
-      timeout: Number(process.env.OPENAI_TIMEOUT_MS || 20000),
+      timeout: getDefaultOpenAITimeoutMs(),
     });
   }
 

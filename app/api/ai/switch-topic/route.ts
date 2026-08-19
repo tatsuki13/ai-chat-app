@@ -2,17 +2,19 @@ import { NextResponse } from "next/server";
 import {
   getSessionContext,
 } from "../../../../lib/acp-store";
-import { generateTopicSwitch } from "../../../../lib/llm";
+import { generateTopicSwitch } from "../../../../lib/ai/topic-switch";
 import {
   buildSlotControlDebugState,
   DISCUSSION_TOPICS,
   resolveDiscussionTopic,
 } from "../../../../lib/acp-mvp";
+import { logAIIntervention } from "../../../../lib/ai/intervention-log";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
+    const requestedAt = new Date();
     const body = await request.json();
     const sessionId = requiredString(body.session_id ?? body.sessionId);
 
@@ -38,25 +40,46 @@ export async function POST(request: Request) {
             nextTopic,
             nextTopicTitle,
           });
+    const generatedAt = new Date();
+    const suggestion = {
+      suggestion_type: "switch_topic",
+      content: result.message,
+      message: result.message,
+      target_slot: result.target_slot,
+      should_switch: result.should_switch,
+      next_topic: result.next_topic,
+      reason: result.reason,
+      sensitivity: result.sensitivity,
+      slot_states_updated: false,
+      control_debug: buildSlotControlDebugState({
+        slots: context.slotStates,
+        currentTopic,
+        subSlotStates: context.subSlotStates,
+      }),
+      created_at: generatedAt.toISOString(),
+    };
+    await logAIIntervention({
+      sessionId,
+      type: "TOPIC_SWITCH",
+      content: suggestion.content,
+      topicId: currentTopic ?? null,
+      requestedAt,
+      generatedAt,
+      metadata: {
+        currentTopic,
+        currentTopicTitle,
+        requestedNextTopic: nextTopic,
+        requestedNextTopicTitle: nextTopicTitle,
+        forceSwitch,
+        shouldSwitch: result.should_switch,
+        resultNextTopic: result.next_topic,
+        targetSlot: result.target_slot,
+        sensitivity: result.sensitivity,
+      },
+    });
 
     return NextResponse.json({
-      suggestion: {
-        suggestion_type: "switch_topic",
-        content: result.message,
-        message: result.message,
-        target_slot: result.target_slot,
-        should_switch: result.should_switch,
-        next_topic: result.next_topic,
-        reason: result.reason,
-        sensitivity: result.sensitivity,
-        slot_states_updated: false,
-        control_debug: buildSlotControlDebugState({
-          slots: context.slotStates,
-          currentTopic,
-          subSlotStates: context.subSlotStates,
-        }),
-        created_at: new Date().toISOString(),
-      },
+      suggestion,
     });
   } catch (error) {
     console.error(error);
