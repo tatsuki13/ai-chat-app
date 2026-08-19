@@ -45,3 +45,7 @@ Internal `cuid()` primary keys are still preserved for application joins. For re
 - `research_final_minutes`
 - `research_slot_states`
 - `research_slot_sub_states`
+- `research_remote_mic_join_tokens`
+- `research_remote_mic_audio_chunks`
+
+Tables that belong to a session now also carry a nullable `participant_code` column next to `session_id` in the Prisma schema. Database triggers populate it from `sessions.participant_code` on insert and keep it synchronized if the session's participant code is edited.

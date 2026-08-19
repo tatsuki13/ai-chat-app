@@ -30,6 +30,7 @@ model RemoteMicJoinToken {
   id              String                @id @default(cuid())
   tokenHash       String                @unique @map("token_hash")
   sessionId       String                @map("session_id")
+  participantCode String?               @map("participant_code")
   role            String
   expiresAt       DateTime              @map("expires_at")
   usedAt          DateTime?             @map("used_at")
@@ -41,6 +42,7 @@ model RemoteMicJoinToken {
   session         Session               @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId, role, revokedAt, expiresAt])
+  @@index([participantCode])
   @@index([expiresAt])
   @@map("remote_mic_join_tokens")
 }
@@ -49,6 +51,7 @@ model RemoteMicAudioChunk {
   id               String             @id @default(cuid())
   remoteMicTokenId String             @map("remote_mic_token_id")
   sessionId        String             @map("session_id")
+  participantCode  String?            @map("participant_code")
   role             String
   clientChunkId    String             @map("client_chunk_id")
   sequence         Int
@@ -63,6 +66,7 @@ model RemoteMicAudioChunk {
 
   @@unique([remoteMicTokenId, clientChunkId])
   @@index([sessionId, role, capturedAt])
+  @@index([participantCode])
   @@index([createdAt])
   @@map("remote_mic_audio_chunks")
 }
@@ -70,12 +74,14 @@ model RemoteMicAudioChunk {
 model SessionUtterance {
   id        String   @id @default(cuid())
   sessionId String   @map("session_id")
+  participantCode String? @map("participant_code")
   speaker   String
   text      String
   createdAt DateTime @default(now()) @map("created_at")
   session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
+  @@index([participantCode])
   @@index([speaker])
   @@index([createdAt])
   @@map("utterances")
@@ -84,6 +90,7 @@ model SessionUtterance {
 model SlotState {
   id                String   @id @default(cuid())
   sessionId         String   @map("session_id")
+  participantCode   String?  @map("participant_code")
   slotName          String   @map("slot_name")
   status            String
   summary           String
@@ -93,6 +100,7 @@ model SlotState {
 
   @@unique([sessionId, slotName])
   @@index([sessionId])
+  @@index([participantCode])
   @@index([status])
   @@map("slot_states")
 }
@@ -100,6 +108,7 @@ model SlotState {
 model SlotSubState {
   id                   String   @id @default(cuid())
   sessionId            String   @map("session_id")
+  participantCode      String?  @map("participant_code")
   mainSlotId           String   @map("main_slot_id")
   subSlotId            String   @map("sub_slot_id")
   completion           String
@@ -114,6 +123,7 @@ model SlotSubState {
 
   @@unique([sessionId, mainSlotId, subSlotId])
   @@index([sessionId])
+  @@index([participantCode])
   @@index([mainSlotId])
   @@index([subSlotId])
   @@index([completion])
@@ -125,12 +135,14 @@ model SlotSubState {
 model FinalMinute {
   id        String   @id @default(cuid())
   sessionId String   @map("session_id")
+  participantCode String? @map("participant_code")
   markdown  String
   json      Json
   createdAt DateTime @default(now()) @map("created_at")
   session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
+  @@index([participantCode])
   @@index([createdAt])
   @@map("final_minutes")
 }
@@ -138,6 +150,7 @@ model FinalMinute {
 model AIInterventionLog {
   id          String   @id @default(cuid())
   sessionId   String   @map("session_id")
+  participantCode String? @map("participant_code")
   type        String
   content     String
   topicId     String?  @map("topic_id")
@@ -150,6 +163,7 @@ model AIInterventionLog {
 
   @@index([sessionId, generatedAt])
   @@index([sessionId, type])
+  @@index([participantCode])
   @@index([topicId])
   @@index([createdAt])
   @@map("ai_intervention_logs")
