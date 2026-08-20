@@ -173,9 +173,38 @@ type FinalMinutesResponse = {
 
 type UpdateSlotsResponse = {
   slot_states: SlotState[];
-  sub_slot_states: unknown[];
+  sub_slot_states: DeveloperSubSlotState[];
   slot_control?: SlotControlDebugState;
-  slot_classification_debug?: unknown;
+  slot_classification_debug?: SlotClassificationDebugDetails;
+};
+
+type DeveloperSubSlotState = {
+  mainSlotId?: string;
+  subSlotId?: string;
+  completion?: string;
+  responseState?: string;
+  reasonCode?: string | null;
+  depth?: string;
+  evidenceUtteranceIds?: string[];
+};
+
+type SlotClassificationCandidateDebug = {
+  mainSlotId?: string;
+  subSlotId?: string;
+  evidenceUtteranceIds?: unknown;
+};
+
+type SlotClassificationRejectedDebug = {
+  candidate?: SlotClassificationCandidateDebug;
+  reason?: string;
+  rejectionReason?: string;
+  utteranceIds?: unknown;
+};
+
+type SlotClassificationDebugDetails = {
+  candidates?: SlotClassificationCandidateDebug[];
+  accepted?: SlotClassificationCandidateDebug[];
+  rejected?: SlotClassificationRejectedDebug[];
 };
 
 type SessionLookupResponse = {
@@ -281,6 +310,8 @@ function SessionPageClient() {
   const [developerSlotStates, setDeveloperSlotStates] = useState<SlotState[]>([]);
   const [developerSlotControl, setDeveloperSlotControl] =
     useState<SlotControlDebugState | null>(null);
+  const [developerSlotClassificationDebug, setDeveloperSlotClassificationDebug] =
+    useState<SlotClassificationDebugDetails | null>(null);
   const [developerSlotLoading, setDeveloperSlotLoading] = useState(false);
   const [developerSlotError, setDeveloperSlotError] = useState("");
   const logScrollRef = useRef<HTMLDivElement | null>(null);
@@ -451,6 +482,7 @@ function SessionPageClient() {
     if (!session?.id) {
       setDeveloperSlotStates([]);
       setDeveloperSlotControl(null);
+      setDeveloperSlotClassificationDebug(null);
       return;
     }
 
@@ -723,6 +755,8 @@ function SessionPageClient() {
     const text = draft.trim();
     setDraft("");
     setStatusText("保存中");
+
+    setDeveloperSlotClassificationDebug(null);
 
     try {
       const utterance = await addUtterance(session.id, speaker, text);
@@ -1154,6 +1188,7 @@ function SessionPageClient() {
     setBusyAction(buttonType);
     setStatusText("保存中");
     setPromptPanel(getPendingPrompt(buttonType));
+    setDeveloperSlotClassificationDebug(null);
 
     try {
       const updateResult = await postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
@@ -1162,6 +1197,9 @@ function SessionPageClient() {
         current_topic_title: currentTopic.title,
       });
       setDeveloperSlotStates(updateResult.slot_states);
+      setDeveloperSlotClassificationDebug(
+        updateResult.slot_classification_debug ?? null,
+      );
       if (updateResult.slot_control) {
         setDeveloperSlotControl(updateResult.slot_control);
       }
@@ -1320,6 +1358,7 @@ function SessionPageClient() {
       setDraft("");
       setDeveloperSlotStates([]);
       setDeveloperSlotControl(null);
+      setDeveloperSlotClassificationDebug(null);
       setDeveloperSlotError("");
       resetTopicTiming();
       setCompletionState("active");
@@ -1434,6 +1473,7 @@ function SessionPageClient() {
       setUtteranceTotal(restored.utterance_count);
       setDeveloperSlotStates([]);
       setDeveloperSlotControl(null);
+      setDeveloperSlotClassificationDebug(null);
       setDraft("");
       setIsEditingId(false);
       setIdDraft("");
@@ -1507,9 +1547,11 @@ function SessionPageClient() {
       );
       setDeveloperSlotStates(detail.slot_states);
       setDeveloperSlotControl(detail.slot_control ?? null);
+      setDeveloperSlotClassificationDebug(null);
     } catch {
       setDeveloperSlotError("slot states unavailable");
       setDeveloperSlotControl(null);
+      setDeveloperSlotClassificationDebug(null);
     } finally {
       setDeveloperSlotLoading(false);
     }
@@ -2028,6 +2070,7 @@ function SessionPageClient() {
             <DeveloperDialogueTopics
               slotStates={developerSlotStates}
               slotControl={developerSlotControl}
+              classificationDebugDetails={developerSlotClassificationDebug}
               currentTopic={currentTopic.slot_name}
               timerDebug={{
                 started: topicStartedAt !== null,
@@ -2273,6 +2316,7 @@ function LevelBar(props: { value: number; tone: "emerald" | "sky" }) {
 function DeveloperDialogueTopics(props: {
   slotStates: SlotState[];
   slotControl: SlotControlDebugState | null;
+  classificationDebugDetails: SlotClassificationDebugDetails | null;
   currentTopic: string;
   timerDebug: {
     started: boolean;
@@ -2292,6 +2336,10 @@ function DeveloperDialogueTopics(props: {
       slots: props.slotStates,
       currentTopic: props.currentTopic,
     });
+  const classificationDebugRows = buildSlotClassificationDebugRows(
+    props.classificationDebugDetails,
+    slotControl,
+  );
   const filledCount = props.slotStates.filter(
     (slot) => isTerminalSlotStatus(slot.status),
   ).length;
@@ -2362,6 +2410,12 @@ function DeveloperDialogueTopics(props: {
                   key={`${mainSlot.topicId}-${subSlot.id}`}
                   className="rounded-md bg-white px-2 py-1.5 text-[11px] leading-snug text-stone-700"
                 >
+                  <div className="mb-1 grid grid-cols-2 gap-x-2 gap-y-0.5 text-[10px] font-bold text-stone-500">
+                    <div>completion: {subSlot.completion ?? "-"}</div>
+                    <div>response: {subSlot.responseState ?? "-"}</div>
+                    <div>reason: {subSlot.reasonCode ?? "-"}</div>
+                    <div>depth: {subSlot.depth ?? "-"}</div>
+                  </div>
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="font-black text-stone-900">{subSlot.label}</span>
                     <StatusPill status={subSlot.status} />
@@ -2415,10 +2469,159 @@ function DeveloperDialogueTopics(props: {
           <div>{slotControl.selectionReason}</div>
         </div>
       </details>
+
+      {classificationDebugRows.length ? (
+        <details className="mt-3 rounded-md border border-stone-200 bg-white px-2 py-2">
+          <summary className="cursor-pointer text-[11px] font-black text-stone-700">
+            Classification candidates
+          </summary>
+          <div className="mt-2 space-y-2">
+            {classificationDebugRows.map((row) => (
+              <div
+                key={row.key}
+                className="rounded-md border border-stone-200 bg-stone-50 px-2 py-1.5 text-[10px] font-bold leading-relaxed text-stone-600"
+              >
+                <div className="flex flex-wrap items-center gap-1.5 text-stone-800">
+                  <span className="font-black">
+                    {row.mainSlotId || "-"} / {row.subSlotId || "-"}
+                  </span>
+                  <MiniPill
+                    text={row.status}
+                    tone={row.status === "accepted" ? "stone" : "amber"}
+                  />
+                </div>
+                {row.rejectionReason ? (
+                  <div>rejection: {row.rejectionReason}</div>
+                ) : null}
+                <div>
+                  evidence:{" "}
+                  {row.evidenceUtteranceIds.length
+                    ? row.evidenceUtteranceIds.join(", ")
+                    : "-"}
+                </div>
+                <div className="grid grid-cols-2 gap-x-2 gap-y-0.5">
+                  <div>completion: {row.completion ?? "-"}</div>
+                  <div>response: {row.responseState ?? "-"}</div>
+                  <div>reason: {row.reasonCode ?? "-"}</div>
+                  <div>depth: {row.depth ?? "-"}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
         </div>
       </details>
     </aside>
   );
+}
+
+type SlotClassificationDebugRow = {
+  key: string;
+  mainSlotId: string;
+  subSlotId: string;
+  status: "accepted" | "rejected" | "candidate";
+  rejectionReason?: string;
+  evidenceUtteranceIds: string[];
+  completion?: string;
+  responseState?: string;
+  reasonCode?: string | null;
+  depth?: string;
+};
+
+function buildSlotClassificationDebugRows(
+  debug: SlotClassificationDebugDetails | null,
+  slotControl: SlotControlDebugState,
+): SlotClassificationDebugRow[] {
+  if (!debug) return [];
+
+  const rows: SlotClassificationDebugRow[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const candidate of debug.accepted ?? []) {
+    rows.push(
+      buildSlotClassificationDebugRow(candidate, "accepted", slotControl, rows.length),
+    );
+    seenKeys.add(slotClassificationCandidateKey(candidate));
+  }
+
+  for (const rejected of debug.rejected ?? []) {
+    const candidate = rejected.candidate ?? {};
+    rows.push(
+      buildSlotClassificationDebugRow(
+        candidate,
+        "rejected",
+        slotControl,
+        rows.length,
+        rejected.rejectionReason ?? rejected.reason,
+        rejected.utteranceIds,
+      ),
+    );
+    seenKeys.add(slotClassificationCandidateKey(candidate));
+  }
+
+  for (const candidate of debug.candidates ?? []) {
+    const key = slotClassificationCandidateKey(candidate);
+    if (seenKeys.has(key)) continue;
+    rows.push(
+      buildSlotClassificationDebugRow(candidate, "candidate", slotControl, rows.length),
+    );
+  }
+
+  return rows.slice(0, 30);
+}
+
+function buildSlotClassificationDebugRow(
+  candidate: SlotClassificationCandidateDebug,
+  status: SlotClassificationDebugRow["status"],
+  slotControl: SlotControlDebugState,
+  index: number,
+  rejectionReason?: string,
+  rejectedUtteranceIds?: unknown,
+): SlotClassificationDebugRow {
+  const mainSlotId = candidate.mainSlotId ?? "";
+  const subSlotId = candidate.subSlotId ?? "";
+  const stored = findSubSlotControlState(slotControl, mainSlotId, subSlotId);
+  const candidateEvidenceIds = normalizeDebugStringList(
+    candidate.evidenceUtteranceIds,
+  );
+
+  return {
+    key: `${status}-${index}-${mainSlotId}-${subSlotId}`,
+    mainSlotId,
+    subSlotId,
+    status,
+    rejectionReason,
+    evidenceUtteranceIds: candidateEvidenceIds.length
+      ? candidateEvidenceIds
+      : normalizeDebugStringList(rejectedUtteranceIds),
+    completion: stored?.completion,
+    responseState: stored?.responseState,
+    reasonCode: stored?.reasonCode,
+    depth: stored?.depth,
+  };
+}
+
+function findSubSlotControlState(
+  slotControl: SlotControlDebugState,
+  mainSlotId: string,
+  subSlotId: string,
+) {
+  const mainSlot = slotControl.mainSlots.find(
+    (slot) => slot.topicId === mainSlotId || slot.id === mainSlotId,
+  );
+  return mainSlot?.subSlots.find((subSlot) => subSlot.id === subSlotId);
+}
+
+function slotClassificationCandidateKey(candidate: SlotClassificationCandidateDebug) {
+  return `${candidate.mainSlotId ?? ""}:${candidate.subSlotId ?? ""}:${normalizeDebugStringList(
+    candidate.evidenceUtteranceIds,
+  ).join(",")}`;
+}
+
+function normalizeDebugStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 function StatusPill(props: { status: string }) {

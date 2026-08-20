@@ -3,6 +3,7 @@ import { prisma } from "./prisma";
 import {
   createEmptySlotStates,
   createEmptySubSlotStates,
+  isAnswerDepth,
   isSlotClassificationResponseState,
   isSlotCompletion,
   isSlotReasonCode,
@@ -11,6 +12,7 @@ import {
   normalizeSlotStatus,
   toJsonValue,
   type AcpSlotState,
+  type AnswerDepth,
   type ConversationUtterance,
   type FinalMinutesResult,
   type SlotClassificationResponseState,
@@ -68,7 +70,9 @@ export async function getSessionContext(sessionId: string) {
         evidenceUtteranceIds: normalizeEvidenceIds(state.evidenceUtteranceIds),
         canAskAgain: state.canAskAgain,
         isDeferred: state.isDeferred,
-        depth: inferLegacyDepth(state.completion, state.responseState),
+        depth: isAnswerDepth(state.depth)
+          ? state.depth
+          : inferLegacyDepth(state.completion, state.responseState),
         needsOptionalFollowUp: false,
         hasConflict: state.responseState === "conflicting",
         lastUpdatedTopicId: state.lastUpdatedTopicId,
@@ -156,6 +160,7 @@ export async function saveSubSlotStates(
           responseState: state.responseState,
           reasonCode: state.reasonCode,
           evidenceUtteranceIds: toJsonValue(state.evidenceUtteranceIds) as Prisma.InputJsonValue,
+          depth: state.depth,
           canAskAgain: state.canAskAgain,
           isDeferred: state.isDeferred,
           lastUpdatedTopicId: state.lastUpdatedTopicId,
@@ -165,6 +170,7 @@ export async function saveSubSlotStates(
           responseState: state.responseState,
           reasonCode: state.reasonCode,
           evidenceUtteranceIds: toJsonValue(state.evidenceUtteranceIds) as Prisma.InputJsonValue,
+          depth: state.depth,
           canAskAgain: state.canAskAgain,
           isDeferred: state.isDeferred,
           lastUpdatedTopicId: state.lastUpdatedTopicId,
@@ -208,7 +214,7 @@ function normalizeEvidenceIds(value: unknown) {
   return [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))];
 }
 
-function inferLegacyDepth(completion: string, responseState: string) {
+function inferLegacyDepth(completion: string, responseState: string): AnswerDepth {
   if (responseState === "no_response") return "none";
   if (completion === "complete" || completion === "partial") return "minimal";
   return "none";

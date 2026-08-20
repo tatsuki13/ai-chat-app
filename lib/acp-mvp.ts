@@ -464,6 +464,7 @@ export type SubSlotControlState = {
   completion?: SlotCompletion;
   responseState?: SlotClassificationResponseState;
   reasonCode?: SlotReasonCode | null;
+  depth?: AnswerDepth;
   evidenceUtteranceCount?: number;
   value?: string;
   unansweredReason?: UnansweredReason;
@@ -545,6 +546,7 @@ export type AcpSlotState = {
 };
 
 export const SLOT_COMPLETIONS = ["none", "partial", "complete"] as const;
+export const ANSWER_DEPTHS = ["none", "minimal", "elaborated"] as const;
 export const SLOT_CLASSIFICATION_RESPONSE_STATES = [
   "answered",
   "no_response",
@@ -1086,6 +1088,10 @@ export function isSlotCompletion(value: unknown): value is SlotCompletion {
   return SLOT_COMPLETIONS.includes(value as SlotCompletion);
 }
 
+export function isAnswerDepth(value: unknown): value is AnswerDepth {
+  return ANSWER_DEPTHS.includes(value as AnswerDepth);
+}
+
 export function isSlotClassificationResponseState(
   value: unknown,
 ): value is SlotClassificationResponseState {
@@ -1293,6 +1299,7 @@ function buildMainSlotControlState(
       completion: stored?.completion,
       responseState: stored?.responseState,
       reasonCode: stored?.reasonCode,
+      depth: stored?.depth,
       evidenceUtteranceCount: stored?.evidenceUtteranceIds.length,
       value: override?.value ?? (aspectMatchesText(aspect.label, value) ? value : undefined),
       unansweredReason:

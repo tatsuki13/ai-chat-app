@@ -2,12 +2,14 @@ import { NextResponse } from "next/server";
 import {
   buildSlotControlDebugState,
   createEmptySlotStates,
+  isAnswerDepth,
   isSlotClassificationResponseState,
   isSlotCompletion,
   isSlotReasonCode,
   mergeSlotStates,
   normalizeConversationSpeaker,
   normalizeSlotStatus,
+  type AnswerDepth,
   type StoredSubSlotState,
 } from "../../../../../lib/acp-mvp";
 import { buildSemanticSlotControlDebugState } from "../../../../../lib/ai/debug";
@@ -83,6 +85,9 @@ export async function GET(_request: Request, context: RouteContext) {
         : [],
       canAskAgain: state.canAskAgain,
       isDeferred: state.isDeferred,
+      depth: isAnswerDepth(state.depth)
+        ? state.depth
+        : inferLegacyDepth(state.completion, state.responseState),
       lastUpdatedTopicId: state.lastUpdatedTopicId,
       updatedAt: state.updatedAt.toISOString(),
     }));
@@ -151,4 +156,10 @@ export async function GET(_request: Request, context: RouteContext) {
 
 function optionalString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function inferLegacyDepth(completion: string, responseState: string): AnswerDepth {
+  if (responseState === "no_response") return "none";
+  if (completion === "complete" || completion === "partial") return "minimal";
+  return "none";
 }
