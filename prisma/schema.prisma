@@ -30,9 +30,9 @@ model Session {
 
 model RemoteMicJoinToken {
   id              String                @id @default(cuid())
+  participantCode String?               @map("participant_code")
   tokenHash       String                @unique @map("token_hash")
   sessionId       String                @map("session_id")
-  participantCode String?               @map("participant_code")
   role            String
   expiresAt       DateTime              @map("expires_at")
   usedAt          DateTime?             @map("used_at")
@@ -51,9 +51,9 @@ model RemoteMicJoinToken {
 
 model RemoteMicAudioChunk {
   id               String             @id @default(cuid())
+  participantCode  String?            @map("participant_code")
   remoteMicTokenId String             @map("remote_mic_token_id")
   sessionId        String             @map("session_id")
-  participantCode  String?            @map("participant_code")
   role             String
   clientChunkId    String             @map("client_chunk_id")
   sequence         Int
@@ -75,10 +75,14 @@ model RemoteMicAudioChunk {
 
 model SessionUtterance {
   id              String   @id @default(cuid())
-  sessionId       String   @map("session_id")
   participantCode String?  @map("participant_code")
+  sessionId       String   @map("session_id")
   speaker         String
   text            String
+  startMs         Int?     @map("start_ms")
+  endMs           Int?     @map("end_ms")
+  source          String?
+  analysisVersion String?  @map("analysis_version")
   createdAt       DateTime @default(now()) @map("created_at")
   session         Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
@@ -86,13 +90,14 @@ model SessionUtterance {
   @@index([participantCode])
   @@index([speaker])
   @@index([createdAt])
+  @@index([sessionId, startMs])
   @@map("utterances")
 }
 
 model SlotState {
   id                String   @id @default(cuid())
-  sessionId         String   @map("session_id")
   participantCode   String?  @map("participant_code")
+  sessionId         String   @map("session_id")
   slotName          String   @map("slot_name")
   status            String
   summary           String
@@ -109,8 +114,8 @@ model SlotState {
 
 model SlotSubState {
   id                   String   @id @default(cuid())
-  sessionId            String   @map("session_id")
   participantCode      String?  @map("participant_code")
+  sessionId            String   @map("session_id")
   mainSlotId           String   @map("main_slot_id")
   subSlotId            String   @map("sub_slot_id")
   completion           String
@@ -121,6 +126,7 @@ model SlotSubState {
   isDeferred           Boolean  @default(false) @map("is_deferred")
   lastUpdatedTopicId   String?  @map("last_updated_topic_id")
   updatedAt            DateTime @updatedAt @map("updated_at")
+  depth                String?
   session              Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@unique([sessionId, mainSlotId, subSlotId])
@@ -136,8 +142,8 @@ model SlotSubState {
 
 model FinalMinute {
   id              String   @id @default(cuid())
-  sessionId       String   @map("session_id")
   participantCode String?  @map("participant_code")
+  sessionId       String   @map("session_id")
   markdown        String
   json            Json
   createdAt       DateTime @default(now()) @map("created_at")
@@ -151,8 +157,8 @@ model FinalMinute {
 
 model AIInterventionLog {
   id              String    @id @default(cuid())
-  sessionId       String    @map("session_id")
   participantCode String?   @map("participant_code")
+  sessionId       String    @map("session_id")
   type            String
   content         String
   topicId         String?   @map("topic_id")
@@ -173,8 +179,8 @@ model AIInterventionLog {
 
 model AIActionEvent {
   id                String   @id
-  sessionId         String   @map("session_id")
   participantCode   String?  @map("participant_code")
+  sessionId         String   @map("session_id")
   actionType        String   @map("action_type")
   currentTopicId    String?  @map("current_topic_id")
   currentTopicTitle String?  @map("current_topic_title")
@@ -199,8 +205,8 @@ model AIActionEvent {
 
 model WebRtcSignal {
   id              String   @id
-  sessionId       String   @map("session_id")
   participantCode String?  @map("participant_code")
+  sessionId       String   @map("session_id")
   role            String
   sender          String
   recipient       String
