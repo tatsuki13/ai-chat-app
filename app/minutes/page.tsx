@@ -86,6 +86,18 @@ type EvidenceRecord = {
   speaker?: string;
 };
 
+type FollowUpItem = {
+  key: string;
+  label: string;
+  body: string;
+};
+
+type FollowUpThemeGroup = {
+  themeId: string;
+  title: string;
+  items: FollowUpItem[];
+};
+
 type ThemeDefinition = {
   id: string;
   title: string;
@@ -214,7 +226,7 @@ function MinutesPageClient() {
   const themeGroups = useMemo(() => buildThemeGroups(themes), [themes]);
   const overviewItems = useMemo(() => buildOverviewItems(minutes, themes), [minutes, themes]);
   const respectItems = useMemo(() => buildRespectItems(themes), [themes]);
-  const followUpItems = useMemo(() => buildFollowUpItems(minutesJson), [minutesJson]);
+  const followUpGroups = useMemo(() => buildFollowUpItems(minutesJson), [minutesJson]);
   const hasNarrativeContent = themes.some(themeHasNarrativeText);
   const hasEvidenceOnly = !hasNarrativeContent && themes.some((theme) => theme.evidence.length > 0);
 
@@ -286,7 +298,7 @@ function MinutesPageClient() {
             ))}
           </div>
         )}
-        <FollowUpSection items={followUpItems} />
+        <FollowUpSection groups={followUpGroups} />
         <MinutesFooter />
       </article>
     </MinutesShell>
@@ -557,22 +569,42 @@ function EvidenceSection(props: { evidence: EvidenceRecord[] }) {
   );
 }
 
-function FollowUpSection(props: { items: string[] }) {
-  if (props.items.length === 0) return null;
+function FollowUpSection(props: { groups: FollowUpThemeGroup[] }) {
+  if (props.groups.length === 0) return null;
 
   return (
     <section className="minutes-subsection mt-10 border-t border-stone-200 pt-6">
-      <h2 className="text-[19px] font-black text-stone-950">今後確認したいこと</h2>
+      <h2 className="text-[19px] font-black text-stone-950">
+        今後確認したいこと・今回保留となったこと
+      </h2>
       <p className="mt-2 text-[12px] font-semibold leading-6 text-stone-600">
-        ここには、今回の対話で未確認の情報と、確認を見送った項目や保留として残した項目を整理しています。
+        ここには、今回の対話で未確認の情報と、一部だけ確認できた項目、まだ考えていないこと、
+        言葉にしにくかったこと、今回は話さなかったことなどを整理しています。
       </p>
-      <ul className="mt-4 space-y-2">
-        {props.items.map((item) => (
-          <li key={item} className="text-[13px] font-semibold leading-7 text-stone-800">
-            {item}
-          </li>
+      <div className="mt-5 space-y-5">
+        {props.groups.map((group, index) => (
+          <section key={group.themeId} className="space-y-2">
+            <h3 className="text-[14px] font-black leading-snug text-stone-900">
+              {index + 1}. {group.title}
+            </h3>
+            <ul className="space-y-2">
+              {group.items.map((item) => (
+                <li
+                  key={item.key}
+                  className="rounded-md border border-stone-200 bg-stone-50 px-3 py-2"
+                >
+                  <div className="text-[13px] font-black leading-6 text-stone-900">
+                    ・{item.label}
+                  </div>
+                  <p className="mt-1 whitespace-pre-line text-[12px] font-semibold leading-6 text-stone-700">
+                    {item.body}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </section>
         ))}
-      </ul>
+      </div>
     </section>
   );
 }
@@ -732,18 +764,121 @@ function buildRespectItems(themes: ThemeForDisplay[]) {
   return uniqueStrings(candidates.map(toRespectItem)).filter(Boolean).slice(0, 6);
 }
 
-function buildFollowUpItems(value: unknown) {
+function buildFollowUpItems(value: unknown): FollowUpThemeGroup[] {
   const json = value && typeof value === "object" ? (value as MinutesJson) : {};
   const themes = Array.isArray(json.themes) ? json.themes : [];
-  const items = themes.flatMap((theme) => {
-    const themeTitle = theme.title || "このテーマ";
-    const aspects = Array.isArray(theme.aspects) ? theme.aspects : [];
-    return aspects
-      .map((aspect) => buildFollowUpItem(themeTitle, aspect))
-      .filter((item): item is string => Boolean(item));
-  });
+  const themeById = new Map(
+    themes
+      .filter((theme) => typeof theme.theme_id === "string")
+      .map((theme) => [theme.theme_id as string, theme]),
+  );
 
-  return uniqueStrings(items).slice(0, 8);
+  return THEME_ORDER.map((definition) => {
+    const theme = themeById.get(definition.id);
+    const aspects = Array.isArray(theme?.aspects) ? theme.aspects : [];
+    const items = aspects
+      .map((aspect) => buildFollowUpThemeItem(definition.id, aspect))
+      .filter((item): item is FollowUpItem => Boolean(item));
+
+    return {
+      themeId: definition.id,
+      title: theme?.title || definition.title,
+      items: uniqueFollowUpItems(items),
+    };
+  }).filter((group) => group.items.length > 0);
+}
+
+function buildFollowUpThemeItem(
+  themeId: string,
+  aspect: AspectSourceRecord,
+): FollowUpItem | null {
+  const label = aspect.label || "未確認の項目";
+  const completion = aspect.completion;
+  const responseState = aspect.responseState;
+  const status = typeof aspect.status === "string" ? aspect.status : "";
+
+  if (completion === "complete") return null;
+  if (completion !== "partial" && ["filled", "complete"].includes(status)) {
+    return null;
+  }
+
+  const evidenceText = buildFollowUpEvidenceText(aspect.evidence);
+  const deferredText =
+    aspect.isDeferred && aspect.canAskAgain !== false
+      ? "関連する話題になったときに、自然に確認できる内容として残します。"
+      : "";
+  const bodyParts: string[] = [];
+
+  switch (responseState) {
+    case "answered":
+      bodyParts.push(
+        evidenceText
+          ? `${evidenceText}という発言から一部確認できていますが、まだ部分的な確認にとどまっています。`
+          : "一部確認できていますが、まだ部分的な確認にとどまっています。",
+      );
+      break;
+    case "no_response":
+      bodyParts.push("今回の対話ではまだ話題になっていません。");
+      break;
+    case "explicit_none":
+      bodyParts.push(
+        "本人から特にない、または該当するものはないとの意向が示されています。",
+      );
+      break;
+    case "not_considered":
+      bodyParts.push(
+        "現時点ではまだ具体的には考えていない、または分からないとのことです。",
+      );
+      break;
+    case "unable_to_verbalize":
+      bodyParts.push("今回は十分に言葉にすることが難しい状況でした。");
+      break;
+    case "declined":
+      bodyParts.push(
+        "今回は話したくないとの意向が示されたため、それ以上の確認は行っていません。",
+      );
+      break;
+    case "ambiguous":
+      bodyParts.push(
+        "発言はありますが、今回の対話では意味を十分に明確化できていません。",
+      );
+      break;
+    case "conflicting":
+      bodyParts.push(
+        "複数の発言があり、現時点では考えが一つに整理されていません。",
+      );
+      break;
+    default:
+      if (completion === "partial" || status === "partial") {
+        bodyParts.push(
+          evidenceText
+            ? `${evidenceText}という発言から一部確認できていますが、まだ部分的な確認にとどまっています。`
+            : "一部確認できていますが、まだ部分的な確認にとどまっています。",
+        );
+      } else if (completion === "none" || status === "empty") {
+        bodyParts.push("今回の対話ではまだ話題になっていません。");
+      } else {
+        return null;
+      }
+  }
+
+  if (deferredText) bodyParts.push(deferredText);
+
+  return {
+    key: `${themeId}-${aspect.aspect_id ?? label}-${bodyParts.join("|")}`,
+    label,
+    body: bodyParts.join("\n"),
+  };
+}
+
+function uniqueFollowUpItems(items: FollowUpItem[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = `${item.label}:${item.body}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function buildFollowUpItem(themeTitle: string, aspect: AspectSourceRecord) {

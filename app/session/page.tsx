@@ -127,7 +127,6 @@ type SlotState = {
 
 type ProposalReason =
   | "base_time_elapsed"
-  | "max_time_elapsed"
   | "core_slots_completed"
   | "no_more_to_add"
   | "not_considered"
@@ -643,15 +642,17 @@ function SessionPageClient() {
   }, [isConversationTimerRunning]);
 
   useEffect(() => {
-    if (!session || currentTopicIndex !== 0 || topicStartedAt === null) return;
+    if (!session || topicStartedAt === null) return;
     if (completionState !== "active" || busyAction || transitionProposal) return;
     if (topicElapsedMs < topicBudgetMs) return;
 
-    void forceAdvanceFromFirstTopic();
+    void forceAdvanceFromCurrentTopic();
   }, [
     busyAction,
     completionState,
     currentTopicIndex,
+    isLastTopic,
+    nextTopic,
     session,
     topicBudgetMs,
     topicElapsedMs,
@@ -663,13 +664,12 @@ function SessionPageClient() {
     if (!session || topicStartedAt === null) return;
     if (completionState !== "active") return;
     if (busyAction || pushToTalkActive || transitionProposal) return;
+    if (maxTimeElapsed) return;
     if (timerNow < proposalCooldownUntil) return;
     if (decisionPromptShownByTopic[currentTopicIndex]) return;
 
     const reason = getTransitionProposalReason({
       decisionTimeElapsed,
-      maxTimeElapsed,
-      isFirstTopic: currentTopicIndex === 0,
       currentTopicSlot: developerSlotStates.find(
         (slot) => slot.slot_name === currentTopic.slot_name,
       ),
@@ -1671,10 +1671,18 @@ function SessionPageClient() {
     setStatusText("終了確認");
   }
 
-  async function forceAdvanceFromFirstTopic() {
-    if (!session || busyAction || !nextTopic) return;
+  async function forceAdvanceFromCurrentTopic() {
+    if (!session || busyAction) return;
 
     setTransitionProposal(null);
+
+    if (isLastTopic) {
+      await completeSession();
+      return;
+    }
+
+    if (!nextTopic) return;
+
     setBusyAction("switch_topic");
     setStatusText("話題切替中");
 
@@ -2079,6 +2087,7 @@ function SessionPageClient() {
                 elapsedMs: topicElapsedMs,
                 decisionAtMs,
                 carryToNextTopicMs,
+                maxReached: maxTimeElapsed,
               }}
               loading={developerSlotLoading}
               error={developerSlotError}
@@ -2325,6 +2334,7 @@ function DeveloperDialogueTopics(props: {
     elapsedMs: number;
     decisionAtMs: number;
     carryToNextTopicMs: number;
+    maxReached: boolean;
   };
   loading: boolean;
   error: string;
@@ -2441,6 +2451,7 @@ function DeveloperDialogueTopics(props: {
           <div>Elapsed: {formatTimerSeconds(Math.floor(props.timerDebug.elapsedMs / 1000))}</div>
           <div>Decision threshold: {formatTimerSeconds(Math.floor(props.timerDebug.decisionAtMs / 1000))}</div>
           <div>Carry to next topic: {formatTimerSeconds(Math.floor(props.timerDebug.carryToNextTopicMs / 1000))}</div>
+          <div>Max reached: {props.timerDebug.maxReached ? "true" : "false"}</div>
           <div>参照メインスロット: {slotControl.currentMainSlot}</div>
           <div>
             参照サブスロット:{" "}
@@ -3587,12 +3598,9 @@ function mergeUtterances(current: Utterance[], incoming: Utterance[]) {
 
 function getTransitionProposalReason(input: {
   decisionTimeElapsed: boolean;
-  maxTimeElapsed: boolean;
-  isFirstTopic: boolean;
   currentTopicSlot?: SlotState;
   utterances: Utterance[];
 }): ProposalReason | null {
-  if (input.isFirstTopic && input.maxTimeElapsed) return "max_time_elapsed";
   if (input.decisionTimeElapsed && isTerminalSlotStatus(input.currentTopicSlot?.status)) {
     return "core_slots_completed";
   }
@@ -3735,7 +3743,6 @@ function hasPreferNotToAnswer(text: string) {
 function proposalReasonLabel(reason: ProposalReason) {
   const labels: Record<ProposalReason, string> = {
     base_time_elapsed: "基準時間経過",
-    max_time_elapsed: "最大時間到達",
     core_slots_completed: "コア項目確認済み",
     no_more_to_add: "追加なし",
     not_considered: "保留回答",
