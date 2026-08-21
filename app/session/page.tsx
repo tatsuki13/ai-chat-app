@@ -105,6 +105,7 @@ type Utterance = {
   speaker: Speaker | string;
   text: string;
   created_at: string;
+  persisted?: boolean;
 };
 
 type SlotState = {
@@ -322,6 +323,8 @@ function SessionPageClient() {
   );
   const promptRestoreTimeoutRef = useRef<number | null>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
+  const utterancesRef = useRef<Utterance[]>([]);
+  const pendingCommitPromiseRef = useRef<Promise<void> | null>(null);
   const speakerRef = useRef<Speaker>("elder");
   const pushToTalkPressedRef = useRef(false);
   const pushToTalkStartingRef = useRef(false);
@@ -340,7 +343,7 @@ function SessionPageClient() {
   const participantCode = session?.participant_code || "未設定";
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
   const nextTopic = DISCUSSION_TOPICS[currentTopicIndex + 1] ?? null;
-  const visibleUtterances = utterances.slice(-MAX_RENDERED_UTTERANCES);
+  const visibleUtterances = limitUtteranceState(utterances);
   const hiddenUtteranceCount = Math.max(
     0,
     utteranceTotal - visibleUtterances.length,
@@ -441,6 +444,10 @@ function SessionPageClient() {
   }, [session]);
 
   useEffect(() => {
+    utterancesRef.current = utterances;
+  }, [utterances]);
+
+  useEffect(() => {
     if (!session?.id || session.ended_at) return;
 
     const timerId = window.setInterval(() => {
@@ -448,8 +455,8 @@ function SessionPageClient() {
         .then((detail) => {
           setSession(detail.session);
           setUtterances((current) =>
-            mergeUtterances(current, detail.utterances).slice(
-              -MAX_RENDERED_UTTERANCES,
+            limitUtteranceState(
+              mergeUtterances(current, markPersistedUtterances(detail.utterances)),
             ),
           );
           setUtteranceTotal(detail.utterance_count);
@@ -1086,20 +1093,28 @@ function SessionPageClient() {
         transcriptLength: data.transcript?.length ?? data.utterance?.text.length ?? 0,
       });
 
-      if (!data.utterance) {
+      const transcript = data.transcript?.trim();
+      if (!transcript && !data.utterance) {
         setStatusText(data.skipped ? "音声区間をスキップ" : "発話なし");
         return;
       }
 
       markTopicInteractionStarted(source);
+      const utterance =
+        data.utterance ??
+        createLocalVoiceUtterance(
+          data.speaker ?? normalizeSpeaker(chunk.speaker),
+          transcript ?? "",
+          chunk.startedAt,
+        );
       setUtterances((current) =>
-        [...current, data.utterance as Utterance]
-          .sort(compareUtterancesByTime)
-          .slice(-MAX_RENDERED_UTTERANCES),
+        syncUtterancesRef(limitUtteranceState(
+          [...current, utterance].sort(compareUtterancesByTime),
+        )),
       );
       setUtteranceTotal((current) => current + 1);
       markSessionUsed(currentSession.id);
-      setStatusText("保存済み");
+      setStatusText(isPersistedUtterance(utterance) ? "保存済み" : "表示済み（未保存）");
     } catch (error) {
       console.warn("Voice audio transcription failed", error);
       setAudioInputError("音声入力を確認してください。");
@@ -1108,6 +1123,54 @@ function SessionPageClient() {
 
   function getAudioAwareSavedStatus() {
     return "保存済み";
+  }
+
+  function syncUtterancesRef(utterances: Utterance[]) {
+    utterancesRef.current = utterances;
+
+    return utterances;
+  }
+
+  async function commitPendingUtterances() {
+    if (pendingCommitPromiseRef.current) {
+      return pendingCommitPromiseRef.current;
+    }
+
+    const run = async () => {
+      const currentSession = sessionRef.current;
+      if (!currentSession) return;
+
+      const pending = utterancesRef.current
+        .filter(isUnpersistedUtterance)
+        .sort(compareUtterancesByTime);
+
+      for (const localUtterance of pending) {
+        if (!isUnpersistedUtterance(localUtterance)) continue;
+
+        const saved = await addUtterance(
+          currentSession.id,
+          normalizeSpeaker(String(localUtterance.speaker)),
+          localUtterance.text,
+        );
+
+        setUtterances((current) => {
+          const next = current.map((utterance) =>
+            utterance.id === localUtterance.id
+              ? { ...saved, persisted: true }
+              : utterance,
+          );
+          utterancesRef.current = next;
+
+          return next;
+        });
+      }
+    };
+
+    pendingCommitPromiseRef.current = run().finally(() => {
+      pendingCommitPromiseRef.current = null;
+    });
+
+    return pendingCommitPromiseRef.current;
   }
 
   async function handleUpdateUtterance(
@@ -1121,6 +1184,18 @@ function SessionPageClient() {
     setStatusText("保存中");
 
     try {
+      if (isUnpersistedUtteranceId(utteranceId)) {
+        setUtterances((current) =>
+          syncUtterancesRef(current.map((utterance) =>
+            utterance.id === utteranceId
+              ? { ...utterance, speaker: nextSpeaker, text }
+              : utterance,
+          )),
+        );
+        setStatusText("表示済み（未保存）");
+        return;
+      }
+
       const updated = await updateUtterance(utteranceId, nextSpeaker, text);
       setUtterances((current) =>
         current.map((utterance) =>
@@ -1141,6 +1216,17 @@ function SessionPageClient() {
     setStatusText("保存中");
 
     try {
+      if (isUnpersistedUtteranceId(utteranceId)) {
+        setUtterances((current) =>
+          syncUtterancesRef(
+            current.filter((utterance) => utterance.id !== utteranceId),
+          ),
+        );
+        setUtteranceTotal((current) => Math.max(0, current - 1));
+        setStatusText(getAudioAwareSavedStatus());
+        return;
+      }
+
       await deleteUtterance(utteranceId);
       setUtterances((current) =>
         current.filter((utterance) => utterance.id !== utteranceId),
@@ -1191,6 +1277,7 @@ function SessionPageClient() {
     setDeveloperSlotClassificationDebug(null);
 
     try {
+      await commitPendingUtterances();
       const updateResult = await postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
         session_id: session.id,
         current_topic: currentTopic.slot_name,
@@ -1576,6 +1663,7 @@ function SessionPageClient() {
     setStatusText("保存中");
 
     try {
+      await commitPendingUtterances();
       await postJson("/api/ai/update-slots", {
         session_id: session.id,
         current_topic: currentTopic.slot_name,
@@ -1625,6 +1713,7 @@ function SessionPageClient() {
     setPromptPanel(getPendingPrompt("switch_topic"));
 
     try {
+      await commitPendingUtterances();
       await postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
         session_id: session.id,
         current_topic: currentTopic.slot_name,
@@ -1687,6 +1776,7 @@ function SessionPageClient() {
     setStatusText("話題切替中");
 
     try {
+      await commitPendingUtterances();
       await postJson("/api/ai/update-slots", {
         session_id: session.id,
         current_topic: currentTopic.slot_name,
@@ -1718,6 +1808,7 @@ function SessionPageClient() {
     setStatusText("議事録生成中");
 
     try {
+      await commitPendingUtterances();
       await postJson("/api/ai/update-slots", {
         session_id: session.id,
         current_topic: currentTopic.slot_name,
@@ -3583,6 +3674,38 @@ function compareUtterancesByTime(left: Utterance, right: Utterance) {
   );
 }
 
+function createLocalVoiceUtterance(
+  speaker: Speaker,
+  text: string,
+  capturedAt?: number,
+): Utterance {
+  const createdAt = new Date(capturedAt ?? Date.now()).toISOString();
+
+  return {
+    id: `local-${createdAt}-${crypto.randomUUID()}`,
+    speaker,
+    text,
+    created_at: createdAt,
+    persisted: false,
+  };
+}
+
+function markPersistedUtterances(utterances: Utterance[]) {
+  return utterances.map((utterance) => ({ ...utterance, persisted: true }));
+}
+
+function isPersistedUtterance(utterance: Utterance) {
+  return utterance.persisted !== false;
+}
+
+function isUnpersistedUtterance(utterance: Utterance) {
+  return utterance.persisted === false;
+}
+
+function isUnpersistedUtteranceId(utteranceId: string) {
+  return utteranceId.startsWith("local-");
+}
+
 function mergeUtterances(current: Utterance[], incoming: Utterance[]) {
   const byId = new Map<string, Utterance>();
 
@@ -3594,6 +3717,18 @@ function mergeUtterances(current: Utterance[], incoming: Utterance[]) {
   }
 
   return Array.from(byId.values()).sort(compareUtterancesByTime);
+}
+
+function limitUtteranceState(utterances: Utterance[]) {
+  const sorted = [...utterances].sort(compareUtterancesByTime);
+  const visible = sorted.slice(-MAX_RENDERED_UTTERANCES);
+  const visibleIds = new Set(visible.map((utterance) => utterance.id));
+  const pending = sorted.filter(
+    (utterance) =>
+      isUnpersistedUtterance(utterance) && !visibleIds.has(utterance.id),
+  );
+
+  return [...pending, ...visible].sort(compareUtterancesByTime);
 }
 
 function getTransitionProposalReason(input: {
