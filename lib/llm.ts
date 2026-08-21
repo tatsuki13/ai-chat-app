@@ -1,8 +1,9 @@
 import type OpenAI from "openai";
 import {
   createOpenAIClient,
-  getDefaultOpenAIModel,
+  getDialogueOpenAIModel,
   getDefaultOpenAITimeoutMs,
+  getMinutesOpenAIModel,
 } from "./ai/client";
 import {
   ACP_SLOT_NAMES,
@@ -1046,6 +1047,7 @@ export async function generateFinalMinutes(
     {},
     { type: "json_object" },
     {
+      model: getMinutesOpenAIModel(),
       timeoutMs: Number(process.env.FINAL_MINUTES_OPENAI_TIMEOUT_MS || 90000),
     },
   );
@@ -1509,7 +1511,7 @@ async function requestJson<T>(
   payload: unknown,
   fallback: T,
   responseFormat: unknown = { type: "json_object" },
-  options: { throwOnFailure?: boolean; timeoutMs?: number } = {},
+  options: { model?: string; throwOnFailure?: boolean; timeoutMs?: number } = {},
 ): Promise<T> {
   const apiKey = process.env.OPENAI_API_KEY;
 
@@ -1530,7 +1532,7 @@ async function requestJson<T>(
       ? createOpenAIClient({ apiKey, timeout: options.timeoutMs })
       : getClient(apiKey);
     const completion = await openai.chat.completions.create({
-      model: getDefaultOpenAIModel(),
+      model: options.model ?? getDialogueOpenAIModel(),
       messages: [
         { role: "system", content: `${COMMON_AI_POLICY}\n\n${systemPrompt}` },
         { role: "user", content: JSON.stringify(payload, null, 2) },

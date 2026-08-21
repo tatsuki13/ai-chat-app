@@ -1,4 +1,7 @@
-import { createOpenAIClient } from "../../../lib/ai/client";
+import {
+  createOpenAIClient,
+  getDialogueOpenAIModel,
+} from "../../../lib/ai/client";
 
 export const runtime = "nodejs";
 
@@ -125,7 +128,7 @@ export async function POST(req: Request) {
     });
 
     const response = await client.responses.create({
-      model: process.env.OPENAI_MODEL || "gpt-5.4-mini",
+      model: getDialogueOpenAIModel(),
       input: [
         {
           role: "system",
