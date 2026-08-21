@@ -2,10 +2,28 @@ import { NextResponse } from "next/server";
 import { prisma } from "../../../../../lib/prisma";
 import {
   clearActiveFixedRemoteMicSession,
+  getActiveFixedRemoteMicSession,
   setActiveFixedRemoteMicSession,
 } from "../../../../../lib/remote-mic/fixed-session";
+import { clearRemoteMicWebRtcOffers } from "../../../../../lib/remote-mic/webrtc-signaling";
 
 export const runtime = "nodejs";
+
+export async function GET(request: Request) {
+  const params = new URL(request.url).searchParams;
+  const sessionId = params.get("sessionId")?.trim() ?? "";
+
+  if (!sessionId) {
+    return NextResponse.json({ error: "sessionId is required" }, { status: 400 });
+  }
+
+  const active = getActiveFixedRemoteMicSession();
+  if (!active || active.sessionId !== sessionId) {
+    return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
+  }
+
+  return NextResponse.json({ active: serializeState(active) });
+}
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
@@ -43,7 +61,11 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   const params = new URL(request.url).searchParams;
-  clearActiveFixedRemoteMicSession(params.get("sessionId") ?? undefined);
+  const sessionId = params.get("sessionId") ?? undefined;
+  clearActiveFixedRemoteMicSession(sessionId);
+  if (sessionId) {
+    clearRemoteMicWebRtcOffers(sessionId);
+  }
 
   return NextResponse.json({ ok: true });
 }

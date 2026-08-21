@@ -50,6 +50,14 @@ export function listRemoteMicWebRtcOffers(sessionId: string) {
     .map(serializeOffer);
 }
 
+export function clearRemoteMicWebRtcOffers(sessionId: string) {
+  for (const [peerId, offer] of offers.entries()) {
+    if (offer.sessionId === sessionId) {
+      offers.delete(peerId);
+    }
+  }
+}
+
 export function setRemoteMicWebRtcAnswer(input: {
   sessionId: string;
   role: RemoteMicRole;
