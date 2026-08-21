@@ -39,25 +39,13 @@ type ConversationAction =
   | { type: "complete_session"; reason: string };
 
 type RemoteMicConnectionStatus =
-  | "not-issued"
-  | "waiting"
   | "connected"
-  | "disconnected"
-  | "expired"
-  | "revoked";
+  | "disconnected";
 type RemoteMicRoleStatus = {
   status: RemoteMicConnectionStatus;
-  expiresAt?: string;
-  usedAt?: string | null;
-  revokedAt?: string | null;
   lastHeartbeatAt?: string | null;
-  disconnectedAt?: string | null;
   muted?: boolean;
   transmitting?: boolean;
-};
-type RemoteMicStatusResponse = {
-  now: string;
-  roles: Record<SpeakerRole, RemoteMicRoleStatus>;
 };
 type FixedRemoteMicActiveResponse = {
   active: {
@@ -304,8 +292,8 @@ function SessionPageClient() {
   const [remoteMicStatuses, setRemoteMicStatuses] = useState<
     Record<SpeakerRole, RemoteMicRoleStatus>
   >({
-    caregiver: { status: "not-issued" },
-    elder: { status: "not-issued" },
+    caregiver: { status: "disconnected" },
+    elder: { status: "disconnected" },
   });
   const [developerSlotStates, setDeveloperSlotStates] = useState<SlotState[]>([]);
   const [developerSlotControl, setDeveloperSlotControl] =
@@ -515,8 +503,8 @@ function SessionPageClient() {
   useEffect(() => {
     if (!session?.id || session.ended_at) {
       setRemoteMicStatuses({
-        caregiver: { status: "not-issued" },
-        elder: { status: "not-issued" },
+        caregiver: { status: "disconnected" },
+        elder: { status: "disconnected" },
       });
       return;
     }
@@ -1023,6 +1011,7 @@ function SessionPageClient() {
     await waitForIceGatheringComplete(peerConnection);
     await postRemoteMicWebRtcAnswer(
       sessionId,
+      offer.role,
       offer.peerId,
       peerConnection.localDescription,
     );
@@ -2266,7 +2255,6 @@ function RemoteMicrophoneStatus(props: {
   roleStatus: RemoteMicRoleStatus;
 }) {
   const connected = props.roleStatus.status === "connected";
-  const waiting = props.roleStatus.status === "waiting";
   const status = remoteMicStatusLabel(props.roleStatus.status);
 
   return (
@@ -2279,9 +2267,7 @@ function RemoteMicrophoneStatus(props: {
           className={`rounded-full px-2 py-0.5 text-[10px] font-black ${
             connected
               ? "bg-emerald-100 text-emerald-900"
-              : waiting
-                ? "bg-amber-100 text-amber-900"
-                : "bg-stone-200 text-stone-600"
+              : "bg-stone-200 text-stone-600"
           }`}
         >
           {status}
@@ -2299,33 +2285,12 @@ function RemoteMicrophoneStatus(props: {
 
 function remoteMicStatusLabel(status: RemoteMicConnectionStatus) {
   switch (status) {
-    case "waiting":
-      return "QR待機中";
     case "connected":
       return "接続済み";
     case "disconnected":
-      return "切断";
-    case "expired":
-      return "期限切れ";
-    case "revoked":
-      return "解除済み";
-    case "not-issued":
     default:
-      return "未発行";
+      return "切断";
   }
-}
-
-async function fetchRemoteMicStatus(sessionId: string) {
-  const params = new URLSearchParams({ sessionId });
-  const response = await fetch(`/api/remote-mic/status?${params.toString()}`, {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`Remote microphone status failed: ${response.status}`);
-  }
-
-  return (await response.json()) as RemoteMicStatusResponse;
 }
 
 async function activateFixedRemoteMics(sessionId: string) {
@@ -2371,7 +2336,7 @@ function toFixedRemoteMicStatus(
 async function fetchRemoteMicWebRtcOffers(sessionId: string) {
   const params = new URLSearchParams({ sessionId });
   const response = await fetch(
-    `/api/remote-mic/webrtc/offers?${params.toString()}`,
+    `/api/remote-mic/fixed/webrtc/offers?${params.toString()}`,
     { cache: "no-store" },
   );
 
@@ -2386,13 +2351,14 @@ async function fetchRemoteMicWebRtcOffers(sessionId: string) {
 
 async function postRemoteMicWebRtcAnswer(
   sessionId: string,
+  role: SpeakerRole,
   peerId: string,
   answer: RTCSessionDescriptionInit | null,
 ) {
-  const response = await fetch("/api/remote-mic/webrtc/answer", {
+  const response = await fetch("/api/remote-mic/fixed/webrtc/answer", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, peerId, answer }),
+    body: JSON.stringify({ sessionId, role, peerId, answer }),
   });
 
   if (!response.ok) {

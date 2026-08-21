@@ -66,7 +66,7 @@ export default function RemoteMicClient() {
       }
     } else if (!nextMediaSupported) {
       setHelpText(
-        "HTTPSとしては開けていますが、マイクAPIが見えていません。QR読み取り後のカメラ内ブラウザではなく、右下の「…」からSafariで開いてください。",
+        "HTTPSとしては開けていますが、マイクAPIが見えていません。SafariまたはChromeで固定マイクURLを直接開いてください。",
       );
     }
 
@@ -341,10 +341,14 @@ export default function RemoteMicClient() {
     await peerConnection.setLocalDescription(offer);
     await waitForIceGatheringComplete(peerConnection);
 
-    const offerResponse = await fetch("/api/remote-mic/webrtc/offer", {
+    const offerResponse = await fetch("/api/remote-mic/fixed/webrtc/offer", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ offer: peerConnection.localDescription }),
+      body: JSON.stringify({
+        sessionId: remoteMic.sessionId,
+        role: remoteMic.role,
+        offer: peerConnection.localDescription,
+      }),
     });
 
     if (!offerResponse.ok) {
@@ -353,17 +357,24 @@ export default function RemoteMicClient() {
 
     const data = (await offerResponse.json()) as { peerId: string };
     setServerLabel("PC側の受信準備を待っています");
-    pollWebRtcAnswer(data.peerId, peerConnection);
+    pollWebRtcAnswer(data.peerId, peerConnection, remoteMic.sessionId, remoteMic.role);
   }
 
-  function pollWebRtcAnswer(peerId: string, peerConnection: RTCPeerConnection) {
+  function pollWebRtcAnswer(
+    peerId: string,
+    peerConnection: RTCPeerConnection,
+    sessionId: string,
+    role: RemoteMicRole,
+  ) {
     if (answerPollTimerRef.current !== null) {
       window.clearInterval(answerPollTimerRef.current);
     }
 
     answerPollTimerRef.current = window.setInterval(() => {
       void fetch(
-        `/api/remote-mic/webrtc/offer?peerId=${encodeURIComponent(peerId)}`,
+        `/api/remote-mic/fixed/webrtc/offer?sessionId=${encodeURIComponent(
+          sessionId,
+        )}&role=${encodeURIComponent(role)}&peerId=${encodeURIComponent(peerId)}`,
         { cache: "no-store" },
       )
         .then((response) => {
@@ -629,7 +640,7 @@ function getRemoteMicRoleLabel(role: RemoteMicRole) {
 
 function getInsecureContextHelp() {
   if (typeof window !== "undefined" && window.location.protocol === "https:") {
-    return "URLはhttpsですが、この表示環境は安全なページとして扱われていません。QR読み取り後のカメラ内ブラウザではなく、右下の「…」からSafariで開いてください。";
+    return "URLはhttpsですが、この表示環境は安全なページとして扱われていません。SafariまたはChromeで固定マイクURLを直接開いてください。";
   }
 
   return "この画面はHTTPSで開かれていません。Safariで https:// から始まるTailscale URLを開いてください。";

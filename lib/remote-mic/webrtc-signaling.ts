@@ -3,7 +3,6 @@ import type { RemoteMicRole } from "./config";
 
 export type RemoteMicWebRtcOffer = {
   peerId: string;
-  tokenId: string;
   sessionId: string;
   role: RemoteMicRole;
   offer: unknown;
@@ -16,7 +15,6 @@ const OFFER_TTL_MS = 90_000;
 const offers = new Map<string, RemoteMicWebRtcOffer>();
 
 export function createRemoteMicWebRtcOffer(input: {
-  tokenId: string;
   sessionId: string;
   role: RemoteMicRole;
   offer: unknown;
@@ -24,7 +22,7 @@ export function createRemoteMicWebRtcOffer(input: {
   pruneExpiredOffers();
 
   for (const [peerId, offer] of offers.entries()) {
-    if (offer.tokenId === input.tokenId) {
+    if (offer.sessionId === input.sessionId && offer.role === input.role) {
       offers.delete(peerId);
     }
   }
@@ -32,7 +30,6 @@ export function createRemoteMicWebRtcOffer(input: {
   const now = Date.now();
   const offer: RemoteMicWebRtcOffer = {
     peerId: randomUUID(),
-    tokenId: input.tokenId,
     sessionId: input.sessionId,
     role: input.role,
     offer: input.offer,
@@ -55,13 +52,20 @@ export function listRemoteMicWebRtcOffers(sessionId: string) {
 
 export function setRemoteMicWebRtcAnswer(input: {
   sessionId: string;
+  role: RemoteMicRole;
   peerId: string;
   answer: unknown;
 }) {
   pruneExpiredOffers();
 
   const offer = offers.get(input.peerId);
-  if (!offer || offer.sessionId !== input.sessionId) return null;
+  if (
+    !offer ||
+    offer.sessionId !== input.sessionId ||
+    offer.role !== input.role
+  ) {
+    return null;
+  }
 
   offer.answer = input.answer;
   offer.updatedAt = Date.now();
@@ -70,13 +74,20 @@ export function setRemoteMicWebRtcAnswer(input: {
 }
 
 export function getRemoteMicWebRtcAnswer(input: {
-  tokenId: string;
+  sessionId: string;
+  role: RemoteMicRole;
   peerId: string;
 }) {
   pruneExpiredOffers();
 
   const offer = offers.get(input.peerId);
-  if (!offer || offer.tokenId !== input.tokenId) return null;
+  if (
+    !offer ||
+    offer.sessionId !== input.sessionId ||
+    offer.role !== input.role
+  ) {
+    return null;
+  }
 
   return offer.answer;
 }
