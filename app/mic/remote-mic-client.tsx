@@ -45,7 +45,9 @@ const HEARTBEAT_MS = 15_000;
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const CLIENT_VERSION = "remote-mic-client-2026-08-24-speech-recognition";
 
-export default function RemoteMicClient() {
+export default function RemoteMicClient(props: {
+  initialRole?: RemoteMicRole | null;
+}) {
   const [remoteMic, setRemoteMic] = useState<RemoteMicSession | null>(null);
   const [fixedRole, setFixedRole] = useState<RemoteMicRole | null>(null);
   const [micState, setMicState] = useState<MicState>("idle");
@@ -102,14 +104,14 @@ export default function RemoteMicClient() {
       );
     }
 
-    const role = getFixedRemoteMicRole();
+    const role = getFixedRemoteMicRole(props.initialRole ?? null);
     setFixedRole(role);
     void loadActiveSession(role);
 
     return () => {
       void stop(false);
     };
-  }, []);
+  }, [props.initialRole]);
 
   useEffect(() => {
     if (!fixedRole || micState === "streaming") return;
@@ -578,7 +580,12 @@ function getSpeechSupportLabel(speechSupported: boolean, secureContext: boolean)
   return "安全判定待ち";
 }
 
-function getFixedRemoteMicRole(): RemoteMicRole | null {
+function getFixedRemoteMicRole(explicitRole: RemoteMicRole | null): RemoteMicRole | null {
+  if (explicitRole) {
+    window.localStorage.setItem("fixed-remote-mic-role", explicitRole);
+    return explicitRole;
+  }
+
   const path = window.location.pathname.toLowerCase();
   if (path.includes("/mic/elder")) {
     window.localStorage.setItem("fixed-remote-mic-role", "elder");

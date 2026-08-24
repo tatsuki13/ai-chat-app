@@ -2,6 +2,8 @@
 
 import dynamic from "next/dynamic";
 
+type RemoteMicRole = "elder" | "caregiver";
+
 const RemoteMicClient = dynamic(() => import("./remote-mic-client"), {
   ssr: false,
   loading: () => (
@@ -15,6 +17,8 @@ const RemoteMicClient = dynamic(() => import("./remote-mic-client"), {
   ),
 });
 
-export default function RemoteMicClientShell() {
-  return <RemoteMicClient />;
+export default function RemoteMicClientShell(props: {
+  role?: RemoteMicRole | null;
+}) {
+  return <RemoteMicClient initialRole={props.role ?? null} />;
 }
