@@ -8,14 +8,42 @@ type RemoteMicSession = {
   role: RemoteMicRole;
   participantCode: string | null;
   dialogueStartedAt: string | null;
-  expiresAt: string;
 };
 type MicState = "idle" | "requesting" | "streaming";
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult:
+    | ((event: {
+        results: {
+          length: number;
+          [index: number]: {
+            isFinal: boolean;
+            [index: number]: { transcript: string };
+          };
+        };
+        resultIndex: number;
+      }) => void)
+    | null;
+  onend: (() => void) | null;
+  onerror: ((event: { error?: string; message?: string }) => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+type QueuedText = {
+  sessionId: string;
+  role: RemoteMicRole;
+  text: string;
+  recognizedAt: string;
+  clientTextId: string;
+};
 
 const HEARTBEAT_MS = 15_000;
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
-const WEBRTC_ANSWER_TIMEOUT_MS = 20_000;
-const CLIENT_VERSION = "remote-mic-client-2026-07-30-speech-text";
+const CLIENT_VERSION = "remote-mic-client-2026-08-24-speech-recognition";
 
 export default function RemoteMicClient() {
   const [remoteMic, setRemoteMic] = useState<RemoteMicSession | null>(null);
@@ -23,6 +51,7 @@ export default function RemoteMicClient() {
   const [micState, setMicState] = useState<MicState>("idle");
   const [secureContext, setSecureContext] = useState(false);
   const [mediaSupported, setMediaSupported] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(false);
   const [permissionLabel, setPermissionLabel] = useState("未確認");
   const [serverLabel, setServerLabel] = useState("確認中");
   const [level, setLevel] = useState(0);
@@ -34,10 +63,9 @@ export default function RemoteMicClient() {
   const [error, setError] = useState("");
   const streamRef = useRef<MediaStream | null>(null);
   const levelStopRef = useRef<(() => void) | null>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const recordingActiveRef = useRef(false);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
-  const answerPollTimerRef = useRef<number | null>(null);
-  const answerPollTimeoutRef = useRef<number | null>(null);
+  const sendQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const roleLabel = useMemo(() => {
     if (remoteMic?.role === "elder") return "本人用マイク";
@@ -49,9 +77,11 @@ export default function RemoteMicClient() {
   useEffect(() => {
     const nextSecureContext = window.isSecureContext;
     const nextMediaSupported = Boolean(navigator.mediaDevices?.getUserMedia);
+    const nextSpeechSupported = Boolean(getSpeechRecognitionClass());
 
     setSecureContext(nextSecureContext);
     setMediaSupported(nextMediaSupported);
+    setSpeechSupported(nextSpeechSupported);
     setOpenUrlLabel(`${window.location.protocol}//${window.location.host}`);
     setBrowserLabel(getBrowserLabel(navigator.userAgent));
     console.info("[remote-mic client]", { version: CLIENT_VERSION });
@@ -66,77 +96,15 @@ export default function RemoteMicClient() {
           window.location.replace(maybeHttpsUrl);
         }, 800);
       }
-    } else if (!nextMediaSupported) {
+    } else if (!nextMediaSupported || !nextSpeechSupported) {
       setHelpText(
-        "HTTPSとしては開けていますが、マイクAPIが見えていません。SafariまたはChromeで固定マイクURLを直接開いてください。",
+        "このブラウザでは音声認識を利用できません。ChromeまたはSafariで固定マイクURLを開いてください。",
       );
     }
 
     const role = getFixedRemoteMicRole();
     setFixedRole(role);
-
-    async function loadSession() {
-      if (!role) {
-        setServerLabel("役割未設定");
-        setError("/mic/elder または /mic/caregiver で開いてください。");
-        return;
-      }
-
-      const controller = new AbortController();
-      const timeoutId = window.setTimeout(() => {
-        controller.abort();
-      }, SESSION_CHECK_TIMEOUT_MS);
-
-      try {
-        const response = await fetch(`/api/remote-mic/fixed/current?role=${role}`, {
-          cache: "no-store",
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error(
-            `現在の対話セッションを確認できません。PC対話ページを開いてください。(${response.status})`,
-          );
-        }
-
-        const data = (await response.json()) as {
-          active: {
-            sessionId: string;
-            participantCode: string | null;
-            dialogueStartedAt: string | null;
-            endedAt: string | null;
-          } | null;
-          role: RemoteMicRole;
-        };
-        if (!data.active) {
-          setRemoteMic(null);
-          setServerLabel("PC待機中");
-          return;
-        }
-
-        setRemoteMic({
-          sessionId: data.active.sessionId,
-          participantCode: data.active.participantCode,
-          dialogueStartedAt: data.active.dialogueStartedAt,
-          role: data.role,
-          expiresAt: "",
-        });
-        setServerLabel("接続準備完了");
-      } catch (loadError) {
-        setServerLabel("未接続");
-        setError(
-          loadError instanceof DOMException && loadError.name === "AbortError"
-            ? "サーバー接続確認がタイムアウトしました。Tailscale接続とSafariで開いているかを確認してください。"
-            : loadError instanceof Error
-              ? loadError.message
-            : "現在の対話セッションを確認できませんでした。",
-        );
-      } finally {
-        window.clearTimeout(timeoutId);
-      }
-    }
-
-    void loadSession();
+    void loadActiveSession(role);
 
     return () => {
       void stop(false);
@@ -147,41 +115,7 @@ export default function RemoteMicClient() {
     if (!fixedRole || micState === "streaming") return;
 
     const timerId = window.setInterval(() => {
-      void fetch(`/api/remote-mic/fixed/current?role=${fixedRole}`, {
-        cache: "no-store",
-      })
-        .then((response) => {
-          if (!response.ok) throw new Error(`current failed: ${response.status}`);
-
-          return response.json() as Promise<{
-            active: {
-              sessionId: string;
-              participantCode: string | null;
-              dialogueStartedAt: string | null;
-              endedAt: string | null;
-            } | null;
-            role: RemoteMicRole;
-          }>;
-        })
-        .then((data) => {
-          if (!data.active) {
-            setRemoteMic(null);
-            setServerLabel("PC待機中");
-            return;
-          }
-
-          setRemoteMic({
-            sessionId: data.active.sessionId,
-            participantCode: data.active.participantCode,
-            dialogueStartedAt: data.active.dialogueStartedAt,
-            role: data.role,
-            expiresAt: "",
-          });
-          setServerLabel("接続準備完了");
-        })
-        .catch(() => {
-          setServerLabel("PC接続確認中");
-        });
+      void loadActiveSession(fixedRole, { quiet: true });
     }, 3000);
 
     return () => window.clearInterval(timerId);
@@ -193,22 +127,7 @@ export default function RemoteMicClient() {
     const timerId = window.setInterval(() => {
       if (!fixedRole) return;
 
-      void fetch(`/api/remote-mic/fixed/current?role=${fixedRole}`, {
-        cache: "no-store",
-      })
-        .then((response) => {
-          if (!response.ok) throw new Error(`current failed: ${response.status}`);
-
-          return response.json() as Promise<{
-            active: {
-              sessionId: string;
-              participantCode: string | null;
-              dialogueStartedAt: string | null;
-              endedAt: string | null;
-            } | null;
-            role: RemoteMicRole;
-          }>;
-        })
+      void fetchCurrentSession(fixedRole)
         .then((data) => {
           if (
             !data.active ||
@@ -217,6 +136,7 @@ export default function RemoteMicClient() {
             data.active.endedAt
           ) {
             void stop(false);
+            setRemoteMic(null);
             setServerLabel("PC待機中");
             return;
           }
@@ -238,7 +158,54 @@ export default function RemoteMicClient() {
     return () => {
       window.clearInterval(timerId);
     };
-  }, [remoteMic, micState]);
+  }, [fixedRole, remoteMic, micState]);
+
+  async function loadActiveSession(
+    role: RemoteMicRole | null,
+    options: { quiet?: boolean } = {},
+  ) {
+    if (!role) {
+      setServerLabel("役割未設定");
+      setError("/mic/elder または /mic/caregiver で開いてください。");
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      controller.abort();
+    }, SESSION_CHECK_TIMEOUT_MS);
+
+    try {
+      const data = await fetchCurrentSession(role, controller.signal);
+      if (!data.active) {
+        setRemoteMic(null);
+        setServerLabel("PC待機中");
+        return;
+      }
+
+      setRemoteMic({
+        sessionId: data.active.sessionId,
+        participantCode: data.active.participantCode,
+        dialogueStartedAt: data.active.dialogueStartedAt,
+        role: data.role,
+      });
+      if (!options.quiet) setError("");
+      setServerLabel("接続準備完了");
+    } catch (loadError) {
+      setServerLabel("未接続");
+      if (!options.quiet) {
+        setError(
+          loadError instanceof DOMException && loadError.name === "AbortError"
+            ? "サーバー確認がタイムアウトしました。PC側で /session を開いてください。"
+            : loadError instanceof Error
+              ? loadError.message
+              : "現在の対話セッションを確認できませんでした。",
+        );
+      }
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }
 
   async function start() {
     if (!canStart || !remoteMic) return;
@@ -248,28 +215,16 @@ export default function RemoteMicClient() {
     setMicState("requesting");
 
     try {
-      if (
-        streamRef.current &&
-        peerConnectionRef.current &&
-        peerConnectionRef.current.connectionState !== "closed"
-      ) {
-        streamRef.current.getAudioTracks().forEach((track) => {
-          track.enabled = true;
-        });
-        recordingActiveRef.current = true;
-        setPermissionLabel("許可済み");
-        setMicState("streaming");
-        setRecorderLabel("WebRTC音声送信");
-        await setFixedMicMuted(false);
-        setServerLabel("WebRTC接続中");
-        return;
-      }
-
       if (!window.isSecureContext) {
         throw new Error("HTTPSで接続してください。Tailscale ServeのHTTPS URLから開いてください。");
       }
       if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("このブラウザーではマイクを利用できません。");
+        throw new Error("このブラウザではマイクを利用できません。");
+      }
+
+      const SpeechRecognitionClass = getSpeechRecognitionClass();
+      if (!SpeechRecognitionClass) {
+        throw new Error("このブラウザでは音声認識を利用できません。ChromeまたはSafariで開いてください。");
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -281,7 +236,6 @@ export default function RemoteMicClient() {
         video: false,
       });
       streamRef.current = stream;
-      setRecorderLabel("WebRTC音声送信");
       try {
         levelStopRef.current = startLevelMeter(stream, (nextLevel) => {
           setLevel(nextLevel);
@@ -291,12 +245,51 @@ export default function RemoteMicClient() {
         setLevel(0);
       }
 
+      const recognition = new SpeechRecognitionClass();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = "ja-JP";
+      recognition.onresult = (event) => {
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index];
+          if (!result?.isFinal) continue;
+
+          const text = result[0]?.transcript?.trim() ?? "";
+          if (!text) continue;
+
+          enqueueRecognizedText({
+            sessionId: remoteMic.sessionId,
+            role: remoteMic.role,
+            text,
+            recognizedAt: new Date().toISOString(),
+            clientTextId: crypto.randomUUID(),
+          });
+        }
+      };
+      recognition.onerror = (event) => {
+        handleSpeechRecognitionError(event.error ?? "unknown", event.message ?? "");
+      };
+      recognition.onend = () => {
+        if (!recordingActiveRef.current) return;
+
+        window.setTimeout(() => {
+          if (!recordingActiveRef.current) return;
+          try {
+            recognition.start();
+          } catch {
+            // The browser can reject immediate restarts while the previous session settles.
+          }
+        }, 250);
+      };
+      recognitionRef.current = recognition;
       recordingActiveRef.current = true;
+      recognition.start();
+
       setPermissionLabel("許可済み");
       setMicState("streaming");
+      setRecorderLabel("音声認識中");
       await setFixedMicMuted(false);
-      setServerLabel("WebRTC接続中");
-      await startWebRtcMicrophone(stream);
+      setServerLabel("音声認識中");
     } catch (startError) {
       if (isPermissionError(startError)) {
         setPermissionLabel("拒否");
@@ -310,193 +303,70 @@ export default function RemoteMicClient() {
     }
   }
 
-  async function muteMicrophone() {
-    if (!streamRef.current) {
-      await stop();
+  function enqueueRecognizedText(item: QueuedText) {
+    console.info("[remote-mic final transcript]", {
+      role: item.role,
+      textLength: item.text.length,
+      clientTextId: item.clientTextId,
+    });
+    sendQueueRef.current = sendQueueRef.current
+      .catch(() => {})
+      .then(() => sendRecognizedText(item));
+  }
+
+  async function sendRecognizedText(item: QueuedText) {
+    const response = await fetch("/api/remote-mic/fixed/text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(item),
+    });
+
+    if (!response.ok) {
+      throw new Error(`recognized text relay failed: ${response.status}`);
+    }
+
+    setServerLabel("認識結果送信済み");
+  }
+
+  function handleSpeechRecognitionError(errorCode: string, message: string) {
+    console.warn("[remote-mic speech recognition error]", {
+      error: errorCode,
+      message,
+    });
+
+    if (errorCode === "no-speech" || errorCode === "aborted") {
       return;
     }
 
-    streamRef.current.getAudioTracks().forEach((track) => {
-      track.enabled = false;
-    });
-    recordingActiveRef.current = false;
-    setLevel(0);
-    setMicState("idle");
-    setRecorderLabel("マイクOFF");
-    await setFixedMicMuted(true).catch(() => {});
-    setServerLabel("停止中");
+    if (errorCode === "not-allowed" || errorCode === "service-not-allowed") {
+      setPermissionLabel("拒否");
+      setError("音声認識またはマイクの利用が許可されていません。ブラウザの権限を確認してください。");
+      void stop(false);
+      return;
+    }
+
+    if (recordingActiveRef.current && (errorCode === "network" || errorCode === "audio-capture")) {
+      setServerLabel("音声認識を再開中");
+      return;
+    }
+
+    setError(`音声認識エラー: ${errorCode}`);
   }
 
-  async function startWebRtcMicrophone(stream: MediaStream) {
-    const peerConnection = new RTCPeerConnection();
-    peerConnectionRef.current = peerConnection;
-
-    for (const track of stream.getAudioTracks()) {
-      peerConnection.addTrack(track, stream);
-    }
-
-    peerConnection.onconnectionstatechange = () => {
-      console.info("[remote-mic phone connection state]", {
-        connectionState: peerConnection.connectionState,
-        iceConnectionState: peerConnection.iceConnectionState,
-        iceGatheringState: peerConnection.iceGatheringState,
-        signalingState: peerConnection.signalingState,
-      });
-
-      if (
-        peerConnection.connectionState === "connected" ||
-        peerConnection.connectionState === "connecting"
-      ) {
-        setServerLabel("音声ストリーム送信中");
-        return;
-      }
-
-      if (
-        peerConnection.connectionState === "failed" ||
-        peerConnection.connectionState === "disconnected"
-      ) {
-        setServerLabel("音声ストリーム切断");
-      }
-    };
-    peerConnection.oniceconnectionstatechange = () => {
-      console.info("[remote-mic phone ice state]", {
-        iceConnectionState: peerConnection.iceConnectionState,
-      });
-    };
-    peerConnection.onicecandidateerror = (event) => {
-      console.warn("[remote-mic phone ice candidate error]", {
-        errorCode: event.errorCode,
-        errorText: event.errorText,
-      });
-    };
-
-    const offer = await peerConnection.createOffer({
-      offerToReceiveAudio: false,
-      offerToReceiveVideo: false,
-    });
-    await peerConnection.setLocalDescription(offer);
-    await waitForIceGatheringComplete(peerConnection);
-
-    const offerResponse = await fetch("/api/remote-mic/fixed/webrtc/offer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: remoteMic.sessionId,
-        role: remoteMic.role,
-        offer: peerConnection.localDescription,
-      }),
-    });
-
-    if (!offerResponse.ok) {
-      throw new Error(`音声ストリーム接続を開始できませんでした。(${offerResponse.status})`);
-    }
-
-    const data = (await offerResponse.json()) as { peerId: string };
-    setServerLabel("PC側の受信準備を待っています");
-    pollWebRtcAnswer(data.peerId, peerConnection, remoteMic.sessionId, remoteMic.role);
-  }
-
-  function pollWebRtcAnswer(
-    peerId: string,
-    peerConnection: RTCPeerConnection,
-    sessionId: string,
-    role: RemoteMicRole,
-  ) {
-    if (answerPollTimerRef.current !== null) {
-      window.clearInterval(answerPollTimerRef.current);
-    }
-    if (answerPollTimeoutRef.current !== null) {
-      window.clearTimeout(answerPollTimeoutRef.current);
-    }
-
-    answerPollTimeoutRef.current = window.setTimeout(() => {
-      if (peerConnection.remoteDescription) return;
-
-      console.warn("[remote-mic phone answer timeout]", {
-        peerId,
-        sessionId,
-        role,
-        signalingState: peerConnection.signalingState,
-        connectionState: peerConnection.connectionState,
-        iceConnectionState: peerConnection.iceConnectionState,
-      });
-      if (answerPollTimerRef.current !== null) {
-        window.clearInterval(answerPollTimerRef.current);
-        answerPollTimerRef.current = null;
-      }
-      answerPollTimeoutRef.current = null;
-      peerConnection.close();
-      if (peerConnectionRef.current === peerConnection) {
-        peerConnectionRef.current = null;
-      }
-      levelStopRef.current?.();
-      levelStopRef.current = null;
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-      recordingActiveRef.current = false;
-      setMicState("idle");
-      setRecorderLabel("停止中");
-      setServerLabel("PC側の受信準備を確認してください");
-      setError("PC側で /session を開き、現在のセッションが有効な状態で再接続してください。");
-    }, WEBRTC_ANSWER_TIMEOUT_MS);
-
-    answerPollTimerRef.current = window.setInterval(() => {
-      void fetch(
-        `/api/remote-mic/fixed/webrtc/offer?sessionId=${encodeURIComponent(
-          sessionId,
-        )}&role=${encodeURIComponent(role)}&peerId=${encodeURIComponent(peerId)}`,
-        { cache: "no-store" },
-      )
-        .then((response) => {
-          if (!response.ok) throw new Error(`answer poll failed: ${response.status}`);
-
-          return response.json() as Promise<{
-            answer: RTCSessionDescriptionInit | null;
-          }>;
-        })
-        .then(async (data) => {
-          if (!data.answer || peerConnection.remoteDescription) return;
-
-          await peerConnection.setRemoteDescription(data.answer);
-          console.info("[remote-mic phone answer applied]", {
-            signalingState: peerConnection.signalingState,
-            connectionState: peerConnection.connectionState,
-            iceConnectionState: peerConnection.iceConnectionState,
-          });
-          if (answerPollTimerRef.current !== null) {
-            window.clearInterval(answerPollTimerRef.current);
-            answerPollTimerRef.current = null;
-          }
-          if (answerPollTimeoutRef.current !== null) {
-            window.clearTimeout(answerPollTimeoutRef.current);
-            answerPollTimeoutRef.current = null;
-          }
-          setServerLabel("音声ストリーム送信中");
-        })
-        .catch(() => {
-          setServerLabel("PC側の受信準備を待っています");
-        });
-    }, 1000);
+  async function muteMicrophone() {
+    await stop();
   }
 
   async function stop(notifyServer = true) {
     recordingActiveRef.current = false;
-    if (answerPollTimerRef.current !== null) {
-      window.clearInterval(answerPollTimerRef.current);
-      answerPollTimerRef.current = null;
-    }
-    if (answerPollTimeoutRef.current !== null) {
-      window.clearTimeout(answerPollTimeoutRef.current);
-      answerPollTimeoutRef.current = null;
-    }
-    peerConnectionRef.current?.close();
-    peerConnectionRef.current = null;
+    recognitionRef.current?.abort();
+    recognitionRef.current = null;
 
     levelStopRef.current?.();
     levelStopRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
-    setRecorderLabel("未確認");
+    setRecorderLabel("マイクOFF");
     setLevel(0);
     setMicState("idle");
 
@@ -555,9 +425,10 @@ export default function RemoteMicClient() {
           <StatusRow label="ブラウザ" value={browserLabel} />
           <StatusRow label="安全判定" value={getSecureContextLabel(secureContext)} />
           <StatusRow label="マイクAPI" value={getMediaSupportLabel(mediaSupported, secureContext)} />
-          <StatusRow label="録音形式" value={recorderLabel} />
+          <StatusRow label="音声認識API" value={getSpeechSupportLabel(speechSupported, secureContext)} />
+          <StatusRow label="認識状態" value={recorderLabel} />
           <StatusRow label="マイク権限" value={permissionLabel} />
-          <StatusRow label="音声送信" value={micState === "streaming" ? "送信中" : "停止中"} />
+          <StatusRow label="入力状態" value={micState === "streaming" ? "認識中" : "停止中"} />
           <div>
             <div className="mb-1 flex items-center justify-between text-[12px] font-black text-stone-600">
               <span>入力音量</span>
@@ -615,19 +486,30 @@ export default function RemoteMicClient() {
             停止
           </button>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            void stop(false).then(() => start());
-          }}
-          disabled={!remoteMic}
-          className="mt-2 min-h-10 w-full rounded-md border border-emerald-700 bg-emerald-50 px-3 text-[13px] font-black text-emerald-900 active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
-        >
-          再接続
-        </button>
       </section>
     </main>
   );
+}
+
+async function fetchCurrentSession(role: RemoteMicRole, signal?: AbortSignal) {
+  const response = await fetch(`/api/remote-mic/fixed/current?role=${role}`, {
+    cache: "no-store",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`現在の対話セッションを確認できません。(${response.status})`);
+  }
+
+  return response.json() as Promise<{
+    active: {
+      sessionId: string;
+      participantCode: string | null;
+      dialogueStartedAt: string | null;
+      endedAt: string | null;
+    } | null;
+    role: RemoteMicRole;
+  }>;
 }
 
 function StatusRow(props: { label: string; value: string }) {
@@ -651,21 +533,13 @@ function LevelBar(props: { value: number }) {
   );
 }
 
-function waitForIceGatheringComplete(peerConnection: RTCPeerConnection) {
-  if (peerConnection.iceGatheringState === "complete") {
-    return Promise.resolve();
-  }
+function getSpeechRecognitionClass() {
+  const maybeWindow = window as Window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
 
-  return new Promise<void>((resolve) => {
-    const timeoutId = window.setTimeout(resolve, 3000);
-
-    peerConnection.addEventListener("icegatheringstatechange", () => {
-      if (peerConnection.iceGatheringState !== "complete") return;
-
-      window.clearTimeout(timeoutId);
-      resolve();
-    });
-  });
+  return maybeWindow.SpeechRecognition ?? maybeWindow.webkitSpeechRecognition ?? null;
 }
 
 function getHttpsUrl(value: string) {
@@ -692,9 +566,16 @@ function getSecureContextLabel(value: boolean) {
 
 function getMediaSupportLabel(mediaSupported: boolean, secureContext: boolean) {
   if (mediaSupported) return "利用可能";
-  if (secureContext) return "利用不可/Safariで開く";
+  if (secureContext) return "利用不可";
 
-  return "利用不可/安全判定待ち";
+  return "安全判定待ち";
+}
+
+function getSpeechSupportLabel(speechSupported: boolean, secureContext: boolean) {
+  if (speechSupported) return "利用可能";
+  if (secureContext) return "利用不可";
+
+  return "安全判定待ち";
 }
 
 function getFixedRemoteMicRole(): RemoteMicRole | null {
@@ -718,10 +599,10 @@ function getRemoteMicRoleLabel(role: RemoteMicRole) {
 
 function getInsecureContextHelp() {
   if (typeof window !== "undefined" && window.location.protocol === "https:") {
-    return "URLはhttpsですが、この表示環境は安全なページとして扱われていません。SafariまたはChromeで固定マイクURLを直接開いてください。";
+    return "URLはhttpsですが、この環境では安全なページとして扱われていません。SafariまたはChromeで固定マイクURLを直接開いてください。";
   }
 
-  return "この画面はHTTPSで開かれていません。Safariで https:// から始まるTailscale URLを開いてください。";
+  return "この画面はHTTPSで開く必要があります。Safariで https:// から始まるTailscale URLを開いてください。";
 }
 
 function getBrowserLabel(userAgent: string) {

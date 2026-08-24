@@ -16,10 +16,8 @@ import {
   type SlotControlDebugState,
 } from "../../lib/acp-mvp";
 import {
-  createRemoteStreamInputService,
   createSingleMicInputService,
   loadAudioInputs,
-  type RemoteStreamInputService,
   type SingleMicAudioChunk,
   type SingleMicInputLevel,
   type SingleMicInputService,
@@ -65,19 +63,11 @@ type FixedRemoteMicActiveState = {
     }
   >;
 };
-type RemoteMicWebRtcOffer = {
-  peerId: string;
+type RemoteMicRecognizedText = {
+  id: string;
   role: SpeakerRole;
-  offer: RTCSessionDescriptionInit;
-};
-type RemoteMicPeerHandle = {
-  peerConnection: RTCPeerConnection;
-  role: SpeakerRole;
-};
-type RemoteStreamInputSetup = {
-  service: RemoteStreamInputService;
-  unsubscribeChunk: () => void;
-  unsubscribeLevel: () => void;
+  text: string;
+  recognizedAt: string;
 };
 
 type SessionInfo = {
@@ -210,7 +200,7 @@ const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const TIMER_TICK_MS = 1000;
 const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const REMOTE_MIC_STATUS_POLL_MS = 10_000;
-const REMOTE_MIC_WEBRTC_OFFER_POLL_MS = 1_000;
+const REMOTE_MIC_TEXT_POLL_MS = 1_000;
 const REMOTE_MIC_SESSION_SYNC_MS = 5_000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
@@ -325,15 +315,7 @@ function SessionPageClient() {
   const timerRunningRef = useRef(false);
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
-  const remoteStreamInputServiceRef = useRef<RemoteStreamInputService | null>(null);
-  const remoteStreamInputSetupRef = useRef<RemoteStreamInputSetup | null>(null);
-  const remoteMicPeerHandlesRef = useRef<Map<string, RemoteMicPeerHandle>>(
-    new Map(),
-  );
-  const remoteSttQueueRef = useRef<Record<StereoSpeaker, Promise<void>>>({
-    A: Promise.resolve(),
-    B: Promise.resolve(),
-  });
+  const remoteMicTextIdsRef = useRef<Set<string>>(new Set());
 
   const participantCode = session?.participant_code || "未設定";
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
@@ -614,7 +596,6 @@ function SessionPageClient() {
       }
     }
 
-    stopRemoteMicWebRtc();
     void activate();
     const timerId = window.setInterval(() => {
       void refreshStatus();
@@ -623,7 +604,6 @@ function SessionPageClient() {
     return () => {
       ignore = true;
       window.clearInterval(timerId);
-      stopRemoteMicWebRtc();
     };
   }, [session?.id, session?.ended_at]);
 
@@ -633,30 +613,16 @@ function SessionPageClient() {
     let cancelled = false;
     const sessionId = session.id;
 
-    async function pollOffers() {
+    async function pollTexts() {
       try {
-        const offers = await fetchRemoteMicWebRtcOffers(sessionId);
+        const texts = await fetchRemoteMicRecognizedTexts(sessionId);
 
-        for (const offer of offers) {
+        for (const item of texts) {
           if (cancelled) return;
-          if (remoteMicPeerHandlesRef.current.has(offer.peerId)) continue;
-
-          try {
-            await acceptRemoteMicWebRtcOffer(sessionId, offer);
-          } catch (error) {
-            console.error("[remote-mic pc offer accept failed]", {
-              peerId: offer.peerId,
-              role: offer.role,
-              errorName: error instanceof Error ? error.name : "UnknownError",
-              errorMessage: error instanceof Error ? error.message : String(error),
-            });
-            const handle = remoteMicPeerHandlesRef.current.get(offer.peerId);
-            handle?.peerConnection.close();
-            remoteMicPeerHandlesRef.current.delete(offer.peerId);
-          }
+          handleRemoteMicRecognizedText(item);
         }
       } catch (error) {
-        console.warn("[remote-mic pc offers poll failed]", {
+        console.warn("[remote-mic pc text poll failed]", {
           sessionId,
           errorName: error instanceof Error ? error.name : "UnknownError",
           errorMessage: error instanceof Error ? error.message : String(error),
@@ -664,10 +630,10 @@ function SessionPageClient() {
       }
     }
 
-    void pollOffers();
+    void pollTexts();
     const timerId = window.setInterval(() => {
-      void pollOffers();
-    }, REMOTE_MIC_WEBRTC_OFFER_POLL_MS);
+      void pollTexts();
+    }, REMOTE_MIC_TEXT_POLL_MS);
 
     return () => {
       cancelled = true;
@@ -680,10 +646,6 @@ function SessionPageClient() {
 
     stopVoiceAudioInput();
   }, [remoteMicrophoneConnected]);
-
-  useEffect(() => {
-    stopRemoteMicWebRtc();
-  }, []);
 
   useEffect(() => {
     const service = createSingleMicInputService();
@@ -701,18 +663,6 @@ function SessionPageClient() {
       unsubscribeLevel();
       service.stopVoiceInput();
       voiceInputServiceRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    ensureRemoteStreamInputService();
-
-    return () => {
-      remoteStreamInputSetupRef.current?.unsubscribeChunk();
-      remoteStreamInputSetupRef.current?.unsubscribeLevel();
-      remoteStreamInputSetupRef.current?.service.stopAllRemoteInputs();
-      remoteStreamInputSetupRef.current = null;
-      remoteStreamInputServiceRef.current = null;
     };
   }, []);
 
@@ -992,190 +942,25 @@ function SessionPageClient() {
     setAudioInputLevels({ A: 0, B: 0 });
   }
 
-  function ensureRemoteStreamInputService() {
-    if (remoteStreamInputSetupRef.current) {
-      return remoteStreamInputSetupRef.current.service;
-    }
+  function handleRemoteMicRecognizedText(item: RemoteMicRecognizedText) {
+    const currentSession = sessionRef.current;
+    if (!currentSession || remoteMicTextIdsRef.current.has(item.id)) return;
 
-    const service = createRemoteStreamInputService();
-    const unsubscribeChunk = service.onChunk((chunk) => {
-      console.info("[remote-mic pc chunk]", {
-        speaker: chunk.speaker,
-        size: chunk.blob.size,
-        mimeType: chunk.mimeType,
-        sequence: chunk.sequence,
-        durationMs: chunk.endedAt - chunk.startedAt,
-      });
-      enqueueRemoteVoiceAudioChunk(chunk);
-    });
-    const unsubscribeLevel = service.onLevel((level) => {
-      const normalizedLevel = Math.min(1, Math.max(level.rms * 8, level.peak));
-
-      setAudioInputLevels((current) => ({
-        ...current,
-        [level.speaker]: normalizedLevel,
-      }));
-    });
-
-    remoteStreamInputSetupRef.current = {
-      service,
-      unsubscribeChunk,
-      unsubscribeLevel,
-    };
-    remoteStreamInputServiceRef.current = service;
-
-    return service;
-  }
-
-  function enqueueRemoteVoiceAudioChunk(chunk: SingleMicAudioChunk) {
-    const speakerKey = toAudioSpeaker(normalizeSpeaker(chunk.speaker));
-    const previous = remoteSttQueueRef.current[speakerKey];
-    const next = previous
-      .catch(() => {})
-      .then(() => handleVoiceAudioChunk(chunk, "remote_voice"));
-
-    remoteSttQueueRef.current[speakerKey] = next.catch((error) => {
-      console.warn("[remote-mic pc stt queue failed]", {
-        speaker: chunk.speaker,
-        sequence: chunk.sequence,
-        errorName: error instanceof Error ? error.name : "UnknownError",
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
-    });
-  }
-
-  async function acceptRemoteMicWebRtcOffer(
-    sessionId: string,
-    offer: RemoteMicWebRtcOffer,
-  ) {
-    const peerConnection = new RTCPeerConnection();
-    const speaker = toAudioSpeaker(offer.role);
-    remoteMicPeerHandlesRef.current.set(offer.peerId, {
-      peerConnection,
-      role: offer.role,
-    });
-
-    peerConnection.ontrack = (event) => {
-      let remoteInputStarted = false;
-      const startRemoteInputFromTrack = () => {
-        if (remoteInputStarted || event.track.readyState !== "live") return;
-
-        remoteInputStarted = true;
-        const stream = new MediaStream([event.track]);
-        const remoteService = ensureRemoteStreamInputService();
-
-        console.info("[remote-mic pc remote input attach]", {
-          peerId: offer.peerId,
-          role: offer.role,
-          speaker,
-          readyState: event.track.readyState,
-          muted: event.track.muted,
-        });
-
-        void remoteService
-          .startRemoteInput(speaker, stream)
-          .then(() => {
-            setAudioInputError("");
-            setStatusText("スマートフォン音声入力中");
-          })
-          .catch((error) => {
-            console.error("[remote-mic pc remote input failed]", {
-              peerId: offer.peerId,
-              role: offer.role,
-              name: error instanceof Error ? error.name : "UnknownError",
-              message: error instanceof Error ? error.message : String(error),
-            });
-            setAudioInputError("スマートフォン音声入力を開始できませんでした。");
-          });
-      };
-
-      console.info("[remote-mic pc track received]", {
-        peerId: offer.peerId,
-        role: offer.role,
-        kind: event.track.kind,
-        readyState: event.track.readyState,
-        muted: event.track.muted,
-        streamCount: event.streams.length,
-      });
-
-      event.track.onunmute = () => {
-        console.info("[remote-mic pc track unmuted]", {
-          peerId: offer.peerId,
-          role: offer.role,
-          readyState: event.track.readyState,
-        });
-        startRemoteInputFromTrack();
-      };
-      event.track.onmute = () => {
-        console.warn("[remote-mic pc track muted]", {
-          peerId: offer.peerId,
-          role: offer.role,
-        });
-      };
-      event.track.onended = () => {
-        console.warn("[remote-mic pc track ended]", {
-          peerId: offer.peerId,
-          role: offer.role,
-        });
-      };
-
-      if (!event.track.muted) {
-        startRemoteInputFromTrack();
-      }
-    };
-    peerConnection.onconnectionstatechange = () => {
-      console.info("[remote-mic pc connection state]", {
-        peerId: offer.peerId,
-        role: offer.role,
-        connectionState: peerConnection.connectionState,
-        iceConnectionState: peerConnection.iceConnectionState,
-        iceGatheringState: peerConnection.iceGatheringState,
-        signalingState: peerConnection.signalingState,
-      });
-
-      if (
-        peerConnection.connectionState === "failed" ||
-        peerConnection.connectionState === "closed" ||
-        peerConnection.connectionState === "disconnected"
-      ) {
-        remoteStreamInputServiceRef.current?.stopRemoteInput(speaker);
-        remoteMicPeerHandlesRef.current.delete(offer.peerId);
-      }
-    };
-    peerConnection.oniceconnectionstatechange = () => {
-      console.info("[remote-mic pc ice state]", {
-        peerId: offer.peerId,
-        role: offer.role,
-        iceConnectionState: peerConnection.iceConnectionState,
-      });
-    };
-    peerConnection.onicecandidateerror = (event) => {
-      console.warn("[remote-mic pc ice candidate error]", {
-        peerId: offer.peerId,
-        role: offer.role,
-        errorCode: event.errorCode,
-        errorText: event.errorText,
-      });
-    };
-
-    await peerConnection.setRemoteDescription(offer.offer);
-    const answer = await peerConnection.createAnswer();
-    await peerConnection.setLocalDescription(answer);
-    await waitForIceGatheringComplete(peerConnection);
-    await postRemoteMicWebRtcAnswer(
-      sessionId,
-      offer.role,
-      offer.peerId,
-      peerConnection.localDescription,
+    remoteMicTextIdsRef.current.add(item.id);
+    markTopicInteractionStarted("remote_voice");
+    const utterance = createRemoteTextUtterance(
+      item.id,
+      item.role,
+      item.text,
+      item.recognizedAt,
     );
-  }
-
-  function stopRemoteMicWebRtc() {
-    for (const handle of remoteMicPeerHandlesRef.current.values()) {
-      handle.peerConnection.close();
-    }
-    remoteMicPeerHandlesRef.current.clear();
-    remoteStreamInputServiceRef.current?.stopAllRemoteInputs();
+    setUtterances((current) =>
+      syncUtterancesRef(limitUtteranceState(
+        [...current, utterance].sort(compareUtterancesByTime),
+      )),
+    );
+    markSessionUsed(currentSession.id);
+    setStatusText("表示済み（未保存）");
   }
 
   function updateVoiceInputLevel(level: SingleMicInputLevel) {
@@ -2526,37 +2311,20 @@ function toFixedRemoteMicStatus(
   };
 }
 
-async function fetchRemoteMicWebRtcOffers(sessionId: string) {
+async function fetchRemoteMicRecognizedTexts(sessionId: string) {
   const params = new URLSearchParams({ sessionId });
   const response = await fetch(
-    `/api/remote-mic/fixed/webrtc/offers?${params.toString()}`,
+    `/api/remote-mic/fixed/texts?${params.toString()}`,
     { cache: "no-store" },
   );
 
   if (!response.ok) {
-    throw new Error(`Remote microphone WebRTC offers failed: ${response.status}`);
+    throw new Error(`Remote microphone texts failed: ${response.status}`);
   }
 
-  const data = (await response.json()) as { offers: RemoteMicWebRtcOffer[] };
+  const data = (await response.json()) as { texts: RemoteMicRecognizedText[] };
 
-  return data.offers;
-}
-
-async function postRemoteMicWebRtcAnswer(
-  sessionId: string,
-  role: SpeakerRole,
-  peerId: string,
-  answer: RTCSessionDescriptionInit | null,
-) {
-  const response = await fetch("/api/remote-mic/fixed/webrtc/answer", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, role, peerId, answer }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Remote microphone WebRTC answer failed: ${response.status}`);
-  }
+  return data.texts;
 }
 
 function LevelBar(props: { value: number; tone: "emerald" | "sky" }) {
@@ -3613,23 +3381,6 @@ function toAudioSpeaker(speaker: Speaker): StereoSpeaker {
   return speaker === "caregiver" ? "B" : "A";
 }
 
-function waitForIceGatheringComplete(peerConnection: RTCPeerConnection) {
-  if (peerConnection.iceGatheringState === "complete") {
-    return Promise.resolve();
-  }
-
-  return new Promise<void>((resolve) => {
-    const timeoutId = window.setTimeout(resolve, 3000);
-
-    peerConnection.addEventListener("icegatheringstatechange", () => {
-      if (peerConnection.iceGatheringState !== "complete") return;
-
-      window.clearTimeout(timeoutId);
-      resolve();
-    });
-  });
-}
-
 function shouldIgnorePushToTalkShortcut(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
 
@@ -3880,6 +3631,25 @@ function createLocalVoiceUtterance(
     speaker,
     text,
     created_at: createdAt,
+    persisted: false,
+  };
+}
+
+function createRemoteTextUtterance(
+  id: string,
+  speaker: Speaker,
+  text: string,
+  recognizedAt: string,
+): Utterance {
+  const createdAt = new Date(recognizedAt);
+
+  return {
+    id: `local-${id}`,
+    speaker,
+    text,
+    created_at: Number.isNaN(createdAt.getTime())
+      ? new Date().toISOString()
+      : createdAt.toISOString(),
     persisted: false,
   };
 }

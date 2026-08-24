@@ -1,6 +1,6 @@
 type RemoteMicRuntimeStore = {
   activeState: unknown | null;
-  offers: Map<string, unknown>;
+  texts: Map<string, unknown>;
 };
 
 const STORE_KEY = "__acpRemoteMicRuntimeStore";
@@ -15,7 +15,7 @@ export function getRemoteMicRuntimeStore() {
   if (!globalStore[STORE_KEY]) {
     globalStore[STORE_KEY] = {
       activeState: null,
-      offers: new Map<string, unknown>(),
+      texts: new Map<string, unknown>(),
     };
   }
 
