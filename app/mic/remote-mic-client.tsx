@@ -19,7 +19,8 @@ type RealtimeEvent = {
   transcript?: string;
 };
 
-const HEARTBEAT_MS = 15_000;
+const HEARTBEAT_MS = 30_000;
+const ACTIVE_SESSION_REFRESH_MS = 10_000;
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const CLIENT_VERSION = "remote-mic-client-2026-08-24-realtime";
 
@@ -99,7 +100,7 @@ export default function RemoteMicClient(props: {
 
     const timerId = window.setInterval(() => {
       void loadActiveSession(fixedRole, { quiet: true });
-    }, 3000);
+    }, ACTIVE_SESSION_REFRESH_MS);
 
     return () => window.clearInterval(timerId);
   }, [fixedRole, micState]);

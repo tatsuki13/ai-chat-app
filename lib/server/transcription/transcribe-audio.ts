@@ -2,10 +2,11 @@ import {
   createOpenAIClient,
   getDefaultOpenAITimeoutMs,
 } from "../../ai/client";
+import { getTranscribeModel, getTranscribePrompt } from "./config";
 
 export async function transcribeAudioFile(audio: File) {
   const apiKey = process.env.OPENAI_API_KEY;
-  const model = process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
+  const model = getTranscribeModel();
 
   if (!apiKey) {
     throw new TranscriptionConfigurationError(
@@ -32,8 +33,7 @@ export async function transcribeAudioFile(audio: File) {
       file: audio,
       model,
       language: "ja",
-      prompt:
-        "Japanese ACP conversation. Transcribe only spoken words and ignore silence or device noise.",
+      prompt: getTranscribePrompt(),
     });
   } catch (error) {
     console.error("[remote-mic transcription failed]", {

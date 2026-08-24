@@ -4,7 +4,9 @@ import { getActiveFixedRemoteMicSession } from "../../../../../lib/remote-mic/fi
 import {
   getRealtimeTranscribeModel,
   getRealtimeVadSilenceMs,
+  getRealtimeVadThreshold,
 } from "../../../../../lib/remote-mic/realtime-config";
+import { getTranscribePrompt } from "../../../../../lib/server/transcription/config";
 
 export const runtime = "nodejs";
 
@@ -37,6 +39,7 @@ export async function POST(request: Request) {
   }
 
   const model = getRealtimeTranscribeModel();
+  const prompt = getTranscribePrompt();
   const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
     method: "POST",
     headers: {
@@ -58,12 +61,11 @@ export async function POST(request: Request) {
             transcription: {
               model,
               language: "ja",
-              prompt:
-                "Japanese ACP conversation. Transcribe only spoken words and ignore silence or device noise.",
+              prompt,
             },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.5,
+              threshold: getRealtimeVadThreshold(),
               prefix_padding_ms: 300,
               silence_duration_ms: getRealtimeVadSilenceMs(),
             },

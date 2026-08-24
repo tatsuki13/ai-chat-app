@@ -193,7 +193,7 @@ const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const TIMER_TICK_MS = 1000;
 const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const REMOTE_MIC_STATUS_POLL_MS = 10_000;
-const REMOTE_MIC_SESSION_SYNC_MS = 1_000;
+const REMOTE_MIC_SESSION_SYNC_MS = 3_000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
 
@@ -309,6 +309,7 @@ function SessionPageClient() {
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
 
   const participantCode = session?.participant_code || "未設定";
+  const hasParticipantCode = Boolean(session?.participant_code?.trim());
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
   const nextTopic = DISCUSSION_TOPICS[currentTopicIndex + 1] ?? null;
   const visibleUtterances = limitUtteranceState(utterances);
@@ -347,6 +348,12 @@ function SessionPageClient() {
   const remoteMicrophoneConnected =
     remoteMicStatuses.elder.status === "connected" ||
     remoteMicStatuses.caregiver.status === "connected";
+  const remoteMicrophonesConnected =
+    remoteMicStatuses.elder.status === "connected" &&
+    remoteMicStatuses.caregiver.status === "connected";
+  const remoteMicrophonesTransmitting =
+    remoteMicStatuses.elder.transmitting === true &&
+    remoteMicStatuses.caregiver.transmitting === true;
 
   useEffect(() => {
     let ignore = false;
@@ -454,10 +461,22 @@ function SessionPageClient() {
     const timerId = window.setInterval(() => {
       void fetchSessionDetail(session.id)
         .then((detail) => {
+          const persistedUtterances = markPersistedUtterances(detail.utterances);
+          const currentUtteranceIds = new Set(
+            utterancesRef.current.map((utterance) => utterance.id),
+          );
+          const hasNewPersistedUtterance = persistedUtterances.some(
+            (utterance) => !currentUtteranceIds.has(utterance.id),
+          );
+
+          if (hasNewPersistedUtterance) {
+            markTopicInteractionStarted("remote_voice");
+          }
+
           setSession(detail.session);
           setUtterances((current) =>
             limitUtteranceState(
-              mergeUtterances(current, markPersistedUtterances(detail.utterances)),
+              mergeUtterances(current, persistedUtterances),
             ),
           );
           setUtteranceTotal(detail.utterance_count);
@@ -2020,6 +2039,15 @@ function SessionPageClient() {
           </div>
 
           <div className="space-y-3">
+            <DialogueSetupGuide
+              hasParticipantCode={hasParticipantCode}
+              isEditingParticipantCode={isEditingId}
+              microphonesConnected={remoteMicrophonesConnected}
+              microphonesTransmitting={remoteMicrophonesTransmitting}
+              statuses={remoteMicStatuses}
+              onEditParticipantCode={startEditingId}
+            />
+
             <RemoteMicrophonePanel
               sessionId={session?.id ?? ""}
               statuses={remoteMicStatuses}
@@ -2085,6 +2113,144 @@ function SessionPageLoading() {
         </div>
       </section>
     </main>
+  );
+}
+
+function DialogueSetupGuide(props: {
+  hasParticipantCode: boolean;
+  isEditingParticipantCode: boolean;
+  microphonesConnected: boolean;
+  microphonesTransmitting: boolean;
+  statuses: Record<SpeakerRole, RemoteMicRoleStatus>;
+  onEditParticipantCode: () => void;
+}) {
+  const currentStep = !props.hasParticipantCode
+    ? 0
+    : !props.microphonesConnected
+      ? 1
+      : !props.microphonesTransmitting
+        ? 2
+        : 3;
+  const elderConnected = props.statuses.elder.status === "connected";
+  const caregiverConnected = props.statuses.caregiver.status === "connected";
+  const elderTransmitting = props.statuses.elder.transmitting === true;
+  const caregiverTransmitting = props.statuses.caregiver.transmitting === true;
+  const nextAction =
+    currentStep === 0
+      ? "まず参加者IDを設定してください。"
+      : currentStep === 1
+        ? "本人用・介護者用スマホでマイクページを開いて接続してください。"
+        : currentStep === 2
+          ? "各スマホでマイク開始を押してください。"
+          : "準備完了です。このまま対話を始めてください。";
+  const steps = [
+    {
+      label: "参加者ID",
+      detail: props.hasParticipantCode
+        ? "設定済み"
+        : props.isEditingParticipantCode
+          ? "入力中"
+          : "未設定",
+    },
+    {
+      label: "マイク接続",
+      detail: `本人 ${elderConnected ? "接続" : "未接続"} / 介護者 ${
+        caregiverConnected ? "接続" : "未接続"
+      }`,
+    },
+    {
+      label: "マイク開始",
+      detail: `本人 ${elderTransmitting ? "送信中" : "停止中"} / 介護者 ${
+        caregiverTransmitting ? "送信中" : "停止中"
+      }`,
+    },
+    {
+      label: "対話開始",
+      detail: props.microphonesTransmitting ? "開始できます" : "待機中",
+    },
+  ];
+
+  return (
+    <aside className="rounded-md border border-emerald-200 bg-white shadow-sm">
+      <details className="group">
+        <summary className="flex cursor-pointer list-none items-start justify-between gap-2 px-3 py-3 [&::-webkit-details-marker]:hidden">
+          <div className="min-w-0">
+            <div className="text-[11px] font-black uppercase tracking-[0.08em] text-emerald-700">
+              Setup
+            </div>
+            <h2 className="mt-0.5 text-[14px] font-black leading-tight">
+              開始までの手順
+            </h2>
+            <p className="mt-1 text-[11px] font-bold leading-relaxed text-emerald-800">
+              {nextAction}
+            </p>
+          </div>
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-emerald-100 bg-emerald-50 text-[13px] font-black leading-none text-emerald-900 transition group-open:rotate-180">
+            ▾
+          </span>
+        </summary>
+
+        <div className="border-t border-emerald-100 px-3 pb-3 pt-3">
+          {!props.hasParticipantCode ? (
+            <button
+              type="button"
+              onClick={props.onEditParticipantCode}
+              className="mb-3 min-h-8 w-full rounded-md bg-emerald-700 px-2.5 text-[12px] font-black text-white"
+            >
+              ID設定
+            </button>
+          ) : null}
+
+          <ol className="space-y-2">
+            {steps.map((step, index) => {
+              const state =
+                index < currentStep
+                  ? "done"
+                  : index === currentStep
+                    ? "current"
+                    : "pending";
+
+              return (
+                <li
+                  key={step.label}
+                  className={`rounded-md border px-2.5 py-2 ${
+                    state === "done"
+                      ? "border-emerald-200 bg-emerald-50"
+                      : state === "current"
+                        ? "border-stone-900 bg-stone-50"
+                        : "border-stone-200 bg-white"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] font-black text-stone-900">
+                      {index + 1}. {step.label}
+                    </span>
+                    <span
+                      className={`rounded-md px-1.5 py-0.5 text-[10px] font-black ${
+                        state === "done"
+                          ? "bg-emerald-100 text-emerald-900"
+                          : state === "current"
+                            ? "bg-stone-900 text-white"
+                            : "bg-stone-100 text-stone-500"
+                      }`}
+                    >
+                      {state === "done"
+                        ? "完了"
+                        : state === "current"
+                          ? "現在"
+                          : "待機"}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-[11px] font-bold leading-relaxed text-stone-600">
+                    {step.detail}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      </details>
+    </aside>
   );
 }
 
