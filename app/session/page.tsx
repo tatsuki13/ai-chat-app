@@ -63,13 +63,6 @@ type FixedRemoteMicActiveState = {
     }
   >;
 };
-type RemoteMicRecognizedText = {
-  id: string;
-  role: SpeakerRole;
-  text: string;
-  recognizedAt: string;
-};
-
 type SessionInfo = {
   id: string;
   participant_code: string | null;
@@ -200,8 +193,7 @@ const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const TIMER_TICK_MS = 1000;
 const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const REMOTE_MIC_STATUS_POLL_MS = 10_000;
-const REMOTE_MIC_TEXT_POLL_MS = 1_000;
-const REMOTE_MIC_SESSION_SYNC_MS = 5_000;
+const REMOTE_MIC_SESSION_SYNC_MS = 1_000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
 
@@ -315,7 +307,6 @@ function SessionPageClient() {
   const timerRunningRef = useRef(false);
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
-  const remoteMicTextIdsRef = useRef<Set<string>>(new Set());
 
   const participantCode = session?.participant_code || "未設定";
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
@@ -603,40 +594,6 @@ function SessionPageClient() {
 
     return () => {
       ignore = true;
-      window.clearInterval(timerId);
-    };
-  }, [session?.id, session?.ended_at]);
-
-  useEffect(() => {
-    if (!session?.id || session.ended_at) return;
-
-    let cancelled = false;
-    const sessionId = session.id;
-
-    async function pollTexts() {
-      try {
-        const texts = await fetchRemoteMicRecognizedTexts(sessionId);
-
-        for (const item of texts) {
-          if (cancelled) return;
-          handleRemoteMicRecognizedText(item);
-        }
-      } catch (error) {
-        console.warn("[remote-mic pc text poll failed]", {
-          sessionId,
-          errorName: error instanceof Error ? error.name : "UnknownError",
-          errorMessage: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-
-    void pollTexts();
-    const timerId = window.setInterval(() => {
-      void pollTexts();
-    }, REMOTE_MIC_TEXT_POLL_MS);
-
-    return () => {
-      cancelled = true;
       window.clearInterval(timerId);
     };
   }, [session?.id, session?.ended_at]);
@@ -940,27 +897,6 @@ function SessionPageClient() {
     voiceInputServiceRef.current?.stopVoiceInput();
     setAudioInputRunning(false);
     setAudioInputLevels({ A: 0, B: 0 });
-  }
-
-  function handleRemoteMicRecognizedText(item: RemoteMicRecognizedText) {
-    const currentSession = sessionRef.current;
-    if (!currentSession || remoteMicTextIdsRef.current.has(item.id)) return;
-
-    remoteMicTextIdsRef.current.add(item.id);
-    markTopicInteractionStarted("remote_voice");
-    const utterance = createRemoteTextUtterance(
-      item.id,
-      item.role,
-      item.text,
-      item.recognizedAt,
-    );
-    setUtterances((current) =>
-      syncUtterancesRef(limitUtteranceState(
-        [...current, utterance].sort(compareUtterancesByTime),
-      )),
-    );
-    markSessionUsed(currentSession.id);
-    setStatusText("表示済み（未保存）");
   }
 
   function updateVoiceInputLevel(level: SingleMicInputLevel) {
@@ -2311,22 +2247,6 @@ function toFixedRemoteMicStatus(
   };
 }
 
-async function fetchRemoteMicRecognizedTexts(sessionId: string) {
-  const params = new URLSearchParams({ sessionId });
-  const response = await fetch(
-    `/api/remote-mic/fixed/texts?${params.toString()}`,
-    { cache: "no-store" },
-  );
-
-  if (!response.ok) {
-    throw new Error(`Remote microphone texts failed: ${response.status}`);
-  }
-
-  const data = (await response.json()) as { texts: RemoteMicRecognizedText[] };
-
-  return data.texts;
-}
-
 function LevelBar(props: { value: number; tone: "emerald" | "sky" }) {
   const width = `${Math.round(Math.min(1, Math.max(0, props.value)) * 100)}%`;
 
@@ -3631,25 +3551,6 @@ function createLocalVoiceUtterance(
     speaker,
     text,
     created_at: createdAt,
-    persisted: false,
-  };
-}
-
-function createRemoteTextUtterance(
-  id: string,
-  speaker: Speaker,
-  text: string,
-  recognizedAt: string,
-): Utterance {
-  const createdAt = new Date(recognizedAt);
-
-  return {
-    id: `local-${id}`,
-    speaker,
-    text,
-    created_at: Number.isNaN(createdAt.getTime())
-      ? new Date().toISOString()
-      : createdAt.toISOString(),
     persisted: false,
   };
 }

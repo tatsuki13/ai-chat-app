@@ -5,7 +5,6 @@ import {
   getActiveFixedRemoteMicSession,
   setActiveFixedRemoteMicSession,
 } from "../../../../../lib/remote-mic/fixed-session";
-import { clearRemoteMicRecognizedTexts } from "../../../../../lib/remote-mic/text-relay";
 
 export const runtime = "nodejs";
 
@@ -63,9 +62,6 @@ export async function DELETE(request: Request) {
   const params = new URL(request.url).searchParams;
   const sessionId = params.get("sessionId") ?? undefined;
   clearActiveFixedRemoteMicSession(sessionId);
-  if (sessionId) {
-    clearRemoteMicRecognizedTexts(sessionId);
-  }
 
   return NextResponse.json({ ok: true });
 }

@@ -3,7 +3,6 @@ import { Prisma } from "@prisma/client";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
 import { clearActiveFixedRemoteMicSession } from "../../../../lib/remote-mic/fixed-session";
-import { clearRemoteMicRecognizedTexts } from "../../../../lib/remote-mic/text-relay";
 
 export const runtime = "nodejs";
 
@@ -183,7 +182,6 @@ export async function DELETE(_request: Request, context: RouteContext) {
       where: { id },
     });
     clearActiveFixedRemoteMicSession(id);
-    clearRemoteMicRecognizedTexts(id);
 
     return NextResponse.json({ discarded: true });
   } catch (error) {
