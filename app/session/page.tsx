@@ -335,6 +335,7 @@ function SessionPageClient() {
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
   const nextTopic = DISCUSSION_TOPICS[currentTopicIndex + 1] ?? null;
   const visibleUtterances = limitUtteranceState(utterances);
+  const latestVisibleUtteranceId = visibleUtterances.at(-1)?.id ?? "";
   const pendingUtteranceCount = utterances.filter(isUnpersistedUtterance).length;
   const displayedUtteranceTotal = utteranceTotal + pendingUtteranceCount;
   const hiddenUtteranceCount = Math.max(
@@ -726,7 +727,7 @@ function SessionPageClient() {
     });
 
     return () => window.cancelAnimationFrame(frame);
-  }, [utteranceTotal]);
+  }, [latestVisibleUtteranceId]);
 
   useEffect(() => {
     const now = Date.now();
