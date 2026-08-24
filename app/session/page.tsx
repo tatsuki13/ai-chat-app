@@ -330,6 +330,10 @@ function SessionPageClient() {
   const remoteMicPeerHandlesRef = useRef<Map<string, RemoteMicPeerHandle>>(
     new Map(),
   );
+  const remoteSttQueueRef = useRef<Record<StereoSpeaker, Promise<void>>>({
+    A: Promise.resolve(),
+    B: Promise.resolve(),
+  });
 
   const participantCode = session?.participant_code || "未設定";
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
@@ -1002,7 +1006,7 @@ function SessionPageClient() {
         sequence: chunk.sequence,
         durationMs: chunk.endedAt - chunk.startedAt,
       });
-      void handleVoiceAudioChunk(chunk, "remote_voice");
+      enqueueRemoteVoiceAudioChunk(chunk);
     });
     const unsubscribeLevel = service.onLevel((level) => {
       const normalizedLevel = Math.min(1, Math.max(level.rms * 8, level.peak));
@@ -1021,6 +1025,23 @@ function SessionPageClient() {
     remoteStreamInputServiceRef.current = service;
 
     return service;
+  }
+
+  function enqueueRemoteVoiceAudioChunk(chunk: SingleMicAudioChunk) {
+    const speakerKey = toAudioSpeaker(normalizeSpeaker(chunk.speaker));
+    const previous = remoteSttQueueRef.current[speakerKey];
+    const next = previous
+      .catch(() => {})
+      .then(() => handleVoiceAudioChunk(chunk, "remote_voice"));
+
+    remoteSttQueueRef.current[speakerKey] = next.catch((error) => {
+      console.warn("[remote-mic pc stt queue failed]", {
+        speaker: chunk.speaker,
+        sequence: chunk.sequence,
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   async function acceptRemoteMicWebRtcOffer(

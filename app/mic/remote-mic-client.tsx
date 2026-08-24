@@ -248,6 +248,23 @@ export default function RemoteMicClient() {
     setMicState("requesting");
 
     try {
+      if (
+        streamRef.current &&
+        peerConnectionRef.current &&
+        peerConnectionRef.current.connectionState !== "closed"
+      ) {
+        streamRef.current.getAudioTracks().forEach((track) => {
+          track.enabled = true;
+        });
+        recordingActiveRef.current = true;
+        setPermissionLabel("許可済み");
+        setMicState("streaming");
+        setRecorderLabel("WebRTC音声送信");
+        await setFixedMicMuted(false);
+        setServerLabel("WebRTC接続中");
+        return;
+      }
+
       if (!window.isSecureContext) {
         throw new Error("HTTPSで接続してください。Tailscale ServeのHTTPS URLから開いてください。");
       }
@@ -291,6 +308,23 @@ export default function RemoteMicClient() {
       );
       await stop(false);
     }
+  }
+
+  async function muteMicrophone() {
+    if (!streamRef.current) {
+      await stop();
+      return;
+    }
+
+    streamRef.current.getAudioTracks().forEach((track) => {
+      track.enabled = false;
+    });
+    recordingActiveRef.current = false;
+    setLevel(0);
+    setMicState("idle");
+    setRecorderLabel("マイクOFF");
+    await setFixedMicMuted(true).catch(() => {});
+    setServerLabel("停止中");
   }
 
   async function startWebRtcMicrophone(stream: MediaStream) {
@@ -575,7 +609,7 @@ export default function RemoteMicClient() {
           <button
             type="button"
             disabled={micState !== "streaming" && micState !== "requesting"}
-            onClick={() => void stop()}
+            onClick={() => void muteMicrophone()}
             className="min-h-12 rounded-md border border-stone-300 bg-white px-3 text-[14px] font-black text-stone-700 active:scale-[0.99] disabled:bg-stone-100 disabled:text-stone-400"
           >
             停止

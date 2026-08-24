@@ -1,3 +1,5 @@
+import { createVoiceActivityDetector } from "./voice-activity-detector";
+
 export type StereoSpeaker = "A" | "B";
 
 export type StereoAudioChunk = {
@@ -318,19 +320,31 @@ export function createSingleMicInputService(): SingleMicInputService {
 }
 
 export function createRemoteStreamInputService(
-  chunkMs = 2000,
+  recorderTimesliceMs = 250,
 ): RemoteStreamInputService {
+  type BufferedRemoteBlob = {
+    blob: Blob;
+    at: number;
+  };
+
   type RemoteHandle = {
     sourceStream: MediaStream;
     recordingStream: MediaStream;
     context: AudioContext;
     nodes: AudioNode[];
-    recorder: MediaRecorder | null;
-    segmentTimerId: number | null;
+    recorder: MediaRecorder;
+    mimeType: string;
+    bufferedBlobs: BufferedRemoteBlob[];
+    activeSegmentBlobs: Blob[];
+    segmentStartedAt: number | null;
+    pendingSegmentEndAt: number | null;
+    voiceActivity: ReturnType<typeof createVoiceActivityDetector>;
     stopLevelMeter: (() => void) | null;
     active: boolean;
   };
 
+  const REMOTE_PREROLL_MS = 700;
+  const REMOTE_BUFFER_RETENTION_MS = 2500;
   const handles = new Map<StereoSpeaker, RemoteHandle>();
   const chunkCallbacks = new Set<ChunkCallback>();
   const levelCallbacks = new Set<LevelCallback>();
@@ -364,6 +378,11 @@ export function createRemoteStreamInputService(
     const source = context.createMediaStreamSource(sourceStream);
     const analyser = context.createAnalyser();
     const destination = context.createMediaStreamDestination();
+    const mimeType = getSupportedAudioMimeType();
+    const recorder = new MediaRecorder(
+      destination.stream,
+      mimeType ? { mimeType } : undefined,
+    );
 
     analyser.fftSize = 1024;
     source.connect(analyser);
@@ -404,36 +423,94 @@ export function createRemoteStreamInputService(
       audioContextState: context.state,
     });
 
+    const voiceActivity = createVoiceActivityDetector({
+      onSpeechStart: (segmentStartedAtMs) => {
+        const currentHandle = handles.get(speaker);
+        if (!currentHandle?.active) return;
+
+        const prerollStartedAt = segmentStartedAtMs - REMOTE_PREROLL_MS;
+        currentHandle.segmentStartedAt = segmentStartedAtMs;
+        currentHandle.pendingSegmentEndAt = null;
+        currentHandle.activeSegmentBlobs = currentHandle.bufferedBlobs
+          .filter((item) => item.at >= prerollStartedAt)
+          .map((item) => item.blob);
+        console.info("[remote-mic vad speech start]", {
+          speaker,
+          role: remoteRoleLabel(speaker),
+          segmentStartedAtMs,
+          prerollBlobCount: currentHandle.activeSegmentBlobs.length,
+        });
+      },
+      onSpeechEnd: (segment) => {
+        const currentHandle = handles.get(speaker);
+        if (!currentHandle?.active || currentHandle.segmentStartedAt === null) {
+          return;
+        }
+
+        currentHandle.pendingSegmentEndAt = segment.endedAtMs;
+        console.info("[remote-mic vad speech end]", {
+          speaker,
+          role: remoteRoleLabel(speaker),
+          startedAt: segment.startedAtMs,
+          endedAt: segment.endedAtMs,
+        });
+        requestRemoteRecorderData(currentHandle);
+        window.setTimeout(() => {
+          flushRemoteSpeechSegment(speaker);
+        }, recorderTimesliceMs + 50);
+      },
+    });
+
     const handle: RemoteHandle = {
       sourceStream,
       recordingStream: destination.stream,
       context,
       nodes: [source, analyser, destination],
-      recorder: null,
-      segmentTimerId: null,
+      recorder,
+      mimeType,
+      bufferedBlobs: [],
+      activeSegmentBlobs: [],
+      segmentStartedAt: null,
+      pendingSegmentEndAt: null,
+      voiceActivity,
       stopLevelMeter: startRemoteLevelMeter(analyser, speaker, (level) => {
+        const normalizedLevel = Math.max(level.rms * 8, level.peak);
+        voiceActivity.update(normalizedLevel, level.at);
         levelCallbacks.forEach((callback) => callback(level));
       }),
       active: true,
     };
     handles.set(speaker, handle);
 
-    startRemoteSegment(speaker);
-  }
+    recorder.ondataavailable = (event) => {
+      if (event.data.size <= 0) return;
 
-  function startRemoteSegment(speaker: StereoSpeaker) {
-    const handle = handles.get(speaker);
-    if (!handle?.active || handle.recorder) return;
+      const currentHandle = handles.get(speaker);
+      if (!currentHandle?.active) return;
 
-    const mimeType = getSupportedAudioMimeType();
-    const parts: Blob[] = [];
-    const startedAt = Date.now();
-    const recorder = new MediaRecorder(
-      handle.recordingStream,
-      mimeType ? { mimeType } : undefined,
-    );
+      const at = Date.now();
+      currentHandle.bufferedBlobs.push({ blob: event.data, at });
+      currentHandle.bufferedBlobs = currentHandle.bufferedBlobs.filter(
+        (item) => item.at >= at - REMOTE_BUFFER_RETENTION_MS,
+      );
 
-    handle.recorder = recorder;
+      if (currentHandle.segmentStartedAt !== null) {
+        currentHandle.activeSegmentBlobs.push(event.data);
+      }
+
+      if (currentHandle.pendingSegmentEndAt !== null) {
+        flushRemoteSpeechSegment(speaker);
+      }
+    };
+    recorder.onerror = (event) => {
+      console.error("[remote-mic remote recorder error]", {
+        speaker,
+        role: remoteRoleLabel(speaker),
+        recorderState: recorder.state,
+        eventType: event.type,
+      });
+    };
+
     console.info("[remote-mic remote recorder start]", {
       speaker,
       role: remoteRoleLabel(speaker),
@@ -446,94 +523,85 @@ export function createRemoteStreamInputService(
       recordingTrackReadyState:
         handle.recordingStream.getAudioTracks()[0]?.readyState,
     });
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        parts.push(event.data);
-      }
-    };
-    recorder.onstop = () => {
-      const currentHandle = handles.get(speaker);
-      if (currentHandle?.segmentTimerId !== null && currentHandle) {
-        window.clearTimeout(currentHandle.segmentTimerId);
-        currentHandle.segmentTimerId = null;
-      }
-      if (currentHandle) {
-        currentHandle.recorder = null;
-      }
-
-      const endedAt = Date.now();
-      const blob = new Blob(parts, {
-        type: recorder.mimeType || parts[0]?.type || mimeType,
-      });
-
-      console.info("[remote-mic remote segment]", {
-        speaker,
-        role: remoteRoleLabel(speaker),
-        size: blob.size,
-        type: blob.type,
-        parts: parts.length,
-        durationMs: endedAt - startedAt,
-        active: Boolean(currentHandle?.active),
-      });
-
-      if (blob.size >= 512 && currentHandle?.active) {
-        chunkCallbacks.forEach((callback) =>
-          callback({
-            speaker,
-            blob,
-            mimeType: blob.type || mimeType,
-            startedAt,
-            endedAt,
-            sequence: ++sequence,
-          }),
-        );
-      }
-
-      if (currentHandle?.active) {
-        startRemoteSegment(speaker);
-      }
-    };
-    recorder.onerror = (event) => {
-      console.error("[remote-mic remote recorder error]", {
-        speaker,
-        role: remoteRoleLabel(speaker),
-        recorderState: recorder.state,
-        eventType: event.type,
-      });
-    };
-
-    recorder.start();
+    recorder.start(recorderTimesliceMs);
     console.info("[remote-mic remote recorder started]", {
       speaker,
       role: remoteRoleLabel(speaker),
       recorderState: recorder.state,
     });
-    handle.segmentTimerId = window.setTimeout(() => {
-      if (recorder.state !== "inactive") {
-        recorder.stop();
-      }
-    }, chunkMs);
+  }
+
+  function requestRemoteRecorderData(handle: RemoteHandle) {
+    if (handle.recorder.state !== "recording") return;
+
+    try {
+      handle.recorder.requestData();
+    } catch {
+      // Some browsers can reject requestData while the recorder is stopping.
+    }
+  }
+
+  function flushRemoteSpeechSegment(speaker: StereoSpeaker) {
+    const handle = handles.get(speaker);
+    if (
+      !handle?.active ||
+      handle.segmentStartedAt === null ||
+      handle.pendingSegmentEndAt === null
+    ) {
+      return;
+    }
+
+    const startedAt = handle.segmentStartedAt;
+    const endedAt = handle.pendingSegmentEndAt;
+    const parts = handle.activeSegmentBlobs;
+    const blob = new Blob(parts, {
+      type: handle.recorder.mimeType || parts[0]?.type || handle.mimeType,
+    });
+
+    console.info("[remote-mic remote segment]", {
+      speaker,
+      role: remoteRoleLabel(speaker),
+      size: blob.size,
+      type: blob.type,
+      parts: parts.length,
+      durationMs: endedAt - startedAt,
+      active: handle.active,
+    });
+
+    handle.segmentStartedAt = null;
+    handle.pendingSegmentEndAt = null;
+    handle.activeSegmentBlobs = [];
+
+    if (blob.size < 512) return;
+
+    chunkCallbacks.forEach((callback) =>
+      callback({
+        speaker,
+        blob,
+        mimeType: blob.type || handle.mimeType,
+        startedAt,
+        endedAt,
+        sequence: ++sequence,
+      }),
+    );
   }
 
   function stopRemoteInput(speaker: StereoSpeaker) {
     const handle = handles.get(speaker);
     if (!handle) return;
 
+    handle.voiceActivity.forceEnd(Date.now());
+    flushRemoteSpeechSegment(speaker);
     handle.active = false;
-    if (handle.segmentTimerId !== null) {
-      window.clearTimeout(handle.segmentTimerId);
-      handle.segmentTimerId = null;
-    }
     handle.stopLevelMeter?.();
     handle.stopLevelMeter = null;
-    if (handle.recorder && handle.recorder.state !== "inactive") {
+    if (handle.recorder.state !== "inactive") {
       try {
         handle.recorder.stop();
       } catch {
         // Recorder may already be stopping after a peer disconnect.
       }
     }
-    handle.recorder = null;
 
     for (const node of handle.nodes) {
       try {
