@@ -18,11 +18,51 @@ type RealtimeEvent = {
   delta?: string;
   transcript?: string;
 };
+type RemoteMicTranscriptionProvider = "browser" | "openai";
+type BrowserSpeechRecognitionResult = {
+  isFinal: boolean;
+  0?: {
+    transcript?: string;
+  };
+};
+type BrowserSpeechRecognitionResultList = {
+  length: number;
+  [index: number]: BrowserSpeechRecognitionResult;
+};
+type BrowserSpeechRecognitionEvent = Event & {
+  resultIndex: number;
+  results: BrowserSpeechRecognitionResultList;
+};
+type BrowserSpeechRecognitionErrorEvent = Event & {
+  error?: string;
+  message?: string;
+};
+type BrowserSpeechRecognition = EventTarget & {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onstart: (() => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: BrowserSpeechRecognitionErrorEvent) => void) | null;
+  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition;
+type WindowWithSpeechRecognition = Window & {
+  SpeechRecognition?: BrowserSpeechRecognitionConstructor;
+  webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
+};
 
 const HEARTBEAT_MS = 30_000;
 const ACTIVE_SESSION_REFRESH_MS = 10_000;
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const CLIENT_VERSION = "remote-mic-client-2026-08-24-realtime";
+const TRANSCRIPTION_PROVIDER: RemoteMicTranscriptionProvider =
+  process.env.NEXT_PUBLIC_REMOTE_MIC_TRANSCRIPTION_PROVIDER === "browser"
+    ? "browser"
+    : "openai";
 
 export default function RemoteMicClient(props: {
   initialRole?: RemoteMicRole | null;
@@ -45,8 +85,10 @@ export default function RemoteMicClient(props: {
   const streamRef = useRef<MediaStream | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const speechRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const levelStopRef = useRef<(() => void) | null>(null);
   const recordingActiveRef = useRef(false);
+  const speechRecognitionStopRequestedRef = useRef(false);
   const partialTextByTranscriptRef = useRef<Map<string, string>>(new Map());
   const speechStartedAtByTranscriptRef = useRef<Map<string, number>>(new Map());
   const firstDeltaAtByTranscriptRef = useRef<Map<string, number>>(new Map());
@@ -208,6 +250,10 @@ export default function RemoteMicClient(props: {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("このブラウザではマイクを利用できません。");
       }
+      if (TRANSCRIPTION_PROVIDER === "browser") {
+        await startBrowserSpeechRecognition(remoteMic);
+        return;
+      }
       if (typeof RTCPeerConnection === "undefined") {
         throw new Error(
           "このブラウザではRealtime接続を利用できません。ChromeまたはSafariで開いてください。",
@@ -363,12 +409,102 @@ export default function RemoteMicClient(props: {
     });
   }
 
+  async function startBrowserSpeechRecognition(session: RemoteMicSession) {
+    const SpeechRecognitionClass = getBrowserSpeechRecognitionClass();
+    if (!SpeechRecognitionClass) {
+      throw new Error(
+        "このブラウザではAIを使わない音声認識を利用できません。Chromeで開くか、OpenAI方式に戻してください。",
+      );
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+    streamRef.current = stream;
+    try {
+      levelStopRef.current = startLevelMeter(stream, (nextLevel) => {
+        setLevel(nextLevel);
+      });
+    } catch {
+      levelStopRef.current = null;
+      setLevel(0);
+    }
+
+    const recognition = new SpeechRecognitionClass();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = "ja-JP";
+    speechRecognitionRef.current = recognition;
+    speechRecognitionStopRequestedRef.current = false;
+
+    recognition.onstart = () => {
+      setConnectionLabel("ブラウザ認識中");
+      setServerLabel("文字起こし中");
+    };
+    recognition.onerror = (event) => {
+      console.warn("[remote-mic browser speech recognition error]", {
+        error: event.error,
+        message: event.message,
+      });
+      setConnectionLabel("音声認識エラー");
+      setError(
+        event.error === "service-not-allowed"
+          ? "ブラウザ標準の音声認識サービスが許可されませんでした。Chromeで試すか、OpenAI方式に戻してください。"
+          : event.message || event.error || "ブラウザ音声認識でエラーが発生しました。",
+      );
+    };
+    recognition.onend = () => {
+      if (!recordingActiveRef.current || speechRecognitionStopRequestedRef.current) {
+        return;
+      }
+
+      window.setTimeout(() => {
+        if (!recordingActiveRef.current || speechRecognitionStopRequestedRef.current) {
+          return;
+        }
+
+        try {
+          recognition.start();
+        } catch {}
+      }, 500);
+    };
+    recognition.onresult = (event) => {
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        if (!result?.isFinal) continue;
+
+        const text = result[0]?.transcript?.trim() ?? "";
+        if (!text) continue;
+
+        void postFinalTranscript(session, {
+          transcriptId: `browser:${Date.now()}:${crypto.randomUUID()}`,
+          text,
+        });
+      }
+    };
+
+    recognition.start();
+    recordingActiveRef.current = true;
+    setPermissionLabel("許可済み");
+    setMicState("streaming");
+    await setFixedMicMuted(false);
+    setServerLabel("文字起こし中");
+  }
+
   async function muteMicrophone() {
     await stop();
   }
 
   async function stop(notifyServer = true) {
     recordingActiveRef.current = false;
+    speechRecognitionStopRequestedRef.current = true;
+    speechRecognitionRef.current?.abort();
+    speechRecognitionRef.current = null;
     dataChannelRef.current?.close();
     dataChannelRef.current = null;
     peerConnectionRef.current?.close();
@@ -449,6 +585,10 @@ export default function RemoteMicClient(props: {
           <StatusRow
             label="WebRTC"
             value={getWebrtcSupportLabel(webrtcSupported, secureContext)}
+          />
+          <StatusRow
+            label="文字起こし方式"
+            value={getTranscriptionProviderLabel(TRANSCRIPTION_PROVIDER)}
           />
           <StatusRow label="Realtime" value={connectionLabel} />
           <StatusRow label="マイク権限" value={permissionLabel} />
@@ -679,6 +819,20 @@ function getWebrtcSupportLabel(webrtcSupported: boolean, secureContext: boolean)
   if (secureContext) return "利用不可";
 
   return "安全判定待ち";
+}
+
+function getTranscriptionProviderLabel(provider: RemoteMicTranscriptionProvider) {
+  return provider === "browser" ? "ブラウザ標準" : "OpenAI Realtime";
+}
+
+function getBrowserSpeechRecognitionClass() {
+  const windowWithSpeechRecognition = window as WindowWithSpeechRecognition;
+
+  return (
+    windowWithSpeechRecognition.SpeechRecognition ??
+    windowWithSpeechRecognition.webkitSpeechRecognition ??
+    null
+  );
 }
 
 function getFixedRemoteMicRole(

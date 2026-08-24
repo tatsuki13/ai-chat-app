@@ -2,11 +2,11 @@ import { NextResponse } from "next/server";
 import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
 import { getActiveFixedRemoteMicSession } from "../../../../../lib/remote-mic/fixed-session";
 import {
+  getRealtimeTranscribePrompt,
   getRealtimeTranscribeModel,
   getRealtimeVadSilenceMs,
   getRealtimeVadThreshold,
 } from "../../../../../lib/remote-mic/realtime-config";
-import { getTranscribePrompt } from "../../../../../lib/server/transcription/config";
 
 export const runtime = "nodejs";
 
@@ -39,7 +39,7 @@ export async function POST(request: Request) {
   }
 
   const model = getRealtimeTranscribeModel();
-  const prompt = getTranscribePrompt();
+  const prompt = getRealtimeTranscribePrompt();
   const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
     method: "POST",
     headers: {
