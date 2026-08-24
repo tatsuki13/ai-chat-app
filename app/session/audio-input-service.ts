@@ -321,8 +321,9 @@ export function createRemoteStreamInputService(
   chunkMs = 2000,
 ): RemoteStreamInputService {
   type RemoteHandle = {
-    stream: MediaStream;
-    context: AudioContext | null;
+    sourceStream: MediaStream;
+    recordingStream: MediaStream;
+    context: AudioContext;
     nodes: AudioNode[];
     recorder: MediaRecorder | null;
     segmentTimerId: number | null;
@@ -342,93 +343,82 @@ export function createRemoteStreamInputService(
       throw new Error("MediaRecorder is not available");
     }
 
-    const remoteStream = new MediaStream(stream.getAudioTracks());
-
-    if (remoteStream.getAudioTracks().length === 0) {
-      throw new Error("Remote audio track is missing");
-    }
-
-    console.info("[remote-mic remote input start]", {
-      speaker,
-      role: remoteRoleLabel(speaker),
-      audioTracks: remoteStream.getAudioTracks().length,
-      trackState: remoteStream.getAudioTracks()[0]?.readyState,
-      trackMuted: remoteStream.getAudioTracks()[0]?.muted,
-    });
-
-    const handle: RemoteHandle = {
-      stream: remoteStream,
-      context: null,
-      nodes: [],
-      recorder: null,
-      segmentTimerId: null,
-      stopLevelMeter: null,
-      active: true,
-    };
-    handles.set(speaker, handle);
-
-    startRemoteSegment(speaker);
-    void startRemoteLevelMonitoring(speaker).catch((error) => {
-      console.warn("[remote-mic level meter unavailable]", {
-        speaker,
-        role: remoteRoleLabel(speaker),
-        name: error instanceof Error ? error.name : "UnknownError",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    });
-  }
-
-  async function startRemoteLevelMonitoring(speaker: StereoSpeaker) {
-    const handle = handles.get(speaker);
-    if (!handle?.active) return;
-
     const AudioContextClass =
       window.AudioContext ??
       (window as Window & { webkitAudioContext?: typeof AudioContext })
         .webkitAudioContext;
 
     if (!AudioContextClass) {
-      console.warn("[remote-mic Web Audio API unavailable]", {
-        speaker,
-        role: remoteRoleLabel(speaker),
-      });
-      return;
+      throw new Error("Web Audio API is not available in this browser");
+    }
+
+    const sourceStream = new MediaStream(
+      stream.getAudioTracks().map((track) => track.clone()),
+    );
+
+    if (sourceStream.getAudioTracks().length === 0) {
+      throw new Error("Remote audio track is missing");
     }
 
     const context = new AudioContextClass();
-    const source = context.createMediaStreamSource(handle.stream);
+    const source = context.createMediaStreamSource(sourceStream);
     const analyser = context.createAnalyser();
-    const silentGain = context.createGain();
+    const destination = context.createMediaStreamDestination();
 
     analyser.fftSize = 1024;
-    silentGain.gain.value = 0;
     source.connect(analyser);
-    analyser.connect(silentGain);
-    silentGain.connect(context.destination);
-
-    handle.context = context;
-    handle.nodes = [source, analyser, silentGain];
+    source.connect(destination);
 
     if (context.state === "suspended") {
       try {
         await context.resume();
       } catch (error) {
-        console.warn("[remote-mic AudioContext resume failed]", {
-          speaker,
-          role: remoteRoleLabel(speaker),
-          name: error instanceof Error ? error.name : "UnknownError",
-          message: error instanceof Error ? error.message : String(error),
-        });
-        return;
+        stopMediaStream(sourceStream);
+        void context.close().catch(() => {});
+        throw error;
       }
     }
 
-    const currentHandle = handles.get(speaker);
-    if (!currentHandle?.active) return;
+    const recordingTracks = destination.stream.getAudioTracks();
+    if (recordingTracks.length === 0) {
+      stopMediaStream(sourceStream);
+      void context.close().catch(() => {});
+      throw new Error("Remote recording audio track is missing");
+    }
 
-    currentHandle.stopLevelMeter = startRemoteLevelMeter(analyser, speaker, (level) => {
-      levelCallbacks.forEach((callback) => callback(level));
+    console.info("[remote-mic remote input start]", {
+      speaker,
+      role: remoteRoleLabel(speaker),
+      audioTracks: sourceStream.getAudioTracks().length,
+      trackState: sourceStream.getAudioTracks()[0]?.readyState,
+      trackMuted: sourceStream.getAudioTracks()[0]?.muted,
     });
+    console.info("[remote-mic recording pipeline]", {
+      speaker,
+      role: remoteRoleLabel(speaker),
+      sourceTrackCount: sourceStream.getAudioTracks().length,
+      sourceTrackReadyState: sourceStream.getAudioTracks()[0]?.readyState,
+      sourceTrackMuted: sourceStream.getAudioTracks()[0]?.muted,
+      destinationTrackCount: recordingTracks.length,
+      destinationTrackReadyState: recordingTracks[0]?.readyState,
+      audioContextState: context.state,
+    });
+
+    const handle: RemoteHandle = {
+      sourceStream,
+      recordingStream: destination.stream,
+      context,
+      nodes: [source, analyser, destination],
+      recorder: null,
+      segmentTimerId: null,
+      stopLevelMeter: startRemoteLevelMeter(analyser, speaker, (level) => {
+        levelCallbacks.forEach((callback) => callback(level));
+      }),
+      active: true,
+    };
+    handles.set(speaker, handle);
+
+    startRemoteSegment(speaker);
   }
 
   function startRemoteSegment(speaker: StereoSpeaker) {
@@ -439,7 +429,7 @@ export function createRemoteStreamInputService(
     const parts: Blob[] = [];
     const startedAt = Date.now();
     const recorder = new MediaRecorder(
-      handle.stream,
+      handle.recordingStream,
       mimeType ? { mimeType } : undefined,
     );
 
@@ -449,9 +439,12 @@ export function createRemoteStreamInputService(
       role: remoteRoleLabel(speaker),
       mimeType,
       recorderState: recorder.state,
-      trackCount: handle.stream.getAudioTracks().length,
-      trackReadyState: handle.stream.getAudioTracks()[0]?.readyState,
-      trackMuted: handle.stream.getAudioTracks()[0]?.muted,
+      sourceTrackCount: handle.sourceStream.getAudioTracks().length,
+      sourceTrackReadyState: handle.sourceStream.getAudioTracks()[0]?.readyState,
+      sourceTrackMuted: handle.sourceStream.getAudioTracks()[0]?.muted,
+      recordingTrackCount: handle.recordingStream.getAudioTracks().length,
+      recordingTrackReadyState:
+        handle.recordingStream.getAudioTracks()[0]?.readyState,
     });
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
@@ -550,10 +543,9 @@ export function createRemoteStreamInputService(
       }
     }
 
-    if (handle.context) {
-      void handle.context.close().catch(() => {});
-    }
-    stopMediaStream(handle.stream);
+    void handle.context.close().catch(() => {});
+    stopMediaStream(handle.recordingStream);
+    stopMediaStream(handle.sourceStream);
     handles.delete(speaker);
   }
 
