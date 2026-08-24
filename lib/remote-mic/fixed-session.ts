@@ -1,4 +1,5 @@
 import type { RemoteMicRole } from "./config";
+import { getRemoteMicRuntimeStore } from "./runtime-store";
 
 export type FixedRemoteMicState = {
   sessionId: string;
@@ -24,20 +25,21 @@ const defaultRoleState = () => ({
   transmitting: false,
 });
 
-let activeState: FixedRemoteMicState | null = null;
-
 export function setActiveFixedRemoteMicSession(input: {
   sessionId: string;
   participantCode: string | null;
   endedAt: string | null;
   dialogueStartedAt: string | null;
 }) {
+  const store = getRemoteMicRuntimeStore();
+  const activeState = store.activeState as FixedRemoteMicState | null;
+
   if (
     !activeState ||
     activeState.sessionId !== input.sessionId ||
     activeState.participantCode !== input.participantCode
   ) {
-    activeState = {
+    const nextState = {
       ...input,
       updatedAt: Date.now(),
       roles: {
@@ -45,25 +47,31 @@ export function setActiveFixedRemoteMicSession(input: {
         caregiver: defaultRoleState(),
       },
     };
-    return activeState;
+    store.activeState = nextState;
+
+    return nextState;
   }
 
-  activeState = {
+  const nextState = {
     ...activeState,
     ...input,
     updatedAt: Date.now(),
   };
+  store.activeState = nextState;
 
-  return activeState;
+  return nextState;
 }
 
 export function getActiveFixedRemoteMicSession() {
-  return activeState;
+  return getRemoteMicRuntimeStore().activeState as FixedRemoteMicState | null;
 }
 
 export function clearActiveFixedRemoteMicSession(sessionId?: string) {
+  const store = getRemoteMicRuntimeStore();
+  const activeState = store.activeState as FixedRemoteMicState | null;
+
   if (!sessionId || activeState?.sessionId === sessionId) {
-    activeState = null;
+    store.activeState = null;
   }
 }
 
@@ -71,6 +79,9 @@ export function updateFixedRemoteMicRole(
   role: RemoteMicRole,
   input: Partial<FixedRemoteMicState["roles"][RemoteMicRole]>,
 ) {
+  const store = getRemoteMicRuntimeStore();
+  const activeState = store.activeState as FixedRemoteMicState | null;
+
   if (!activeState) return null;
 
   activeState.roles[role] = {
@@ -79,6 +90,7 @@ export function updateFixedRemoteMicRole(
     lastSeenAt: Date.now(),
   };
   activeState.updatedAt = Date.now();
+  store.activeState = activeState;
 
   return activeState;
 }

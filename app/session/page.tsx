@@ -48,21 +48,22 @@ type RemoteMicRoleStatus = {
   transmitting?: boolean;
 };
 type FixedRemoteMicActiveResponse = {
-  active: {
-    sessionId: string;
-    participantCode: string | null;
-    endedAt: string | null;
-    dialogueStartedAt: string | null;
-    roles: Record<
-      SpeakerRole,
-      {
-        connectedAt: number | null;
-        lastSeenAt: number | null;
-        muted: boolean;
-        transmitting: boolean;
-      }
-    >;
-  };
+  active: FixedRemoteMicActiveState | null;
+};
+type FixedRemoteMicActiveState = {
+  sessionId: string;
+  participantCode: string | null;
+  endedAt: string | null;
+  dialogueStartedAt: string | null;
+  roles: Record<
+    SpeakerRole,
+    {
+      connectedAt: number | null;
+      lastSeenAt: number | null;
+      muted: boolean;
+      transmitting: boolean;
+    }
+  >;
 };
 type RemoteMicWebRtcOffer = {
   peerId: string;
@@ -209,6 +210,7 @@ const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const TIMER_TICK_MS = 1000;
 const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const REMOTE_MIC_STATUS_POLL_MS = 10_000;
+const REMOTE_MIC_WEBRTC_OFFER_POLL_MS = 1_000;
 const REMOTE_MIC_SESSION_SYNC_MS = 5_000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
@@ -483,13 +485,41 @@ function SessionPageClient() {
           setUtteranceTotal(detail.utterance_count);
           applyDialogueStartedAt(detail.session.dialogue_started_at);
         })
-        .catch(() => {});
+        .catch((error) => {
+          if (!isSessionNotFoundError(error)) return;
+
+          if (requestedSessionId === session.id) {
+            setSession(null);
+            sessionRef.current = null;
+            setStatusText("セッションが見つかりません");
+            setPromptPanel({
+              title: "指定したセッションが見つかりません",
+              body: "URLのsessionIdが既に存在しないか、別の環境のセッションを参照しています。/session を開き直して新しいセッションを開始してください。",
+              tone: "error",
+            });
+            return;
+          }
+
+          if (window.localStorage.getItem(STORAGE_KEY) === session.id) {
+            window.localStorage.removeItem(STORAGE_KEY);
+          }
+          sessionRef.current = null;
+          setSession(null);
+          setUtterances([]);
+          setUtteranceTotal(0);
+          void startAutoSessionOnce().then((created) => {
+            window.localStorage.setItem(STORAGE_KEY, created.id);
+            sessionRef.current = created;
+            setSession(created);
+            setStatusText("保存済み");
+          });
+        });
     }, REMOTE_MIC_SESSION_SYNC_MS);
 
     return () => {
       window.clearInterval(timerId);
     };
-  }, [session?.id, session?.ended_at]);
+  }, [requestedSessionId, session?.id, session?.ended_at]);
 
   useEffect(() => {
     promptPanelRef.current = promptPanel;
@@ -589,7 +619,54 @@ function SessionPageClient() {
       ignore = true;
       window.clearInterval(timerId);
       stopRemoteMicWebRtc();
-      void clearFixedRemoteMicActive(sessionId);
+    };
+  }, [session?.id, session?.ended_at]);
+
+  useEffect(() => {
+    if (!session?.id || session.ended_at) return;
+
+    let cancelled = false;
+    const sessionId = session.id;
+
+    async function pollOffers() {
+      try {
+        const offers = await fetchRemoteMicWebRtcOffers(sessionId);
+
+        for (const offer of offers) {
+          if (cancelled) return;
+          if (remoteMicPeerHandlesRef.current.has(offer.peerId)) continue;
+
+          try {
+            await acceptRemoteMicWebRtcOffer(sessionId, offer);
+          } catch (error) {
+            console.error("[remote-mic pc offer accept failed]", {
+              peerId: offer.peerId,
+              role: offer.role,
+              errorName: error instanceof Error ? error.name : "UnknownError",
+              errorMessage: error instanceof Error ? error.message : String(error),
+            });
+            const handle = remoteMicPeerHandlesRef.current.get(offer.peerId);
+            handle?.peerConnection.close();
+            remoteMicPeerHandlesRef.current.delete(offer.peerId);
+          }
+        }
+      } catch (error) {
+        console.warn("[remote-mic pc offers poll failed]", {
+          sessionId,
+          errorName: error instanceof Error ? error.name : "UnknownError",
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    void pollOffers();
+    const timerId = window.setInterval(() => {
+      void pollOffers();
+    }, REMOTE_MIC_WEBRTC_OFFER_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timerId);
     };
   }, [session?.id, session?.ended_at]);
 
@@ -1149,7 +1226,6 @@ function SessionPageClient() {
           [...current, utterance].sort(compareUtterancesByTime),
         )),
       );
-      setUtteranceTotal((current) => current + 1);
       markSessionUsed(currentSession.id);
       setStatusText(isPersistedUtterance(utterance) ? "保存済み" : "表示済み（未保存）");
     } catch (error) {
@@ -1200,6 +1276,7 @@ function SessionPageClient() {
 
           return next;
         });
+        setUtteranceTotal((current) => current + 1);
       }
     };
 
@@ -1259,7 +1336,6 @@ function SessionPageClient() {
             current.filter((utterance) => utterance.id !== utteranceId),
           ),
         );
-        setUtteranceTotal((current) => Math.max(0, current - 1));
         setStatusText(getAudioAwareSavedStatus());
         return;
       }
@@ -2358,6 +2434,10 @@ async function activateFixedRemoteMics(sessionId: string) {
   const data = (await response.json()) as FixedRemoteMicActiveResponse;
   const now = Date.now();
 
+  if (!data.active) {
+    return emptyFixedRemoteMicStatus();
+  }
+
   return {
     dialogueStartedAt: data.active.dialogueStartedAt,
     roles: {
@@ -2381,6 +2461,10 @@ async function fetchFixedRemoteMicActive(sessionId: string) {
   const data = (await response.json()) as FixedRemoteMicActiveResponse;
   const now = Date.now();
 
+  if (!data.active) {
+    return emptyFixedRemoteMicStatus();
+  }
+
   return {
     dialogueStartedAt: data.active.dialogueStartedAt,
     roles: {
@@ -2390,16 +2474,21 @@ async function fetchFixedRemoteMicActive(sessionId: string) {
   };
 }
 
-async function clearFixedRemoteMicActive(sessionId: string) {
-  const params = new URLSearchParams({ sessionId });
-
-  await fetch(`/api/remote-mic/fixed/active?${params.toString()}`, {
-    method: "DELETE",
-  }).catch(() => {});
+function emptyFixedRemoteMicStatus() {
+  return {
+    dialogueStartedAt: null,
+    roles: {
+      elder: { status: "disconnected" },
+      caregiver: { status: "disconnected" },
+    },
+  } satisfies {
+    dialogueStartedAt: string | null;
+    roles: Record<SpeakerRole, RemoteMicRoleStatus>;
+  };
 }
 
 function toFixedRemoteMicStatus(
-  roleState: FixedRemoteMicActiveResponse["active"]["roles"][SpeakerRole],
+  roleState: FixedRemoteMicActiveState["roles"][SpeakerRole],
   now: number,
 ): RemoteMicRoleStatus {
   const connected =
@@ -3357,7 +3446,7 @@ async function fetchSessionDetail(sessionId: string): Promise<{
         ? errorBody.error
         : `Failed to restore session: ${response.status}`;
 
-    throw new Error(errorText);
+    throw new ApiError(errorText, response.status);
   }
 
   return response.json();
@@ -3631,7 +3720,16 @@ function markSessionUsed(sessionId: string) {
 }
 
 function isSessionNotFoundError(error: unknown) {
-  return error instanceof Error && error.message === "Session not found";
+  return error instanceof ApiError && error.status === 404;
+}
+
+class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+  }
 }
 
 async function postJson<T = unknown>(url: string, body: unknown): Promise<T> {

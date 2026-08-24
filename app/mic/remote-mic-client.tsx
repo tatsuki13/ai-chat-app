@@ -14,6 +14,7 @@ type MicState = "idle" | "requesting" | "streaming";
 
 const HEARTBEAT_MS = 15_000;
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
+const WEBRTC_ANSWER_TIMEOUT_MS = 20_000;
 const CLIENT_VERSION = "remote-mic-client-2026-07-30-speech-text";
 
 export default function RemoteMicClient() {
@@ -36,6 +37,7 @@ export default function RemoteMicClient() {
   const recordingActiveRef = useRef(false);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const answerPollTimerRef = useRef<number | null>(null);
+  const answerPollTimeoutRef = useRef<number | null>(null);
 
   const roleLabel = useMemo(() => {
     if (remoteMic?.role === "elder") return "本人用マイク";
@@ -369,6 +371,40 @@ export default function RemoteMicClient() {
     if (answerPollTimerRef.current !== null) {
       window.clearInterval(answerPollTimerRef.current);
     }
+    if (answerPollTimeoutRef.current !== null) {
+      window.clearTimeout(answerPollTimeoutRef.current);
+    }
+
+    answerPollTimeoutRef.current = window.setTimeout(() => {
+      if (peerConnection.remoteDescription) return;
+
+      console.warn("[remote-mic phone answer timeout]", {
+        peerId,
+        sessionId,
+        role,
+        signalingState: peerConnection.signalingState,
+        connectionState: peerConnection.connectionState,
+        iceConnectionState: peerConnection.iceConnectionState,
+      });
+      if (answerPollTimerRef.current !== null) {
+        window.clearInterval(answerPollTimerRef.current);
+        answerPollTimerRef.current = null;
+      }
+      answerPollTimeoutRef.current = null;
+      peerConnection.close();
+      if (peerConnectionRef.current === peerConnection) {
+        peerConnectionRef.current = null;
+      }
+      levelStopRef.current?.();
+      levelStopRef.current = null;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      recordingActiveRef.current = false;
+      setMicState("idle");
+      setRecorderLabel("停止中");
+      setServerLabel("PC側の受信準備を確認してください");
+      setError("PC側で /session を開き、現在のセッションが有効な状態で再接続してください。");
+    }, WEBRTC_ANSWER_TIMEOUT_MS);
 
     answerPollTimerRef.current = window.setInterval(() => {
       void fetch(
@@ -397,6 +433,10 @@ export default function RemoteMicClient() {
             window.clearInterval(answerPollTimerRef.current);
             answerPollTimerRef.current = null;
           }
+          if (answerPollTimeoutRef.current !== null) {
+            window.clearTimeout(answerPollTimeoutRef.current);
+            answerPollTimeoutRef.current = null;
+          }
           setServerLabel("音声ストリーム送信中");
         })
         .catch(() => {
@@ -410,6 +450,10 @@ export default function RemoteMicClient() {
     if (answerPollTimerRef.current !== null) {
       window.clearInterval(answerPollTimerRef.current);
       answerPollTimerRef.current = null;
+    }
+    if (answerPollTimeoutRef.current !== null) {
+      window.clearTimeout(answerPollTimeoutRef.current);
+      answerPollTimeoutRef.current = null;
     }
     peerConnectionRef.current?.close();
     peerConnectionRef.current = null;

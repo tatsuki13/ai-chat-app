@@ -18,8 +18,8 @@ export async function GET(request: Request) {
   }
 
   const active = getActiveFixedRemoteMicSession();
-  if (!active || active.sessionId !== sessionId) {
-    return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
+  if (!active || active.sessionId !== sessionId || active.endedAt) {
+    return NextResponse.json({ active: null });
   }
 
   return NextResponse.json({ active: serializeState(active) });

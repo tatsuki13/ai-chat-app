@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import type { RemoteMicRole } from "./config";
+import { getRemoteMicRuntimeStore } from "./runtime-store";
 
 export type RemoteMicWebRtcOffer = {
   peerId: string;
@@ -12,7 +13,10 @@ export type RemoteMicWebRtcOffer = {
 };
 
 const OFFER_TTL_MS = 90_000;
-const offers = new Map<string, RemoteMicWebRtcOffer>();
+
+function getOffers() {
+  return getRemoteMicRuntimeStore().offers as Map<string, RemoteMicWebRtcOffer>;
+}
 
 export function createRemoteMicWebRtcOffer(input: {
   sessionId: string;
@@ -20,6 +24,7 @@ export function createRemoteMicWebRtcOffer(input: {
   offer: unknown;
 }) {
   pruneExpiredOffers();
+  const offers = getOffers();
 
   for (const [peerId, offer] of offers.entries()) {
     if (offer.sessionId === input.sessionId && offer.role === input.role) {
@@ -44,6 +49,7 @@ export function createRemoteMicWebRtcOffer(input: {
 
 export function listRemoteMicWebRtcOffers(sessionId: string) {
   pruneExpiredOffers();
+  const offers = getOffers();
 
   return Array.from(offers.values())
     .filter((offer) => offer.sessionId === sessionId && !offer.answer)
@@ -51,6 +57,8 @@ export function listRemoteMicWebRtcOffers(sessionId: string) {
 }
 
 export function clearRemoteMicWebRtcOffers(sessionId: string) {
+  const offers = getOffers();
+
   for (const [peerId, offer] of offers.entries()) {
     if (offer.sessionId === sessionId) {
       offers.delete(peerId);
@@ -65,6 +73,7 @@ export function setRemoteMicWebRtcAnswer(input: {
   answer: unknown;
 }) {
   pruneExpiredOffers();
+  const offers = getOffers();
 
   const offer = offers.get(input.peerId);
   if (
@@ -87,6 +96,7 @@ export function getRemoteMicWebRtcAnswer(input: {
   peerId: string;
 }) {
   pruneExpiredOffers();
+  const offers = getOffers();
 
   const offer = offers.get(input.peerId);
   if (
@@ -113,6 +123,7 @@ function serializeOffer(offer: RemoteMicWebRtcOffer) {
 
 function pruneExpiredOffers() {
   const minCreatedAt = Date.now() - OFFER_TTL_MS;
+  const offers = getOffers();
 
   for (const [peerId, offer] of offers.entries()) {
     if (offer.createdAt < minCreatedAt) {
