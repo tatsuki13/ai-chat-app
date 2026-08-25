@@ -76,6 +76,8 @@ type Utterance = {
   id: string;
   speaker: Speaker | string;
   text: string;
+  start_ms?: number | null;
+  end_ms?: number | null;
   created_at: string;
   persisted?: boolean;
 };
@@ -279,6 +281,7 @@ function SessionPageClient() {
     caregiver: { status: "disconnected" },
     elder: { status: "disconnected" },
   });
+  const [remoteMicConnecting, setRemoteMicConnecting] = useState(false);
   const [developerSlotStates, setDeveloperSlotStates] = useState<SlotState[]>([]);
   const [developerSlotControl, setDeveloperSlotControl] =
     useState<SlotControlDebugState | null>(null);
@@ -560,39 +563,7 @@ function SessionPageClient() {
   }, []);
 
   useEffect(() => {
-    if (!session?.id || session.ended_at) {
-      setRemoteMicStatuses({
-        caregiver: { status: "disconnected" },
-        elder: { status: "disconnected" },
-      });
-      return;
-    }
-
-    let ignore = false;
-    const sessionId = session.id;
-
-    async function activate() {
-      try {
-        const status = await activateFixedRemoteMics(sessionId);
-        if (!ignore) {
-          setRemoteMicStatuses(status.roles);
-          applyDialogueStartedAt(status.dialogueStartedAt);
-        }
-      } catch {
-        if (!ignore) {
-          setRemoteMicStatuses({
-            caregiver: { status: "disconnected" },
-            elder: { status: "disconnected" },
-          });
-        }
-      }
-    }
-
-    void activate();
-
-    return () => {
-      ignore = true;
-    };
+    setRemoteMicStatuses(emptyFixedRemoteMicStatus().roles);
   }, [session?.id, session?.ended_at]);
 
   useEffect(() => {
@@ -1318,6 +1289,33 @@ function SessionPageClient() {
     }
   }
 
+  async function handleConnectRemoteMics() {
+    if (!session?.id || session.ended_at) {
+      setRemoteMicStatuses(emptyFixedRemoteMicStatus().roles);
+      return;
+    }
+
+    setRemoteMicConnecting(true);
+    setStatusText("マイク接続確認中");
+
+    try {
+      const status = await activateFixedRemoteMics(session.id);
+      setRemoteMicStatuses(status.roles);
+      applyDialogueStartedAt(status.dialogueStartedAt);
+      setStatusText("マイク接続確認済み");
+    } catch {
+      setRemoteMicStatuses(emptyFixedRemoteMicStatus().roles);
+      setStatusText("接続エラー");
+      setPromptPanel({
+        title: "スマートフォンマイクを接続できません",
+        body: "PC側のセッション、スマホ側のマイクページ、またはデータベース接続を確認してください。",
+        tone: "error",
+      });
+    } finally {
+      setRemoteMicConnecting(false);
+    }
+  }
+
   function startEditingId() {
     if (!session || busyAction) return;
 
@@ -1353,9 +1351,7 @@ function SessionPageClient() {
     try {
       const updated = await updateSessionDisplayId(session.id, nextId);
       setSession(updated);
-      const status = await activateFixedRemoteMics(updated.id);
-      setRemoteMicStatuses(status.roles);
-      applyDialogueStartedAt(status.dialogueStartedAt);
+      setRemoteMicStatuses(emptyFixedRemoteMicStatus().roles);
       setIsEditingId(false);
       setStatusText("保存済み");
     } catch (error) {
@@ -2029,6 +2025,8 @@ function SessionPageClient() {
             <RemoteMicrophonePanel
               sessionId={session?.id ?? ""}
               statuses={remoteMicStatuses}
+              connecting={remoteMicConnecting}
+              onConnect={handleConnectRemoteMics}
             />
 
             <DeveloperDialogueTopics
@@ -2235,16 +2233,30 @@ function DialogueSetupGuide(props: {
 function RemoteMicrophonePanel(props: {
   sessionId: string;
   statuses: Record<SpeakerRole, RemoteMicRoleStatus>;
+  connecting: boolean;
+  onConnect: () => void;
 }) {
+  const disabled = !props.sessionId || props.connecting;
+
   return (
     <aside className="rounded-md border border-stone-300 bg-white p-3 shadow-sm">
-      <div>
-        <div className="text-[11px] font-black uppercase tracking-[0.08em] text-stone-500">
-          Fixed Mic
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-black uppercase tracking-[0.08em] text-stone-500">
+            Fixed Mic
+          </div>
+          <h2 className="mt-0.5 text-[14px] font-black leading-tight">
+            スマートフォンマイク
+          </h2>
         </div>
-        <h2 className="mt-0.5 text-[14px] font-black leading-tight">
-          スマートフォンマイク
-        </h2>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={props.onConnect}
+          className="min-h-9 shrink-0 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-800 active:scale-[0.99] disabled:bg-stone-100 disabled:text-stone-400"
+        >
+          {props.connecting ? "確認中" : "接続確認"}
+        </button>
       </div>
 
       <div className="mt-3 space-y-3">

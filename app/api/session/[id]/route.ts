@@ -38,6 +38,8 @@ export async function GET(_request: Request, context: RouteContext) {
           id: true,
           speaker: true,
           text: true,
+          startMs: true,
+          endMs: true,
           createdAt: true,
         },
       }),
@@ -61,6 +63,8 @@ export async function GET(_request: Request, context: RouteContext) {
         id: utterance.id,
         speaker: normalizeConversationSpeaker(utterance.speaker),
         text: utterance.text,
+        start_ms: utterance.startMs,
+        end_ms: utterance.endMs,
         created_at: utterance.createdAt.toISOString(),
       })),
     });

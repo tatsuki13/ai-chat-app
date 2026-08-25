@@ -322,18 +322,23 @@ export default function RemoteMicClient(props: {
         event.transcript ?? partialTextByTranscriptRef.current.get(transcriptId) ?? "";
       partialTextByTranscriptRef.current.delete(transcriptId);
       const startedAt = speechStartedAtByTranscriptRef.current.get(transcriptId);
+      const firstDeltaAt = firstDeltaAtByTranscriptRef.current.get(transcriptId);
       speechStartedAtByTranscriptRef.current.delete(transcriptId);
       firstDeltaAtByTranscriptRef.current.delete(transcriptId);
+      const transcriptStartedAt = startedAt ?? firstDeltaAt;
       console.info("[remote-mic final transcript latency]", {
         sessionId: session.sessionId,
         role: session.role,
         transcriptId,
-        latencyMs: startedAt ? Date.now() - startedAt : null,
+        latencyMs: transcriptStartedAt ? Date.now() - transcriptStartedAt : null,
       });
       void postFinalTranscript(session, {
         transcriptId,
         text,
         eventId: event.event_id,
+        startedAt: transcriptStartedAt
+          ? new Date(transcriptStartedAt).toISOString()
+          : undefined,
       });
       return;
     }
@@ -679,6 +684,7 @@ async function postFinalTranscript(
     transcriptId: string;
     text: string;
     eventId?: string;
+    startedAt?: string;
   },
 ) {
   if (!input.text.trim()) return;
@@ -693,6 +699,7 @@ async function postFinalTranscript(
       text: input.text,
       status: "final",
       eventId: input.eventId,
+      startedAt: input.startedAt,
       endedAt: new Date().toISOString(),
     }),
   });
