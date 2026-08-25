@@ -192,7 +192,6 @@ const DECISION_RATIO = 0.6;
 const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const TIMER_TICK_MS = 1000;
 const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
-const REMOTE_MIC_STATUS_POLL_MS = 10_000;
 const REMOTE_MIC_SESSION_SYNC_MS = 3_000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
@@ -589,31 +588,10 @@ function SessionPageClient() {
       }
     }
 
-    async function refreshStatus() {
-      try {
-        const status = await fetchFixedRemoteMicActive(sessionId);
-        if (!ignore) {
-          setRemoteMicStatuses(status.roles);
-          applyDialogueStartedAt(status.dialogueStartedAt);
-        }
-      } catch {
-        if (!ignore) {
-          setRemoteMicStatuses({
-            caregiver: { status: "disconnected" },
-            elder: { status: "disconnected" },
-          });
-        }
-      }
-    }
-
     void activate();
-    const timerId = window.setInterval(() => {
-      void refreshStatus();
-    }, REMOTE_MIC_STATUS_POLL_MS);
 
     return () => {
       ignore = true;
-      window.clearInterval(timerId);
     };
   }, [session?.id, session?.ended_at]);
 
@@ -2338,33 +2316,6 @@ async function activateFixedRemoteMics(sessionId: string) {
 
   if (!response.ok) {
     throw new Error(`Fixed remote microphone activation failed: ${response.status}`);
-  }
-
-  const data = (await response.json()) as FixedRemoteMicActiveResponse;
-  const now = Date.now();
-
-  if (!data.active) {
-    return emptyFixedRemoteMicStatus();
-  }
-
-  return {
-    dialogueStartedAt: data.active.dialogueStartedAt,
-    roles: {
-      elder: toFixedRemoteMicStatus(data.active.roles.elder, now),
-      caregiver: toFixedRemoteMicStatus(data.active.roles.caregiver, now),
-    },
-  };
-}
-
-async function fetchFixedRemoteMicActive(sessionId: string) {
-  const params = new URLSearchParams({ sessionId });
-  const response = await fetch(
-    `/api/remote-mic/fixed/active?${params.toString()}`,
-    { cache: "no-store" },
-  );
-
-  if (!response.ok) {
-    throw new Error(`Fixed remote microphone status failed: ${response.status}`);
   }
 
   const data = (await response.json()) as FixedRemoteMicActiveResponse;

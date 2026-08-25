@@ -55,8 +55,6 @@ type WindowWithSpeechRecognition = Window & {
   webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
 };
 
-const HEARTBEAT_MS = 30_000;
-const ACTIVE_SESSION_REFRESH_MS = 10_000;
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const CLIENT_VERSION = "remote-mic-client-2026-08-24-realtime";
 const TRANSCRIPTION_PROVIDER: RemoteMicTranscriptionProvider =
@@ -136,55 +134,6 @@ export default function RemoteMicClient(props: {
       void stop(false);
     };
   }, [props.initialRole]);
-
-  useEffect(() => {
-    if (!fixedRole || micState === "streaming") return;
-
-    const timerId = window.setInterval(() => {
-      void loadActiveSession(fixedRole, { quiet: true });
-    }, ACTIVE_SESSION_REFRESH_MS);
-
-    return () => window.clearInterval(timerId);
-  }, [fixedRole, micState]);
-
-  useEffect(() => {
-    if (!remoteMic || micState !== "streaming") return;
-
-    const timerId = window.setInterval(() => {
-      if (!fixedRole) return;
-
-      void fetchCurrentSession(fixedRole)
-        .then((data) => {
-          if (
-            !data.active ||
-            data.active.sessionId !== remoteMic.sessionId ||
-            data.active.participantCode !== remoteMic.participantCode ||
-            data.active.endedAt
-          ) {
-            void stop(false);
-            setRemoteMic(null);
-            setServerLabel("PC待機中");
-            return;
-          }
-
-          setRemoteMic((current) =>
-            current
-              ? {
-                  ...current,
-                  dialogueStartedAt: data.active?.dialogueStartedAt ?? null,
-                }
-              : current,
-          );
-        })
-        .catch(() => {
-          setServerLabel("通信が不安定です");
-        });
-    }, HEARTBEAT_MS);
-
-    return () => {
-      window.clearInterval(timerId);
-    };
-  }, [fixedRole, remoteMic, micState]);
 
   async function loadActiveSession(
     role: RemoteMicRole | null,
