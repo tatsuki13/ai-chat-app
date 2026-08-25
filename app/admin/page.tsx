@@ -25,6 +25,10 @@ type AdminDetail = {
     id: string;
     speaker: string;
     text: string;
+    start_ms?: number | null;
+    end_ms?: number | null;
+    source?: string | null;
+    analysis_version?: string | null;
     created_at: string;
   }>;
   slot_states: Array<{

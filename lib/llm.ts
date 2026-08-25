@@ -480,6 +480,8 @@ function buildSlotClassificationPayload(
         id: utterance.id,
         speaker: isCaregiverSpeaker(utterance.speaker) ? "caregiver" : "elder",
         text: utterance.text,
+        start_ms: utterance.start_ms ?? null,
+        end_ms: utterance.end_ms ?? null,
         created_at: utterance.created_at ?? utterance.createdAt ?? null,
       })),
     maxClassificationsPerUtterance: 8,
@@ -1855,6 +1857,8 @@ function buildConversationPayload(context: ConversationContext) {
           id: utterance.id,
           speaker: utterance.speaker,
           text: utterance.text,
+          start_ms: utterance.start_ms ?? null,
+          end_ms: utterance.end_ms ?? null,
           created_at: utterance.created_at ?? utterance.createdAt ?? null,
         })),
     })),
@@ -2220,6 +2224,8 @@ function toQuestionUtterancePayload(utterance: ConversationUtterance) {
     id: utterance.id,
     speaker: utterance.speaker,
     text: utterance.text,
+    start_ms: utterance.start_ms ?? null,
+    end_ms: utterance.end_ms ?? null,
     created_at: utterance.created_at ?? utterance.createdAt ?? null,
   };
 }

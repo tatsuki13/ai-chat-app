@@ -40,6 +40,8 @@ export async function GET(_request: Request, context: RouteContext) {
           text: true,
           startMs: true,
           endMs: true,
+          source: true,
+          analysisVersion: true,
           createdAt: true,
         },
       }),
@@ -65,6 +67,8 @@ export async function GET(_request: Request, context: RouteContext) {
         text: utterance.text,
         start_ms: utterance.startMs,
         end_ms: utterance.endMs,
+        source: utterance.source,
+        analysis_version: utterance.analysisVersion,
         created_at: utterance.createdAt.toISOString(),
       })),
     });
@@ -127,10 +131,10 @@ export async function PATCH(request: Request, context: RouteContext) {
       session: {
         id: session.id,
         participant_code: session.participantCode,
-      condition: session.condition,
-      started_at: session.startedAt.toISOString(),
-      dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
-      ended_at: session.endedAt?.toISOString() ?? null,
+        condition: session.condition,
+        started_at: session.startedAt.toISOString(),
+        dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
+        ended_at: session.endedAt?.toISOString() ?? null,
       },
     });
   } catch (error) {

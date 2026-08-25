@@ -78,6 +78,10 @@ type Utterance = {
   text: string;
   start_ms?: number | null;
   end_ms?: number | null;
+  source?: string | null;
+  analysis_version?: string | null;
+  captured_started_at?: string;
+  captured_ended_at?: string;
   created_at: string;
   persisted?: boolean;
 };
@@ -931,6 +935,7 @@ function SessionPageClient() {
         data.speaker ?? normalizeSpeaker(chunk.speaker),
         transcript,
         chunk.startedAt,
+        chunk.endedAt,
       );
       setUtterances((current) =>
         syncUtterancesRef(limitUtteranceState(
@@ -975,6 +980,11 @@ function SessionPageClient() {
           currentSession.id,
           normalizeSpeaker(String(localUtterance.speaker)),
           localUtterance.text,
+          {
+            startedAt: localUtterance.captured_started_at ?? localUtterance.created_at,
+            endedAt: localUtterance.captured_ended_at ?? localUtterance.created_at,
+            source: "local_voice",
+          },
         );
 
         setUtterances((current) => {
@@ -3322,11 +3332,19 @@ async function addUtterance(
   sessionId: string,
   speaker: Speaker,
   text: string,
+  timing?: {
+    startedAt?: string;
+    endedAt?: string;
+    source?: "manual" | "local_voice";
+  },
 ): Promise<Utterance> {
   const data = await postJson<{ utterance: Utterance }>("/api/utterance", {
     session_id: sessionId,
     speaker,
     text,
+    startedAt: timing?.startedAt,
+    endedAt: timing?.endedAt,
+    source: timing?.source ?? "manual",
   });
 
   return data.utterance;
@@ -3672,13 +3690,17 @@ function createLocalVoiceUtterance(
   speaker: Speaker,
   text: string,
   capturedAt?: number,
+  capturedEndedAt?: number,
 ): Utterance {
   const createdAt = new Date(capturedAt ?? Date.now()).toISOString();
+  const endedAt = new Date(capturedEndedAt ?? capturedAt ?? Date.now()).toISOString();
 
   return {
     id: `local-${createdAt}-${crypto.randomUUID()}`,
     speaker,
     text,
+    captured_started_at: createdAt,
+    captured_ended_at: endedAt,
     created_at: createdAt,
     persisted: false,
   };

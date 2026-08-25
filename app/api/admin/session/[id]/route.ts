@@ -64,6 +64,10 @@ export async function GET(_request: Request, context: RouteContext) {
       id: utterance.id,
       speaker: normalizeConversationSpeaker(utterance.speaker),
       text: utterance.text,
+      start_ms: utterance.startMs,
+      end_ms: utterance.endMs,
+      source: utterance.source,
+      analysis_version: utterance.analysisVersion,
       created_at: utterance.createdAt.toISOString(),
     }));
     const searchParams = new URL(_request.url).searchParams;
@@ -117,6 +121,10 @@ export async function GET(_request: Request, context: RouteContext) {
         participant_code: session.participantCode,
         speaker: utterance.speaker,
         text: utterance.text,
+        start_ms: utterance.start_ms,
+        end_ms: utterance.end_ms,
+        source: utterance.source,
+        analysis_version: utterance.analysis_version,
         created_at: utterance.created_at,
       })),
       slot_states: slotStates,

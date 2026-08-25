@@ -7,24 +7,33 @@ datasource db {
 }
 
 model Session {
-  id                 String               @id @default(cuid())
-  participantCode    String?              @map("participant_code")
-  condition          String?
-  startedAt          DateTime             @default(now()) @map("started_at")
-  dialogueStartedAt  DateTime?            @map("dialogue_started_at")
-  endedAt            DateTime?            @map("ended_at")
-  finalMinutes       FinalMinute[]
-  aiInterventionLogs AIInterventionLog[]
-  aiActionEvents     AIActionEvent[]
-  subSlotStates      SlotSubState[]
-  slotStates         SlotState[]
-  utterances         SessionUtterance[]
-  remoteMicTokens    RemoteMicJoinToken[]
-  webRtcSignals      WebRtcSignal[]
+  id                     String               @id @default(cuid())
+  participantCode        String?              @unique @map("participant_code")
+  condition              String?
+  startedAt              DateTime             @default(now()) @map("started_at")
+  dialogueStartedAt      DateTime?            @map("dialogue_started_at")
+  endedAt                DateTime?            @map("ended_at")
+  sessionAccessTokenHash String?              @unique @map("session_access_token_hash")
+  currentTopicId         String?              @map("current_topic_id")
+  currentTopicIndex      Int?                 @map("current_topic_index")
+  topicStartedAt         DateTime?            @map("topic_started_at")
+  conversationPhase      String?              @map("conversation_phase")
+  topicPausedMs          Int                  @default(0) @map("topic_paused_ms")
+  protocolVersion        String?              @map("protocol_version")
+  appVersion             String?              @map("app_version")
+  aiPolicyVersion        String?              @map("ai_policy_version")
+  finalMinutes           FinalMinute[]
+  aiInterventionLogs     AIInterventionLog[]
+  aiActionEvents         AIActionEvent[]
+  subSlotStates          SlotSubState[]
+  slotStates             SlotState[]
+  utterances             SessionUtterance[]
+  remoteMicTokens        RemoteMicJoinToken[]
+  webRtcSignals          WebRtcSignal[]
 
   @@index([startedAt])
   @@index([dialogueStartedAt])
-  @@index([participantCode])
+  @@index([currentTopicId])
   @@map("sessions")
 }
 

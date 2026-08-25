@@ -38,6 +38,10 @@ export async function PATCH(request: Request, context: RouteContext) {
         session_id: utterance.sessionId,
         speaker: utterance.speaker,
         text: utterance.text,
+        start_ms: utterance.startMs,
+        end_ms: utterance.endMs,
+        source: utterance.source,
+        analysis_version: utterance.analysisVersion,
         created_at: utterance.createdAt.toISOString(),
       },
     });

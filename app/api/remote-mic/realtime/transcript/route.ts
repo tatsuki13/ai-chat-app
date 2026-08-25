@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
 import { getActiveFixedRemoteMicSession } from "../../../../../lib/remote-mic/fixed-session";
 import { prisma } from "../../../../../lib/prisma";
+import {
+  createUtteranceTiming,
+  pickUtteranceTimingBase,
+} from "../../../../../lib/server/utterance-timing";
+import { UTTERANCE_ANALYSIS_VERSION } from "../../../../../lib/server/utterance-metadata";
 
 export const runtime = "nodejs";
 
@@ -42,8 +47,21 @@ export async function POST(request: Request) {
   if (!active || active.sessionId !== sessionId || active.endedAt) {
     return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
   }
-  const timing = toUtteranceTiming({
-    baseAt: active.dialogueStartedAt,
+
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: {
+      startedAt: true,
+      dialogueStartedAt: true,
+    },
+  });
+
+  if (!session) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+
+  const timing = createUtteranceTiming({
+    baseAt: pickUtteranceTimingBase(session),
     startedAt: requiredString(body?.startedAt),
     endedAt: requiredString(body?.endedAt),
   });
@@ -115,6 +133,8 @@ export async function POST(request: Request) {
       text: utterance.text,
       start_ms: utterance.startMs,
       end_ms: utterance.endMs,
+      source: utterance.source,
+      analysis_version: utterance.analysisVersion,
       created_at: utterance.createdAt.toISOString(),
     },
   });
@@ -126,40 +146,6 @@ function requiredString(value: unknown) {
 
 function parseTranscriptStatus(value: string) {
   return value === "partial" || value === "final" ? value : null;
-}
-
-function toUtteranceTiming(input: {
-  baseAt: string | null;
-  startedAt: string;
-  endedAt: string;
-}): UtteranceTiming {
-  const baseMs = parseTimestampMs(input.baseAt);
-  const startedAtMs = parseTimestampMs(input.startedAt);
-  const endedAtMs = parseTimestampMs(input.endedAt);
-
-  if (baseMs === null) {
-    return {
-      startMs: null,
-      endMs: null,
-    };
-  }
-
-  const startMs =
-    startedAtMs === null ? null : Math.max(0, Math.round(startedAtMs - baseMs));
-  const endMs =
-    endedAtMs === null ? null : Math.max(startMs ?? 0, Math.round(endedAtMs - baseMs));
-
-  return {
-    startMs,
-    endMs,
-  };
-}
-
-function parseTimestampMs(value: string | null) {
-  if (!value) return null;
-
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 async function appendOrCreateRemoteUtterance(input: {
@@ -202,6 +188,7 @@ async function appendOrCreateRemoteUtterance(input: {
         source: nextSource,
         startMs: latestUtterance.startMs ?? input.timing.startMs,
         endMs: input.timing.endMs ?? latestUtterance.endMs,
+        analysisVersion: UTTERANCE_ANALYSIS_VERSION,
       },
     });
   }
@@ -215,13 +202,14 @@ async function appendOrCreateRemoteUtterance(input: {
       source: input.source,
       startMs: input.timing.startMs,
       endMs: input.timing.endMs,
+      analysisVersion: UTTERANCE_ANALYSIS_VERSION,
     },
   });
 }
 
 type UtteranceTiming = {
-  startMs: number | null;
-  endMs: number | null;
+  startMs: number;
+  endMs: number;
 };
 
 function canMergeWithLatestRemoteUtterance(
