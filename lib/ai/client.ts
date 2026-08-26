@@ -22,6 +22,14 @@ export function getMinutesOpenAIModel() {
   return process.env.OPENAI_MINUTES_MODEL || "gpt-5.6-terra";
 }
 
+export function getTTSOpenAIModel() {
+  return process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
+}
+
+export function getTTSOpenAIVoice() {
+  return process.env.OPENAI_TTS_VOICE || "coral";
+}
+
 export function getDefaultOpenAIModel() {
   return getDialogueOpenAIModel();
 }

@@ -11,6 +11,7 @@ export type AIInterventionLogType =
 
 export async function logAIIntervention(input: {
   sessionId: string;
+  participantCode?: string | null;
   type: AIInterventionLogType;
   content: string | null | undefined;
   topicId?: string | null;
@@ -23,6 +24,7 @@ export async function logAIIntervention(input: {
     await prisma.aIInterventionLog.create({
       data: {
         sessionId: input.sessionId,
+        participantCode: input.participantCode ?? undefined,
         type: input.type,
         content: input.content ?? "",
         topicId: input.topicId ?? undefined,

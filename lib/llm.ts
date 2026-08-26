@@ -59,13 +59,13 @@ import {
   type EndCheckResult,
   type FinalMinutesResult,
   type NextQuestionResult,
+  type QuestionPurpose,
   type Sensitivity,
   type SlotReasonCode,
   type SlotControlDebugState,
   type StoredSubSlotState,
   type SubSlotCompletionRule,
   type SubSlotControlOverride,
-  type TopicSwitchResult,
   type ThemeMinutesItem,
   type UnansweredReason,
 } from "./acp-mvp";
@@ -74,6 +74,8 @@ type ConversationContext = {
   utterances: ConversationUtterance[];
   slotStates: AcpSlotState[];
   subSlotStates?: StoredSubSlotState[];
+  aiQuestionHistory?: QuestionHistoryItem[];
+  currentTopicQuestionCount?: number;
   sessionId?: string;
   participantCode?: string | null;
   currentTopic?: string;
@@ -85,6 +87,8 @@ type ConversationContext = {
 const NEXT_QUESTION_RECENT_UTTERANCE_COUNT = 16;
 const NEXT_QUESTION_UNASSIGNED_UTTERANCE_COUNT = 16;
 const NEXT_QUESTION_ALREADY_ASKED_COUNT = 12;
+const DEFAULT_TOPIC_AI_QUESTION_LIMIT = 2;
+const INSUFFICIENT_TOPIC_AI_QUESTION_LIMIT = 3;
 
 type ExplicitNoneResponse = {
   slotName: AcpSlotName;
@@ -151,7 +155,12 @@ const SYSTEM_NEXT_QUESTION = [
   "Use next_question_input.slotBackedMemory as the stable record of what has already been captured in slots.",
   "Use next_question_input.unassignedRecentUtterances as possible conversational cues, but do not treat them as confirmed slot content unless the utterance itself clearly supports the question.",
   "When slotBackedMemory and recentUtterances conflict, prefer slotBackedMemory for coverage decisions and recentUtterances for natural wording.",
-  '{"question":"... | null","transition_phrase":"...","target_slot":"...","targetMainSlotId":"...","targetSubSlotId":"...","reason":"...","sensitivity":"low | medium | high","no_relevant_followup":false}',
+  "Use next_question_input.aiQuestionHistory and currentTopicQuestionCount to avoid repeated AI questions in the same topic.",
+  "Use minutesReadiness and followUpNeed to avoid mechanical slot filling. required means needed for a grounded minutes record, helpful means useful only if it naturally follows, none must not be asked.",
+  "Prefer a staged flow: current_thought first, then background_reason, then conditions_specificity. Do not force every stage when the elder has declined, has not considered it, or cannot verbalize it.",
+  "If askableSubSlots is empty, return question null and no_relevant_followup true. Do not suggest a topic transition from question generation.",
+  "Generate exactly one short, natural Japanese question for next_question_input.selectedQuestionTarget. Do not ask about any other sub-slot or purpose.",
+  '{"question":"... | null","transition_phrase":"...","target_slot":"...","targetMainSlotId":"...","targetSubSlotId":"...","questionPurpose":"elicit_preference | ask_reason | ask_example | ask_condition | clarify | resolve_conflict","reasonForSelection":"...","reason":"...","sensitivity":"low | medium | high","no_relevant_followup":false}',
 ].join("\n");
 
 const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
@@ -298,6 +307,32 @@ type SlotClassificationResult = {
   classifications?: SlotClassification[];
   unmatchedUtteranceIds?: string[];
   __requestMeta?: JsonRequestMeta;
+};
+
+type QuestionHistoryItem = {
+  content: string;
+  topicId?: string | null;
+  generatedAt?: string | null;
+  targetMainSlotId?: string | null;
+  targetSubSlotId?: string | null;
+  questionPurpose?: string | null;
+};
+
+type QuestionCandidate = {
+  mainSlotId: string;
+  subSlotId: string;
+  label: string;
+  description: string;
+  completion: SlotCompletion;
+  responseState: SlotClassificationResponseState;
+  minutesReadiness: "insufficient" | "basic" | "rich";
+  followUpNeed: "required" | "helpful" | "none";
+  questionStage: "current_thought" | "background_reason" | "conditions_specificity";
+  questionPurpose: QuestionPurpose;
+  reasonForSelection: string;
+  priority: string;
+  priorityScore: number;
+  relevanceScore: number;
 };
 
 type JsonRequestMeta = {
@@ -978,29 +1013,34 @@ function logRejectedSlotCandidate(
 export async function generateNextQuestion(
   context: ConversationContext,
 ): Promise<NextQuestionResult> {
+  const selectedCandidate = selectNextQuestionCandidate(context);
+  const currentTopic = resolveTopic(context.currentTopic);
+
+  if (!selectedCandidate) {
+    return noRelevantFollowUpResult(
+      currentTopic.slot_name as AcpSlotName,
+      "現在の話題について、議事録作成に必要な内容はおおむね確認できています。",
+    );
+  }
+
   const fallback = fallbackNextQuestion(
     context.utterances,
     context.slotStates,
     context.currentTopic,
     context.subSlotStates,
+    selectedCandidate,
   );
   const result = await requestJson<Partial<NextQuestionResult>>(
     SYSTEM_NEXT_QUESTION,
-    await buildQuestionPayload(context),
+    await buildQuestionPayload(context, selectedCandidate),
     fallback,
   );
 
-  const output = normalizeNextQuestionResult(result, fallback, context);
+  const output = normalizeNextQuestionResult(result, fallback, context, selectedCandidate);
 
   return isLegacyDialogueMode()
     ? output
     : applyUncertaintyNextQuestionPolicy(context, output);
-}
-
-export async function generateTopicSwitch(
-  context: ConversationContext,
-): Promise<TopicSwitchResult> {
-  return fallbackTopicSwitch(context);
 }
 
 export async function checkConversationEnd(
@@ -1645,20 +1685,10 @@ function normalizeNextQuestionResult(
   result: Partial<NextQuestionResult>,
   fallback: NextQuestionResult,
   context: ConversationContext,
+  selectedCandidate: QuestionCandidate,
 ): NextQuestionResult {
   const currentTopic = resolveTopic(context.currentTopic);
   const currentSlot = findSlotState(context.slotStates, currentTopic.slot_name);
-  const followUpCount = countPromptsForSlot(
-    context.utterances,
-    currentTopic.slot_name as AcpSlotName,
-  );
-
-  if (followUpCount >= currentTopic.maxFollowUpQuestions) {
-    return noRelevantFollowUpResult(
-      currentTopic.slot_name as AcpSlotName,
-      "この話題の追加質問上限に達したため、追加質問を停止しました。",
-    );
-  }
 
   const shouldPreferFallbackDepthQuestion =
     isTerminalSlotStatus(currentSlot?.status) &&
@@ -1666,38 +1696,15 @@ function normalizeNextQuestionResult(
   const nextResult = shouldPreferFallbackDepthQuestion ? fallback : result;
 
   const targetSlot = normalizeAcpTargetSlot(nextResult.target_slot, fallback.target_slot);
-  const targetMainSlotId =
-    typeof nextResult.targetMainSlotId === "string" ? nextResult.targetMainSlotId : "";
-  const targetSubSlotId =
-    typeof nextResult.targetSubSlotId === "string" ? nextResult.targetSubSlotId : "";
-  const askableSubSlots = buildRelevantAskableSubSlotsForQuestionPayload(
-    buildSlotControlDebugState({
-      slots: filterAcpSlotStates(context.slotStates),
-      currentTopic: currentTopic.slot_name,
-      subSlotStates: context.subSlotStates,
-    }),
-    context.subSlotStates ?? [],
-    context.utterances,
-  );
-
-  if (askableSubSlots.length === 0) {
-    return noRelevantFollowUpResult(
-      currentTopic.slot_name as AcpSlotName,
-      "直近発話と自然につながる追加質問候補が現在テーマ内にないため、質問生成を停止しました。",
-    );
-  }
-
+  const targetMainSlotId = selectedCandidate.mainSlotId;
+  const targetSubSlotId = selectedCandidate.subSlotId;
   const hasValidTargetSubSlot =
-    !targetMainSlotId && !targetSubSlotId
-      ? false
-      : askableSubSlots.some(
-          (slot) =>
-            slot.mainSlotId === targetMainSlotId &&
-            slot.subSlotId === targetSubSlotId,
-        );
+    nextResult.targetMainSlotId === targetMainSlotId &&
+    nextResult.targetSubSlotId === targetSubSlotId;
   const question = nonEmptyNullable(nextResult.question, fallback.question);
   const shouldUseFallbackQuestion =
     (question ? isRepeatedQuestion(context.utterances, question, targetSlot) : false) ||
+    (question ? isRepeatedAIQuestion(context.aiQuestionHistory ?? [], question) : false) ||
     !isQuestionRelevantToCurrentTopic(context, targetSlot) ||
     !hasValidTargetSubSlot;
 
@@ -1707,8 +1714,10 @@ function normalizeNextQuestionResult(
       ? nonEmpty(nextResult.transition_phrase, fallback.transition_phrase)
       : "",
     target_slot: shouldUseFallbackQuestion ? fallback.target_slot : targetSlot,
-    targetMainSlotId: shouldUseFallbackQuestion ? undefined : targetMainSlotId || undefined,
-    targetSubSlotId: shouldUseFallbackQuestion ? undefined : targetSubSlotId || undefined,
+    targetMainSlotId,
+    targetSubSlotId,
+    questionPurpose: selectedCandidate.questionPurpose,
+    reasonForSelection: selectedCandidate.reasonForSelection,
     reason: nonEmpty(nextResult.reason, fallback.reason),
     sensitivity: normalizeSensitivity(nextResult.sensitivity, fallback.sensitivity),
     no_relevant_followup:
@@ -1906,7 +1915,10 @@ function buildConversationPayload(context: ConversationContext) {
   };
 }
 
-async function buildQuestionPayload(context: ConversationContext) {
+async function buildQuestionPayload(
+  context: ConversationContext,
+  selectedCandidate: QuestionCandidate,
+) {
   const payload = buildConversationPayload(context);
   const currentTopic = resolveTopic(context.currentTopic);
   const scopedSlots = filterAcpSlotStates(context.slotStates);
@@ -1925,11 +1937,7 @@ async function buildQuestionPayload(context: ConversationContext) {
     slotControl,
     fallbackQuestionScope,
   );
-  const askableSubSlots = buildRelevantAskableSubSlotsForQuestionPayload(
-    slotControl,
-    context.subSlotStates ?? [],
-    context.utterances,
-  );
+  const askableSubSlots = [selectedCandidate];
   const slotBackedMemory = buildSlotBackedQuestionMemory(
     currentTopic.id,
     context.subSlotStates ?? [],
@@ -1965,6 +1973,14 @@ async function buildQuestionPayload(context: ConversationContext) {
         title: currentTopic.title,
       },
       askableSubSlots,
+      selectedQuestionTarget: {
+        targetMainSlotId: selectedCandidate.mainSlotId,
+        targetSubSlotId: selectedCandidate.subSlotId,
+        questionPurpose: selectedCandidate.questionPurpose,
+        reasonForSelection: selectedCandidate.reasonForSelection,
+        minutesReadiness: selectedCandidate.minutesReadiness,
+        followUpNeed: selectedCandidate.followUpNeed,
+      },
       slotBackedMemory,
       unassignedRecentUtterances,
       recentUtterances: recentUtterances(
@@ -1975,10 +1991,16 @@ async function buildQuestionPayload(context: ConversationContext) {
         .filter((utterance) => !isElderSpeaker(utterance.speaker))
         .map((utterance) => utterance.text)
         .slice(-NEXT_QUESTION_ALREADY_ASKED_COUNT),
+      aiQuestionHistory: (context.aiQuestionHistory ?? [])
+        .slice(-NEXT_QUESTION_ALREADY_ASKED_COUNT),
+      currentTopicQuestionCount:
+        context.currentTopicQuestionCount ??
+        countPromptsForSlot(context.utterances, currentTopic.slot_name as AcpSlotName),
       remainingQuestionCount: Math.max(
         0,
         currentTopic.maxFollowUpQuestions -
-          countPromptsForSlot(context.utterances, currentTopic.slot_name as AcpSlotName),
+          (context.currentTopicQuestionCount ??
+            countPromptsForSlot(context.utterances, currentTopic.slot_name as AcpSlotName)),
       ),
     },
     control_debug: {
@@ -2017,6 +2039,9 @@ function buildAskableSubSlotsForQuestionPayload(
         description: definition?.description ?? slot.label,
         completion: stored?.completion ?? "none",
         responseState: stored?.responseState ?? "no_response",
+        minutesReadiness: slot.minutesReadiness,
+        followUpNeed: slot.followUpNeed,
+        questionStage: slot.questionStage,
       };
     });
 }
@@ -2025,7 +2050,7 @@ function buildRelevantAskableSubSlotsForQuestionPayload(
   debugState: SlotControlDebugState,
   subSlotStates: StoredSubSlotState[],
   utterances: ConversationUtterance[],
-) {
+) : QuestionCandidate[] {
   const candidates = buildAskableSubSlotsForQuestionPayload(debugState, subSlotStates);
   const currentMainSlot = debugState.mainSlots.find((slot) => slot.isCurrentTopic);
   if (!currentMainSlot) return [];
@@ -2046,6 +2071,10 @@ function buildRelevantAskableSubSlotsForQuestionPayload(
       const baseCandidate = candidates.find((candidate) => candidate.subSlotId === slot.id);
       const stored = statesBySubSlotId.get(slot.id);
       if (!baseCandidate && !canAskOptionalSubSlot(slot.priority, stored)) return null;
+      if (slot.followUpNeed === "none" || slot.canAskAgain === false) return null;
+      if (stored?.isDeferred && slot.followUpNeed !== "required") return null;
+
+      const questionPurpose = getQuestionPurposeForSubSlot(slot, stored);
 
       const score = scoreSubSlotRelevance({
         id: slot.id,
@@ -2054,7 +2083,7 @@ function buildRelevantAskableSubSlotsForQuestionPayload(
         recentText,
       });
       const threshold = latestIsUncertain ? 3 : 2;
-      if (score < threshold) return null;
+      if (score < threshold && slot.followUpNeed !== "required") return null;
 
       return {
         ...(baseCandidate ?? {
@@ -2066,22 +2095,185 @@ function buildRelevantAskableSubSlotsForQuestionPayload(
             slot.label,
           completion: stored?.completion ?? "none",
           responseState: stored?.responseState ?? "no_response",
+          minutesReadiness: slot.minutesReadiness,
+          followUpNeed: slot.followUpNeed,
+          questionStage: slot.questionStage,
         }),
         priority: slot.priority,
         relevanceScore: score,
-        relevanceReason: `直近発話と「${slot.label}」の関連性から候補にしました。`,
+        questionPurpose,
+        reasonForSelection: buildQuestionCandidateReason(slot, questionPurpose),
+        priorityScore: scoreQuestionCandidatePriority({
+          priority: slot.priority,
+          completion: stored?.completion ?? "none",
+          responseState: stored?.responseState ?? "no_response",
+          minutesReadiness: slot.minutesReadiness,
+          questionStage: slot.questionStage,
+        }),
       };
     })
     .filter((item): item is NonNullable<typeof item> => Boolean(item))
     .sort((left, right) => {
-      if (right.relevanceScore !== left.relevanceScore) {
-        return right.relevanceScore - left.relevanceScore;
+      const leftScore = left.priorityScore + left.relevanceScore;
+      const rightScore = right.priorityScore + right.relevanceScore;
+
+      if (rightScore !== leftScore) {
+        return rightScore - leftScore;
       }
 
       return priorityRank(left.priority) - priorityRank(right.priority);
     });
 
-  return scored.slice(0, 3);
+  const required = scored.filter((item) => item.followUpNeed === "required");
+  const helpful = scored.filter((item) => item.followUpNeed === "helpful");
+
+  return [...required, ...helpful];
+}
+
+function selectNextQuestionCandidate(context: ConversationContext) {
+  const currentTopic = resolveTopic(context.currentTopic);
+  const slotControl = buildSlotControlDebugState({
+    slots: filterAcpSlotStates(context.slotStates),
+    currentTopic: currentTopic.slot_name,
+    subSlotStates: context.subSlotStates,
+  });
+  const candidates = buildRelevantAskableSubSlotsForQuestionPayload(
+    slotControl,
+    context.subSlotStates ?? [],
+    context.utterances,
+  );
+  const history = filterQuestionHistoryForTopic(
+    context.aiQuestionHistory ?? [],
+    currentTopic.id,
+    currentTopic.slot_name,
+  );
+  const hasInsufficientCoreThought = candidates.some(
+    (candidate) =>
+      candidate.followUpNeed === "required" &&
+      candidate.questionStage === "current_thought",
+  );
+  const limit = hasInsufficientCoreThought
+    ? INSUFFICIENT_TOPIC_AI_QUESTION_LIMIT
+    : DEFAULT_TOPIC_AI_QUESTION_LIMIT;
+
+  if ((context.currentTopicQuestionCount ?? history.length) >= limit) return null;
+
+  return candidates
+    .map((candidate) => ({
+      candidate,
+      score:
+        candidate.priorityScore +
+        candidate.relevanceScore -
+        scoreQuestionHistoryPenalty(candidate, history),
+    }))
+    .filter(({ score }) => score > 0)
+    .sort((left, right) => right.score - left.score)[0]?.candidate ?? null;
+}
+
+function filterQuestionHistoryForTopic(
+  history: QuestionHistoryItem[],
+  topicId: string,
+  slotName: string,
+) {
+  return history.filter(
+    (item) => item.topicId === topicId || item.targetMainSlotId === topicId || item.topicId === slotName,
+  );
+}
+
+function scoreQuestionHistoryPenalty(
+  candidate: QuestionCandidate,
+  history: QuestionHistoryItem[],
+) {
+  const samePurposeCount = history.filter(
+    (item) =>
+      item.targetSubSlotId === candidate.subSlotId &&
+      item.questionPurpose === candidate.questionPurpose,
+  ).length;
+  if (samePurposeCount === 0) return 0;
+
+  if (
+    (candidate.questionPurpose === "clarify" ||
+      candidate.questionPurpose === "resolve_conflict") &&
+    samePurposeCount <= 1
+  ) {
+    return 60;
+  }
+
+  return 100;
+}
+
+function scoreQuestionCandidatePriority(input: {
+  priority: string;
+  completion: SlotCompletion;
+  responseState: SlotClassificationResponseState;
+  minutesReadiness: QuestionCandidate["minutesReadiness"];
+  questionStage: QuestionCandidate["questionStage"];
+}) {
+  if (
+    input.responseState === "explicit_none" ||
+    input.responseState === "declined" ||
+    input.responseState === "not_considered" ||
+    input.responseState === "unable_to_verbalize"
+  ) {
+    return -999;
+  }
+
+  let score = 0;
+  if (input.minutesReadiness === "insufficient" && input.questionStage === "current_thought") {
+    score += 100;
+  }
+  if (input.questionStage === "background_reason") score += 60;
+  if (input.questionStage === "conditions_specificity") score += 40;
+  if (input.responseState === "ambiguous") score += 50;
+  if (input.responseState === "conflicting") score += 50;
+  if (input.priority === "core") score += 30;
+  if (input.completion === "partial") score += 20;
+
+  return score;
+}
+
+function getQuestionPurposeForSubSlot(
+  slot: {
+    id: string;
+    label: string;
+    questionStage: QuestionCandidate["questionStage"];
+    responseState?: SlotClassificationResponseState;
+  },
+  stored: StoredSubSlotState | undefined,
+): QuestionPurpose {
+  const responseState = stored?.responseState ?? slot.responseState;
+
+  if (responseState === "conflicting") return "resolve_conflict";
+  if (responseState === "ambiguous") return "clarify";
+  if (slot.questionStage === "background_reason") return "ask_reason";
+  if (/condition|timing|acceptable_change|involvement/.test(slot.id)) {
+    return "ask_condition";
+  }
+  if (slot.questionStage === "conditions_specificity") return "ask_example";
+
+  return "elicit_preference";
+}
+
+function buildQuestionCandidateReason(
+  slot: { label: string; followUpNeed: string; questionStage: string },
+  purpose: QuestionPurpose,
+) {
+  if (slot.followUpNeed === "required") {
+    return `本人の考えを議事録に記載するため、「${slot.label}」を確認します。`;
+  }
+
+  if (purpose === "ask_reason") {
+    return `本人の考えの背景や理由を補うため、「${slot.label}」を確認します。`;
+  }
+
+  if (purpose === "ask_condition" || purpose === "ask_example") {
+    return `希望が変わる条件や具体例を補うため、「${slot.label}」を確認します。`;
+  }
+
+  if (purpose === "clarify") return `曖昧な発言を確認するため、「${slot.label}」を確認します。`;
+  if (purpose === "resolve_conflict") return `発言間の違いを確認するため、「${slot.label}」を確認します。`;
+
+  return `議事録に必要な情報を補うため、「${slot.label}」を確認します。`;
 }
 
 function canAskOptionalSubSlot(
@@ -2361,6 +2553,7 @@ function fallbackNextQuestion(
   slotStates: AcpSlotState[],
   currentTopic?: string,
   subSlotStates: StoredSubSlotState[] = [],
+  selectedCandidate?: QuestionCandidate,
 ): NextQuestionResult {
   const recentText = recentUtterances(utterances, 5)
     .map((utterance) => utterance.text)
@@ -2369,12 +2562,19 @@ function fallbackNextQuestion(
   const preferredSlot = preferredTopic.slot_name as AcpSlotName;
   const preferredState = findSlotState(slotStates, preferredSlot);
   const followUpCount = countPromptsForSlot(utterances, preferredSlot);
-  const followUpSubSlot = findFallbackFollowUpSubSlot(
+  const followUpSubSlot = selectedCandidate
+    ? {
+        id: selectedCandidate.subSlotId,
+        label: selectedCandidate.label,
+        questionPurpose: selectedCandidate.questionPurpose,
+        reasonForSelection: selectedCandidate.reasonForSelection,
+      }
+    : findFallbackFollowUpSubSlot(
     preferredTopic.id,
     subSlotStates,
     utterances,
     slotStates,
-  );
+      );
   const canCompletePreferredTheme = followUpCount >= preferredTopic.maxFollowUpQuestions;
 
   if (canCompletePreferredTheme) {
@@ -2386,12 +2586,21 @@ function fallbackNextQuestion(
 
   if (followUpSubSlot) {
     return {
-      question: questionForSubSlotFollowUp(followUpSubSlot.label),
+      question: questionForSubSlotFollowUp(
+        followUpSubSlot.label,
+        selectedCandidate?.questionPurpose ?? "elicit_preference",
+      ),
       transition_phrase: recentText ? "今のお話に関連して、" : "",
       target_slot: preferredSlot,
       targetMainSlotId: preferredTopic.id,
       targetSubSlotId: followUpSubSlot.id,
-      reason: `現在テーマのcore項目「${followUpSubSlot.label}」をもう少し確認します。`,
+      questionPurpose: selectedCandidate?.questionPurpose ?? "elicit_preference",
+      reasonForSelection:
+        selectedCandidate?.reasonForSelection ??
+        `現在テーマの項目「${followUpSubSlot.label}」を確認します。`,
+      reason:
+        selectedCandidate?.reasonForSelection ??
+        `現在テーマの項目「${followUpSubSlot.label}」を確認します。`,
       sensitivity: getSlotSensitivity(preferredSlot),
     };
   }
@@ -2447,12 +2656,24 @@ function findFallbackFollowUpSubSlot(
   return topic.aspects.find((aspect) => aspect.id === candidate.subSlotId) ?? null;
 }
 
-function questionForSubSlotFollowUp(label: string) {
-  if (/理由|なぜ/.test(label)) {
+function questionForSubSlotFollowUp(label: string, purpose: QuestionPurpose) {
+  if (purpose === "resolve_conflict") {
+    return "今のお話の中で、少し違って聞こえたところがあります。今の気持ちに近いのはどちらか、確認してもよいですか。";
+  }
+
+  if (purpose === "clarify") {
+    return "今のお話について、もう少しだけ確認してもよいですか。どのような意味に近いでしょうか。";
+  }
+
+  if (purpose === "ask_reason" || /理由|なぜ/.test(label)) {
     return "それがご本人にとって大切な理由や、そう感じる背景をもう少し聞いてもよいですか。";
   }
 
-  if (/不安|負担|避け|受け入れにくい|失いたくない|してほしくない/.test(label)) {
+  if (purpose === "ask_condition") {
+    return "どのような状況なら、その希望が変わることがありそうか聞いてもよいですか。";
+  }
+
+  if (purpose === "ask_example" || /不安|負担|避け|受け入れにくい|失いたくない|してほしくない/.test(label)) {
     return "反対に、できれば避けたいことや心配なことはありますか。";
   }
 
@@ -2461,44 +2682,6 @@ function questionForSubSlotFollowUp(label: string) {
   }
 
   return `今のお話に関連して、「${label}」についてもう少し聞いてもよいですか。`;
-}
-
-function fallbackTopicSwitch(context: ConversationContext): TopicSwitchResult {
-  const currentTopic = resolveTopic(context.currentTopic);
-  const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
-  const currentSlot = currentTopic.slot_name as AcpSlotName;
-  const currentState = findSlotState(context.slotStates, currentSlot);
-  const followUpCount = countPromptsForSlot(context.utterances, currentSlot);
-  const canSwitch =
-    Boolean(nextTopic) &&
-    (Boolean(getSlotResponseState(currentState)) ||
-      followUpCount >= currentTopic.maxFollowUpQuestions);
-
-  if (canSwitch && nextTopic) {
-    const nextSlot = nextTopic.slot_name as AcpSlotName;
-
-    return {
-      should_switch: true,
-      message: `ここまでのお話を大切にしながら、次に「${nextTopic.title}」について少し伺ってもよいですか。\n${nextTopic.opening_prompt}`,
-      target_slot: nextSlot,
-      next_topic: nextTopic.slot_name,
-      reason: "現在の話題はある程度確認できているため、次の話題へ自然に移る判断をしました。",
-      sensitivity: getSlotSensitivity(nextSlot),
-    };
-  }
-
-  const question =
-    FALLBACK_QUESTIONS[currentSlot] ??
-    FALLBACK_QUESTIONS["今の生活で大切にしていること"];
-
-  return {
-    should_switch: false,
-    message: `今の話題をもう少しだけ確認してもよいですか。\n${question}`,
-    target_slot: currentSlot,
-    next_topic: currentTopic.slot_name,
-    reason: "現在の話題にまだ未確認または部分的な内容が残っているため、同じ話題で追加確認する判断をしました。",
-    sensitivity: getSlotSensitivity(currentSlot),
-  };
 }
 
 function fallbackEndCheck(slotStates: AcpSlotState[]): EndCheckResult {
@@ -2571,6 +2754,25 @@ function isRepeatedQuestion(
     const sameText = normalizeAnswerText(utterance.text) === normalizedQuestion;
 
     return sameSlot && sameText;
+  });
+}
+
+function isRepeatedAIQuestion(
+  history: QuestionHistoryItem[],
+  question: string,
+) {
+  const normalizedQuestion = normalizeAnswerText(question);
+  if (!normalizedQuestion) return true;
+
+  return history.some((item) => {
+    const normalizedHistory = normalizeAnswerText(item.content);
+    if (!normalizedHistory) return false;
+
+    return (
+      normalizedHistory === normalizedQuestion ||
+      normalizedHistory.includes(normalizedQuestion) ||
+      normalizedQuestion.includes(normalizedHistory)
+    );
   });
 }
 

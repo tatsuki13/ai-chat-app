@@ -1,5 +1,6 @@
 type RemoteMicRuntimeStore = {
   activeState: unknown | null;
+  aiSpeechSubscribers: Set<(event: unknown) => void>;
 };
 
 const STORE_KEY = "__acpRemoteMicRuntimeStore";
@@ -14,6 +15,7 @@ export function getRemoteMicRuntimeStore() {
   if (!globalStore[STORE_KEY]) {
     globalStore[STORE_KEY] = {
       activeState: null,
+      aiSpeechSubscribers: new Set(),
     };
   }
 

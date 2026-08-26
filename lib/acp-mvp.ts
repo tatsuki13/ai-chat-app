@@ -379,6 +379,25 @@ export type SlotClassificationResponseState =
   | "declined"
   | "ambiguous"
   | "conflicting";
+export type MinutesReadiness =
+  | "insufficient"
+  | "basic"
+  | "rich";
+export type FollowUpNeed =
+  | "required"
+  | "helpful"
+  | "none";
+export type MinutesQuestionStage =
+  | "current_thought"
+  | "background_reason"
+  | "conditions_specificity";
+export type QuestionPurpose =
+  | "elicit_preference"
+  | "ask_reason"
+  | "ask_example"
+  | "ask_condition"
+  | "clarify"
+  | "resolve_conflict";
 export type SlotReasonCode =
   | "not_discussed"
   | "time_limit"
@@ -472,6 +491,9 @@ export type SubSlotControlState = {
   lastUpdatedTopicId?: string;
   inDeferredQueue: boolean;
   canAskAgain: boolean;
+  minutesReadiness: MinutesReadiness;
+  followUpNeed: FollowUpNeed;
+  questionStage: MinutesQuestionStage;
 };
 export type SubSlotControlOverride = {
   topicId: string;
@@ -580,6 +602,8 @@ export type NextQuestionResult = {
   target_slot: AcpSlotName | string;
   targetMainSlotId?: string;
   targetSubSlotId?: string;
+  questionPurpose?: QuestionPurpose;
+  reasonForSelection?: string;
   reason: string;
   sensitivity: Sensitivity;
   no_relevant_followup?: boolean;
@@ -1134,10 +1158,7 @@ export function canAskAgainSubSlotState(
   >,
 ) {
   if (state.completion === "complete") return false;
-  if (state.responseState === "explicit_none") return false;
-  if (state.responseState === "declined") return false;
-  if (state.responseState === "not_considered") return false;
-  if (state.responseState === "unable_to_verbalize") return false;
+  if (isTerminalValidResponseState(state.responseState)) return false;
 
   return (
     state.responseState === "no_response" ||
@@ -1147,6 +1168,17 @@ export function canAskAgainSubSlotState(
     state.reasonCode === "insufficient_detail" ||
     state.reasonCode === "topic_changed" ||
     state.reasonCode === "time_limit"
+  );
+}
+
+export function isTerminalValidResponseState(
+  responseState: SlotClassificationResponseState | undefined,
+) {
+  return (
+    responseState === "explicit_none" ||
+    responseState === "declined" ||
+    responseState === "not_considered" ||
+    responseState === "unable_to_verbalize"
   );
 }
 
@@ -1291,6 +1323,7 @@ function buildMainSlotControlState(
     const stored = storedSubSlotStates.find(
       (state) => state.mainSlotId === topic.id && state.subSlotId === aspect.id,
     );
+    const minutesEvaluation = evaluateSubSlotMinutesNeed(aspect, stored);
     const aspectStatus =
       override?.status ?? getStoredSubSlotScopedStatus(stored) ??
       getAspectScopedStatus(aspect, status, value);
@@ -1317,10 +1350,14 @@ function buildMainSlotControlState(
         (slot?.updated_at ? topic.id : undefined),
       inDeferredQueue:
         aspect.priority === "core" &&
+        minutesEvaluation.followUpNeed !== "none" &&
         (stored?.isDeferred ?? canDeferSlotStatus(aspectStatus)),
       canAskAgain:
-        aspect.priority === "core" &&
+        minutesEvaluation.followUpNeed !== "none" &&
         (stored?.canAskAgain ?? canAskAgainStatus(aspectStatus)),
+      minutesReadiness: minutesEvaluation.minutesReadiness,
+      followUpNeed: minutesEvaluation.followUpNeed,
+      questionStage: minutesEvaluation.questionStage,
     };
   });
 
@@ -1337,6 +1374,71 @@ function buildMainSlotControlState(
     lastUpdatedTopicId: slot?.updated_at ? topic.id : undefined,
     subSlots,
   };
+}
+
+function evaluateSubSlotMinutesNeed(
+  aspect: (typeof DISCUSSION_TOPICS)[number]["aspects"][number],
+  state: StoredSubSlotState | undefined,
+): {
+  minutesReadiness: MinutesReadiness;
+  followUpNeed: FollowUpNeed;
+  questionStage: MinutesQuestionStage;
+} {
+  const questionStage = getMinutesQuestionStage(aspect.id);
+
+  if (!state || state.responseState === "no_response" || state.evidenceUtteranceIds.length === 0) {
+    return {
+      minutesReadiness: "insufficient",
+      followUpNeed: aspect.priority === "core" ? "required" : "helpful",
+      questionStage,
+    };
+  }
+
+  if (isTerminalValidResponseState(state.responseState)) {
+    return {
+      minutesReadiness: "basic",
+      followUpNeed: "none",
+      questionStage,
+    };
+  }
+
+  if (state.responseState === "ambiguous" || state.responseState === "conflicting") {
+    return {
+      minutesReadiness: "basic",
+      followUpNeed: "helpful",
+      questionStage,
+    };
+  }
+
+  if (state.completion === "complete" || state.depth === "elaborated") {
+    return {
+      minutesReadiness: "rich",
+      followUpNeed: "none",
+      questionStage,
+    };
+  }
+
+  return {
+    minutesReadiness: "basic",
+    followUpNeed: questionStage === "current_thought" ? "none" : "helpful",
+    questionStage,
+  };
+}
+
+function getMinutesQuestionStage(subSlotId: string): MinutesQuestionStage {
+  if (/reason|why|trust/.test(subSlotId)) {
+    return "background_reason";
+  }
+
+  if (
+    /condition|timing|acceptable_change|involvement|support|anxiety|burden|request|judgement|avoidance|unspoken|multiple|decided|hard_to_decide|example/.test(
+      subSlotId,
+    )
+  ) {
+    return "conditions_specificity";
+  }
+
+  return "current_thought";
 }
 
 function buildDeferredItemsForMainSlot(

@@ -19,6 +19,15 @@ type RealtimeEvent = {
   transcript?: string;
 };
 type RemoteMicTranscriptionProvider = "browser" | "openai";
+type AiSpeechEvent = {
+  type?: string;
+  sessionId?: string;
+  playbackId?: string | null;
+  contentType?: string | null;
+  revision?: number;
+  timestamp?: string;
+  releaseAfter?: string | null;
+};
 type BrowserSpeechRecognitionResult = {
   isFinal: boolean;
   0?: {
@@ -61,6 +70,8 @@ const TRANSCRIPTION_PROVIDER: RemoteMicTranscriptionProvider =
   process.env.NEXT_PUBLIC_REMOTE_MIC_TRANSCRIPTION_PROVIDER === "browser"
     ? "browser"
     : "openai";
+const AI_SPEECH_RELEASE_DELAY_MS = 500;
+const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45_000;
 
 export default function RemoteMicClient(props: {
   initialRole?: RemoteMicRole | null;
@@ -75,6 +86,7 @@ export default function RemoteMicClient(props: {
   const [serverLabel, setServerLabel] = useState("確認中");
   const [level, setLevel] = useState(0);
   const [connectionLabel, setConnectionLabel] = useState("未接続");
+  const [aiSpeechLabel, setAiSpeechLabel] = useState("通常受付");
   const [openUrlLabel, setOpenUrlLabel] = useState("確認中");
   const [browserLabel, setBrowserLabel] = useState("確認中");
   const [httpsUrl, setHttpsUrl] = useState("");
@@ -90,6 +102,19 @@ export default function RemoteMicClient(props: {
   const partialTextByTranscriptRef = useRef<Map<string, string>>(new Map());
   const speechStartedAtByTranscriptRef = useRef<Map<string, number>>(new Map());
   const firstDeltaAtByTranscriptRef = useRef<Map<string, number>>(new Map());
+  const aiSpeechStateRef = useRef<{
+    active: boolean;
+    playbackId: string | null;
+    revision: number;
+    releaseUntil: number;
+  }>({
+    active: false,
+    playbackId: null,
+    revision: 0,
+    releaseUntil: 0,
+  });
+  const aiSpeechReleaseTimerRef = useRef<number | null>(null);
+  const aiSpeechSafetyTimerRef = useRef<number | null>(null);
 
   const roleLabel = useMemo(() => {
     if (remoteMic?.role === "elder") return "本人用マイク";
@@ -97,6 +122,110 @@ export default function RemoteMicClient(props: {
     return "スマートフォンマイク";
   }, [remoteMic?.role]);
   const canStart = Boolean(remoteMic) && micState === "idle";
+
+  function handleAiSpeechEvent(event: AiSpeechEvent) {
+    if (!remoteMic?.sessionId || event.sessionId !== remoteMic.sessionId) return;
+
+    const revision = typeof event.revision === "number" ? event.revision : 0;
+    if (revision < aiSpeechStateRef.current.revision) return;
+
+    if (event.type === "ai_speech_snapshot") {
+      if (event.playbackId && event.releaseAfter) {
+        const releaseUntil = new Date(event.releaseAfter).getTime();
+        if (Date.now() < releaseUntil) {
+          pauseCaptureForAiSpeech(event.playbackId, revision, releaseUntil);
+        }
+      }
+      return;
+    }
+
+    if (event.type === "ai_speech_start" && event.playbackId) {
+      pauseCaptureForAiSpeech(
+        event.playbackId,
+        revision,
+        Date.now() + AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS,
+      );
+      return;
+    }
+
+    if (
+      (event.type === "ai_speech_end" || event.type === "ai_speech_cancel") &&
+      event.playbackId
+    ) {
+      if (event.playbackId !== aiSpeechStateRef.current.playbackId) return;
+      const releaseUntil = event.releaseAfter
+        ? new Date(event.releaseAfter).getTime()
+        : Date.now() + AI_SPEECH_RELEASE_DELAY_MS;
+      releaseCaptureAfterAiSpeech(revision, releaseUntil);
+    }
+  }
+
+  function pauseCaptureForAiSpeech(
+    playbackId: string,
+    revision: number,
+    releaseUntil: number,
+  ) {
+    aiSpeechStateRef.current = {
+      active: true,
+      playbackId,
+      revision,
+      releaseUntil,
+    };
+    setAiSpeechLabel("AI音声中のため一時停止");
+    streamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = false;
+    });
+    clearPartialTranscriptState();
+    void setFixedMicMuted(true).catch(() => undefined);
+
+    if (aiSpeechSafetyTimerRef.current !== null) {
+      window.clearTimeout(aiSpeechSafetyTimerRef.current);
+    }
+    aiSpeechSafetyTimerRef.current = window.setTimeout(() => {
+      releaseCaptureAfterAiSpeech(revision + 1, Date.now());
+    }, AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS);
+  }
+
+  function releaseCaptureAfterAiSpeech(revision: number, releaseUntil: number) {
+    if (aiSpeechReleaseTimerRef.current !== null) {
+      window.clearTimeout(aiSpeechReleaseTimerRef.current);
+    }
+
+    const delayMs = Math.max(0, releaseUntil - Date.now());
+    aiSpeechStateRef.current = {
+      ...aiSpeechStateRef.current,
+      active: true,
+      revision,
+      releaseUntil,
+    };
+    aiSpeechReleaseTimerRef.current = window.setTimeout(() => {
+      aiSpeechReleaseTimerRef.current = null;
+      aiSpeechStateRef.current = {
+        active: false,
+        playbackId: null,
+        revision,
+        releaseUntil: 0,
+      };
+      streamRef.current?.getAudioTracks().forEach((track) => {
+        track.enabled = true;
+      });
+      if (recordingActiveRef.current) {
+        void setFixedMicMuted(false).catch(() => undefined);
+      }
+      setAiSpeechLabel("通常受付");
+    }, delayMs);
+  }
+
+  function clearPartialTranscriptState() {
+    partialTextByTranscriptRef.current.clear();
+    speechStartedAtByTranscriptRef.current.clear();
+    firstDeltaAtByTranscriptRef.current.clear();
+  }
+
+  function isAiSpeechBlockingCapture() {
+    const state = aiSpeechStateRef.current;
+    return state.active || Date.now() <= state.releaseUntil;
+  }
 
   useEffect(() => {
     const nextSecureContext = window.isSecureContext;
@@ -134,6 +263,26 @@ export default function RemoteMicClient(props: {
       void stop(false);
     };
   }, [props.initialRole]);
+
+  useEffect(() => {
+    if (!remoteMic?.sessionId) return;
+
+    const source = new EventSource(
+      `/api/ai/speech-state/stream?sessionId=${encodeURIComponent(remoteMic.sessionId)}`,
+    );
+    source.onmessage = (event) => {
+      try {
+        handleAiSpeechEvent(JSON.parse(event.data) as AiSpeechEvent);
+      } catch {}
+    };
+    source.onerror = () => {
+      setAiSpeechLabel("AI音声状態の確認待ち");
+    };
+
+    return () => {
+      source.close();
+    };
+  }, [remoteMic?.sessionId]);
 
   async function loadActiveSession(
     role: RemoteMicRole | null,
@@ -299,12 +448,14 @@ export default function RemoteMicClient(props: {
 
     const type = event.type ?? "";
     if (type === "input_audio_buffer.speech_started") {
+      if (isAiSpeechBlockingCapture()) return;
       const transcriptId = getTranscriptId(event);
       speechStartedAtByTranscriptRef.current.set(transcriptId, Date.now());
       return;
     }
 
     if (type === "conversation.item.input_audio_transcription.delta") {
+      if (isAiSpeechBlockingCapture()) return;
       const transcriptId = getTranscriptId(event);
       const delta = event.delta ?? "";
       if (!delta) return;
@@ -318,6 +469,18 @@ export default function RemoteMicClient(props: {
 
     if (type === "conversation.item.input_audio_transcription.completed") {
       const transcriptId = getTranscriptId(event);
+      if (isAiSpeechBlockingCapture()) {
+        partialTextByTranscriptRef.current.delete(transcriptId);
+        speechStartedAtByTranscriptRef.current.delete(transcriptId);
+        firstDeltaAtByTranscriptRef.current.delete(transcriptId);
+        console.info("[remote-mic final transcript skipped during ai speech]", {
+          sessionId: session.sessionId,
+          role: session.role,
+          transcriptId,
+          playbackId: aiSpeechStateRef.current.playbackId,
+        });
+        return;
+      }
       const text =
         event.transcript ?? partialTextByTranscriptRef.current.get(transcriptId) ?? "";
       partialTextByTranscriptRef.current.delete(transcriptId);
@@ -339,6 +502,8 @@ export default function RemoteMicClient(props: {
         startedAt: transcriptStartedAt
           ? new Date(transcriptStartedAt).toISOString()
           : undefined,
+        aiPlaybackIdAtCapture: aiSpeechStateRef.current.playbackId,
+        captureRevision: aiSpeechStateRef.current.revision,
       });
       return;
     }
@@ -434,10 +599,20 @@ export default function RemoteMicClient(props: {
 
         const text = result[0]?.transcript?.trim() ?? "";
         if (!text) continue;
+        if (isAiSpeechBlockingCapture()) {
+          console.info("[remote-mic browser transcript skipped during ai speech]", {
+            sessionId: session.sessionId,
+            role: session.role,
+            playbackId: aiSpeechStateRef.current.playbackId,
+          });
+          continue;
+        }
 
         void postFinalTranscript(session, {
           transcriptId: `browser:${Date.now()}:${crypto.randomUUID()}`,
           text,
+          aiPlaybackIdAtCapture: aiSpeechStateRef.current.playbackId,
+          captureRevision: aiSpeechStateRef.current.revision,
         });
       }
     };
@@ -463,9 +638,15 @@ export default function RemoteMicClient(props: {
     dataChannelRef.current = null;
     peerConnectionRef.current?.close();
     peerConnectionRef.current = null;
-    partialTextByTranscriptRef.current.clear();
-    speechStartedAtByTranscriptRef.current.clear();
-    firstDeltaAtByTranscriptRef.current.clear();
+    clearPartialTranscriptState();
+    if (aiSpeechReleaseTimerRef.current !== null) {
+      window.clearTimeout(aiSpeechReleaseTimerRef.current);
+      aiSpeechReleaseTimerRef.current = null;
+    }
+    if (aiSpeechSafetyTimerRef.current !== null) {
+      window.clearTimeout(aiSpeechSafetyTimerRef.current);
+      aiSpeechSafetyTimerRef.current = null;
+    }
 
     levelStopRef.current?.();
     levelStopRef.current = null;
@@ -548,8 +729,15 @@ export default function RemoteMicClient(props: {
           <StatusRow label="マイク権限" value={permissionLabel} />
           <StatusRow
             label="入力状態"
-            value={micState === "streaming" ? "文字起こし中" : "停止中"}
+            value={
+              aiSpeechStateRef.current.active
+                ? "AI音声中は停止"
+                : micState === "streaming"
+                  ? "文字起こし中"
+                  : "停止中"
+            }
           />
+          <StatusRow label="AI音声" value={aiSpeechLabel} />
           <div>
             <div className="mb-1 flex items-center justify-between text-[12px] font-black text-stone-600">
               <span>入力音量</span>
@@ -685,6 +873,8 @@ async function postFinalTranscript(
     text: string;
     eventId?: string;
     startedAt?: string;
+    aiPlaybackIdAtCapture?: string | null;
+    captureRevision?: number;
   },
 ) {
   if (!input.text.trim()) return;
@@ -701,6 +891,9 @@ async function postFinalTranscript(
       eventId: input.eventId,
       startedAt: input.startedAt,
       endedAt: new Date().toISOString(),
+      finalizedAt: new Date().toISOString(),
+      aiPlaybackIdAtCapture: input.aiPlaybackIdAtCapture,
+      captureRevision: input.captureRevision,
     }),
   });
 

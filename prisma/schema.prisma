@@ -25,6 +25,10 @@ model Session {
   finalMinutes           FinalMinute[]
   aiInterventionLogs     AIInterventionLog[]
   aiActionEvents         AIActionEvent[]
+  aiProcessingState      AIProcessingState?
+  aiSpeechState          AISpeechState?
+  ttsAudioCaches         TTSAudioCache[]
+  preparedQuestions      PreparedQuestion[]
   subSlotStates          SlotSubState[]
   slotStates             SlotState[]
   utterances             SessionUtterance[]
@@ -210,6 +214,112 @@ model AIActionEvent {
   @@index([currentTopicId])
   @@index([createdAt])
   @@map("ai_action_events")
+}
+
+model AIProcessingState {
+  id                       String    @id @default(cuid())
+  participantCode          String?   @map("participant_code")
+  sessionId                String    @unique @map("session_id")
+  lastProcessedUtteranceId String?   @map("last_processed_utterance_id")
+  lastProcessedAt          DateTime? @map("last_processed_at")
+  slotRevision             Int       @default(0) @map("slot_revision")
+  processingStatus         String    @default("idle") @map("processing_status")
+  processingStartedAt      DateTime? @map("processing_started_at")
+  processingFinishedAt     DateTime? @map("processing_finished_at")
+  lastError                String?   @map("last_error")
+  retryCount               Int       @default(0) @map("retry_count")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
+  session                  Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([participantCode])
+  @@index([processingStatus])
+  @@index([updatedAt])
+  @@map("ai_processing_states")
+}
+
+model PreparedQuestion {
+  id                    String    @id @default(cuid())
+  participantCode       String?   @map("participant_code")
+  sessionId             String    @map("session_id")
+  topicId               String    @map("topic_id")
+  topicSlotName         String?   @map("topic_slot_name")
+  question              String
+  transitionPhrase      String    @default("") @map("transition_phrase")
+  targetMainSlotId      String    @map("target_main_slot_id")
+  targetSubSlotId       String    @map("target_sub_slot_id")
+  questionPurpose       String    @map("question_purpose")
+  reasonForSelection    String    @map("reason_for_selection")
+  basedOnUtteranceId    String?   @map("based_on_utterance_id")
+  slotRevision          Int       @map("slot_revision")
+  status                String
+  audioStatus           String    @default("pending") @map("audio_status")
+  audioReference        String?   @map("audio_reference")
+  audioGeneratedAt      DateTime? @map("audio_generated_at")
+  audioGenerationMs     Int?      @map("audio_generation_ms")
+  audioError            String?   @map("audio_error")
+  generatedAt           DateTime  @default(now()) @map("generated_at")
+  displayedAt           DateTime? @map("displayed_at")
+  invalidatedAt         DateTime? @map("invalidated_at")
+  invalidationReason    String?   @map("invalidation_reason")
+  expiresAt             DateTime? @map("expires_at")
+  displayLogCommittedAt DateTime? @map("display_log_committed_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  session               Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, topicId, status])
+  @@index([sessionId, status])
+  @@index([participantCode])
+  @@index([generatedAt])
+  @@map("prepared_questions")
+}
+
+model TTSAudioCache {
+  id             String   @id @default(cuid())
+  cacheKey       String   @unique @map("cache_key")
+  participantCode String? @map("participant_code")
+  sessionId      String?  @map("session_id")
+  contentType    String   @map("content_type")
+  topicId        String?  @map("topic_id")
+  text           String
+  model          String
+  voice          String
+  instructions   String
+  format         String
+  audio          Bytes
+  byteLength     Int      @map("byte_length")
+  durationMs     Int?     @map("duration_ms")
+  createdAt      DateTime @default(now()) @map("created_at")
+  lastUsedAt     DateTime @default(now()) @map("last_used_at")
+  session        Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@index([contentType, topicId])
+  @@index([sessionId])
+  @@index([participantCode])
+  @@index([lastUsedAt])
+  @@map("tts_audio_caches")
+}
+
+model AISpeechState {
+  id            String    @id @default(cuid())
+  participantCode String? @map("participant_code")
+  sessionId     String    @unique @map("session_id")
+  active        Boolean   @default(false)
+  playbackId    String?   @map("playback_id")
+  contentType   String?   @map("content_type")
+  revision      Int       @default(0)
+  startedAt     DateTime? @map("started_at")
+  expectedEndAt DateTime? @map("expected_end_at")
+  endedAt       DateTime? @map("ended_at")
+  releaseAfter  DateTime? @map("release_after")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  session       Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([participantCode])
+  @@index([active])
+  @@index([updatedAt])
+  @@map("ai_speech_states")
 }
 
 model WebRtcSignal {

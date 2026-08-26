@@ -181,6 +181,7 @@ export default function MinutesPage() {
 function MinutesPageClient() {
   const searchParams = useSearchParams();
   const sessionId = searchParams.get("sessionId")?.trim() ?? "";
+  const view = searchParams.get("view")?.trim() ?? "";
   const [data, setData] = useState<MinutesApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -257,6 +258,17 @@ function MinutesPageClient() {
     );
   }
 
+  if (view === "confirm") {
+    return (
+      <MinutesShell>
+        <MinutesCompletionLanding
+          sessionId={sessionId}
+          participantCode={data.session.participant_code}
+        />
+      </MinutesShell>
+    );
+  }
+
   return (
     <MinutesShell>
       <MinutesPrintStyles />
@@ -318,6 +330,42 @@ function StatusBlock(props: { title: string; body: string }) {
     <section className="rounded-md border border-stone-200 bg-white px-5 py-4 shadow-sm">
       <h1 className="text-[18px] font-black text-stone-950">{props.title}</h1>
       <p className="mt-2 text-[14px] font-bold text-stone-600">{props.body}</p>
+    </section>
+  );
+}
+
+function MinutesCompletionLanding(props: {
+  sessionId: string;
+  participantCode: string | null;
+}) {
+  return (
+    <section className="rounded-md border border-emerald-200 bg-white px-5 py-5 shadow-sm">
+      <div className="text-[20px] font-black text-stone-950">
+        話し合いが終了しました
+      </div>
+      <p className="mt-2 text-[14px] font-bold leading-relaxed text-stone-700">
+        今回の話し合いから議事録を作成しました。議事録では、本人の考えだけでなく、背景・理由・迷い・条件・根拠となった発言を確認できます。
+      </p>
+      <div className="mt-3 rounded-md border border-stone-200 bg-stone-50 px-3 py-2 text-[13px] font-bold text-stone-700">
+        参加者ID:{" "}
+        <span className="font-black text-stone-950">
+          {props.participantCode || "-"}
+        </span>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <a
+          href={`/minutes?sessionId=${encodeURIComponent(props.sessionId)}`}
+          className="rounded-md bg-emerald-700 px-4 py-2 text-[13px] font-black text-white"
+        >
+          議事録を確認する
+        </a>
+        <a
+          href={`/session?sessionId=${encodeURIComponent(props.sessionId)}`}
+          className="rounded-md border border-stone-300 bg-white px-4 py-2 text-[13px] font-black text-stone-700"
+        >
+          セッションへ戻る
+        </a>
+      </div>
     </section>
   );
 }
@@ -505,19 +553,9 @@ function BackToPreviousPageButton(props: { sessionId: string; className: string 
 }
 
 function navigateBackOrSession(sessionId: string) {
-  const fallbackPath = `/session?sessionId=${encodeURIComponent(sessionId)}`;
-  const referrer = document.referrer;
-  const canUseHistory =
-    window.history.length > 1 &&
-    referrer &&
-    new URL(referrer).origin === window.location.origin;
-
-  if (canUseHistory) {
-    window.history.back();
-    return;
-  }
-
-  window.location.assign(fallbackPath);
+  window.location.assign(
+    `/minutes?sessionId=${encodeURIComponent(sessionId)}&view=confirm`,
+  );
 }
 
 function TextSection(props: {

@@ -7,6 +7,10 @@ import {
   pickUtteranceTimingBase,
 } from "../../../../../lib/server/utterance-timing";
 import { UTTERANCE_ANALYSIS_VERSION } from "../../../../../lib/server/utterance-metadata";
+import {
+  getAiSpeechState,
+  isAiSpeechBlockingTranscription,
+} from "../../../../../lib/ai/speech-state";
 
 export const runtime = "nodejs";
 
@@ -24,7 +28,10 @@ export async function POST(request: Request) {
     status?: unknown;
     startedAt?: unknown;
     endedAt?: unknown;
+    finalizedAt?: unknown;
     eventId?: unknown;
+    captureRevision?: unknown;
+    aiPlaybackIdAtCapture?: unknown;
   } | null;
   const sessionId = requiredString(body?.sessionId);
   const role = parseRemoteMicRole(requiredString(body?.role));
@@ -41,6 +48,44 @@ export async function POST(request: Request) {
 
   if (!text) {
     return NextResponse.json({ ok: true, skipped: true });
+  }
+
+  const aiSpeechState = await getAiSpeechState(sessionId);
+  const aiPlaybackIdAtCapture = requiredString(body?.aiPlaybackIdAtCapture);
+  const transcriptStartedAt = parseDate(requiredString(body?.startedAt));
+  const transcriptFinalizedAt = parseDate(
+    requiredString(body?.finalizedAt) || requiredString(body?.endedAt),
+  );
+  const overlapsAiSpeech = doesTranscriptOverlapAiSpeech({
+    state: aiSpeechState,
+    startedAt: transcriptStartedAt,
+    finalizedAt: transcriptFinalizedAt,
+  });
+  if (
+    aiPlaybackIdAtCapture ||
+    isAiSpeechBlockingTranscription(aiSpeechState) ||
+    overlapsAiSpeech
+  ) {
+    const reason = aiPlaybackIdAtCapture
+      ? "captured_during_ai_speech"
+      : overlapsAiSpeech
+        ? "overlaps_ai_speech"
+        : "ai_speech_active";
+    console.info("[remote-mic realtime transcript skipped during ai speech]", {
+      sessionId,
+      role,
+      transcriptId,
+      playbackId: aiPlaybackIdAtCapture || aiSpeechState?.playbackId,
+      reason,
+      startedAt: requiredString(body?.startedAt) || null,
+      finalizedAt: requiredString(body?.finalizedAt) || null,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      skipped: true,
+      reason,
+    });
   }
 
   const active = getActiveFixedRemoteMicSession();
@@ -146,6 +191,35 @@ function requiredString(value: unknown) {
 
 function parseTranscriptStatus(value: string) {
   return value === "partial" || value === "final" ? value : null;
+}
+
+function parseDate(value: string) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function doesTranscriptOverlapAiSpeech(input: {
+  state: Awaited<ReturnType<typeof getAiSpeechState>>;
+  startedAt: Date | null;
+  finalizedAt: Date | null;
+}) {
+  const state = input.state;
+  if (!state?.startedAt) return false;
+
+  const releaseAfter = state.releaseAfter ?? state.endedAt ?? null;
+  if (!state.active && !releaseAfter) return false;
+
+  const transcriptStartMs = input.startedAt?.getTime() ?? input.finalizedAt?.getTime();
+  const transcriptEndMs = input.finalizedAt?.getTime() ?? transcriptStartMs;
+  if (transcriptStartMs === undefined || transcriptEndMs === undefined) return false;
+
+  const aiStartMs = state.startedAt.getTime();
+  const aiEndMs = state.active
+    ? Date.now()
+    : releaseAfter?.getTime() ?? state.endedAt?.getTime() ?? aiStartMs;
+
+  return transcriptStartMs <= aiEndMs && transcriptEndMs >= aiStartMs;
 }
 
 async function appendOrCreateRemoteUtterance(input: {

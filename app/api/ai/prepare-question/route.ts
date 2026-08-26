@@ -1,0 +1,432 @@
+import { NextResponse } from "next/server";
+import {
+  getSessionContext,
+  saveSlotStates,
+  saveSubSlotStates,
+} from "../../../../lib/acp-store";
+import { resolveDiscussionTopic } from "../../../../lib/acp-mvp";
+import {
+  generateNextQuestion,
+  updateSlotStateBundleFromConversation,
+} from "../../../../lib/ai";
+import { getOrCreateTTSAudio } from "../../../../lib/ai/tts";
+import { prisma } from "../../../../lib/prisma";
+
+export const runtime = "nodejs";
+
+const PROCESSING_TIMEOUT_MS = 60_000;
+const PREPARED_QUESTION_TTL_MS = 15 * 60 * 1000;
+
+export async function POST(request: Request) {
+  const requestedAt = new Date();
+  let sessionId = "";
+
+  try {
+    const body = await request.json().catch(() => ({}));
+    sessionId = requiredString(body.session_id ?? body.sessionId);
+    const currentTopic = optionalString(body.current_topic ?? body.currentTopic);
+    const currentTopicTitle = optionalString(
+      body.current_topic_title ?? body.currentTopicTitle,
+    );
+
+    if (!sessionId) {
+      return NextResponse.json({ error: "session_id is required" }, { status: 400 });
+    }
+
+    const topic = resolveDiscussionTopic(currentTopic);
+    const context = await getSessionContext(sessionId);
+    const latestUtterance = context.utterances.at(-1);
+    const activeState = await prisma.aIProcessingState.findUnique({
+      where: { sessionId },
+    });
+    const existingPrepared = await prisma.preparedQuestion.findFirst({
+      where: {
+        sessionId,
+        topicId: topic.id,
+        status: "prepared",
+        OR: [{ expiresAt: null }, { expiresAt: { gt: requestedAt } }],
+      },
+      orderBy: { generatedAt: "desc" },
+    });
+
+    if (
+      existingPrepared &&
+      activeState?.processingStatus === "ready" &&
+      activeState.lastProcessedUtteranceId === (latestUtterance?.id ?? null) &&
+      activeState.slotRevision === existingPrepared.slotRevision
+    ) {
+      return NextResponse.json({
+        processing: toProcessingStateResponse(activeState),
+        prepared_question: toPreparedQuestionResponse(existingPrepared),
+        reused: true,
+      });
+    }
+
+    if (
+      activeState &&
+      activeState.processingStatus !== "idle" &&
+      activeState.processingStatus !== "ready" &&
+      activeState.processingStatus !== "failed" &&
+      activeState.processingStartedAt &&
+      requestedAt.getTime() - activeState.processingStartedAt.getTime() <
+        PROCESSING_TIMEOUT_MS
+    ) {
+      return NextResponse.json({
+        processing: toProcessingStateResponse(activeState),
+        prepared_question: null,
+        in_progress: true,
+      });
+    }
+
+    const state = await prisma.aIProcessingState.upsert({
+      where: { sessionId },
+      create: {
+        sessionId,
+        participantCode: context.session.participantCode,
+        processingStatus: "updating_slots",
+        processingStartedAt: requestedAt,
+      },
+      update: {
+        participantCode: context.session.participantCode,
+        processingStatus: "updating_slots",
+        processingStartedAt: requestedAt,
+        lastError: null,
+      },
+    });
+
+    console.info("[ai prepare-question start]", {
+      sessionId,
+      topicId: topic.id,
+      utteranceCount: context.utterances.length,
+      startedAt: requestedAt.toISOString(),
+    });
+
+    await prisma.preparedQuestion.updateMany({
+      where: {
+        sessionId,
+        status: "prepared",
+        NOT: { topicId: topic.id },
+      },
+      data: {
+        status: "expired",
+        audioStatus: "expired",
+        invalidatedAt: requestedAt,
+        invalidationReason: "topic_changed",
+      },
+    });
+
+    const bundle = await updateSlotStateBundleFromConversation({
+      ...context,
+      currentTopic,
+      currentTopicTitle,
+    });
+    await saveSlotStates(sessionId, bundle.slotStates);
+    await saveSubSlotStates(sessionId, bundle.subSlotStates);
+
+    const nextRevision = state.slotRevision + 1;
+    await prisma.aIProcessingState.update({
+      where: { sessionId },
+      data: {
+        processingStatus: "generating_question",
+        slotRevision: nextRevision,
+        lastProcessedUtteranceId: latestUtterance?.id ?? null,
+        lastProcessedAt: new Date(),
+      },
+    });
+
+    const refreshedContext = await getSessionContext(sessionId);
+    const aiQuestionLogs = await loadQuestionHistory(sessionId, topic.id, topic.slot_name);
+    const result = await generateNextQuestion({
+      ...refreshedContext,
+      currentTopic,
+      currentTopicTitle,
+      currentTopicQuestionCount: aiQuestionLogs.length,
+      aiQuestionHistory: aiQuestionLogs,
+    });
+
+    await prisma.preparedQuestion.updateMany({
+      where: {
+        sessionId,
+        topicId: topic.id,
+        status: "prepared",
+      },
+      data: {
+        status: "invalidated",
+        audioStatus: "expired",
+        invalidatedAt: new Date(),
+        invalidationReason: "superseded",
+      },
+    });
+
+    if (!result.question || result.no_relevant_followup) {
+      const finished = await prisma.aIProcessingState.update({
+        where: { sessionId },
+        data: {
+          processingStatus: "ready",
+          processingFinishedAt: new Date(),
+          lastError: null,
+        },
+      });
+
+      return NextResponse.json({
+        processing: toProcessingStateResponse(finished),
+        prepared_question: null,
+        no_relevant_followup: true,
+        reason: result.reason,
+      });
+    }
+
+    const prepared = await prisma.preparedQuestion.create({
+      data: {
+        sessionId,
+        participantCode: refreshedContext.session.participantCode,
+        topicId: topic.id,
+        topicSlotName: topic.slot_name,
+        question: result.question,
+        transitionPhrase: result.transition_phrase,
+        targetMainSlotId: result.targetMainSlotId ?? topic.id,
+        targetSubSlotId: result.targetSubSlotId ?? "",
+        questionPurpose: result.questionPurpose ?? "elicit_preference",
+        reasonForSelection: result.reasonForSelection ?? result.reason,
+        basedOnUtteranceId: latestUtterance?.id ?? null,
+        slotRevision: nextRevision,
+        status: "prepared",
+        generatedAt: new Date(),
+        expiresAt: new Date(Date.now() + PREPARED_QUESTION_TTL_MS),
+      },
+    });
+    const preparedWithAudio = await prepareAudioForPreparedQuestion({
+      preparedQuestionId: prepared.id,
+      sessionId,
+      participantCode: refreshedContext.session.participantCode,
+      topicId: topic.id,
+      question: result.question,
+    });
+    const finished = await prisma.aIProcessingState.update({
+      where: { sessionId },
+      data: {
+        processingStatus: "ready",
+        processingFinishedAt: new Date(),
+        lastError: null,
+      },
+    });
+
+    console.info("[ai prepare-question ready]", {
+      sessionId,
+      topicId: topic.id,
+      preparedQuestionId: preparedWithAudio.id,
+      slotRevision: nextRevision,
+      elapsedMs: Date.now() - requestedAt.getTime(),
+    });
+
+    return NextResponse.json({
+      processing: toProcessingStateResponse(finished),
+      prepared_question: toPreparedQuestionResponse(preparedWithAudio),
+      reused: false,
+    });
+  } catch (error) {
+    console.error("[ai prepare-question failed]", {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    if (sessionId) {
+      await prisma.aIProcessingState.upsert({
+        where: { sessionId },
+        create: {
+          sessionId,
+          processingStatus: "failed",
+          processingFinishedAt: new Date(),
+          lastError: error instanceof Error ? error.message : String(error),
+          retryCount: 1,
+        },
+        update: {
+          processingStatus: "failed",
+          processingFinishedAt: new Date(),
+          lastError: error instanceof Error ? error.message : String(error),
+          retryCount: { increment: 1 },
+        },
+      }).catch(() => undefined);
+    }
+
+    return NextResponse.json(
+      { error: "Failed to prepare next question" },
+      { status: 500 },
+    );
+  }
+}
+
+async function loadQuestionHistory(
+  sessionId: string,
+  topicId: string,
+  topicSlotName: string,
+) {
+  const logs = await prisma.aIInterventionLog.findMany({
+    where: {
+      sessionId,
+      type: "NEXT_QUESTION",
+      OR: [
+        { topicId },
+        { topicId: topicSlotName },
+        { metadata: { path: ["targetMainSlotId"], equals: topicId } },
+      ],
+    },
+    orderBy: { generatedAt: "asc" },
+    take: 50,
+    select: {
+      content: true,
+      topicId: true,
+      generatedAt: true,
+      metadata: true,
+    },
+  });
+
+  return logs.map((log) => {
+    const metadata =
+      log.metadata && typeof log.metadata === "object" && !Array.isArray(log.metadata)
+        ? (log.metadata as Record<string, unknown>)
+        : {};
+
+    return {
+      content: log.content,
+      topicId: log.topicId,
+      generatedAt: log.generatedAt.toISOString(),
+      targetMainSlotId:
+        typeof metadata.targetMainSlotId === "string"
+          ? metadata.targetMainSlotId
+          : null,
+      targetSubSlotId:
+        typeof metadata.targetSubSlotId === "string"
+          ? metadata.targetSubSlotId
+          : null,
+      questionPurpose:
+        typeof metadata.questionPurpose === "string"
+          ? metadata.questionPurpose
+          : null,
+    };
+  });
+}
+
+async function prepareAudioForPreparedQuestion(input: {
+  preparedQuestionId: string;
+  sessionId: string;
+  participantCode: string | null;
+  topicId: string;
+  question: string;
+}) {
+  const started = Date.now();
+
+  try {
+    await prisma.preparedQuestion.update({
+      where: { id: input.preparedQuestionId },
+      data: { audioStatus: "generating", audioError: null },
+    });
+    const audio = await getOrCreateTTSAudio({
+      text: input.question,
+      contentType: "question",
+      topicId: input.topicId,
+      sessionId: input.sessionId,
+      participantCode: input.participantCode,
+    });
+
+    return prisma.preparedQuestion.update({
+      where: { id: input.preparedQuestionId },
+      data: {
+        audioStatus: "ready",
+        audioReference: audio.audioReference,
+        audioGeneratedAt: new Date(),
+        audioGenerationMs: audio.generationDurationMs,
+        audioError: null,
+      },
+    });
+  } catch (error) {
+    console.warn("[ai prepare-question tts failed]", {
+      sessionId: input.sessionId,
+      preparedQuestionId: input.preparedQuestionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    return prisma.preparedQuestion.update({
+      where: { id: input.preparedQuestionId },
+      data: {
+        audioStatus: "failed",
+        audioGenerationMs: Date.now() - started,
+        audioError: error instanceof Error ? error.message : String(error),
+      },
+    });
+  }
+}
+
+function toPreparedQuestionResponse(question: {
+  id: string;
+  sessionId: string;
+  topicId: string;
+  topicSlotName: string | null;
+  question: string;
+  transitionPhrase: string;
+  targetMainSlotId: string;
+  targetSubSlotId: string;
+  questionPurpose: string;
+  reasonForSelection: string;
+  basedOnUtteranceId: string | null;
+  slotRevision: number;
+  status: string;
+  audioStatus: string;
+  audioReference: string | null;
+  audioGeneratedAt: Date | null;
+  audioGenerationMs: number | null;
+  audioError: string | null;
+  generatedAt: Date;
+}) {
+  return {
+    id: question.id,
+    session_id: question.sessionId,
+    topic_id: question.topicId,
+    topic_slot_name: question.topicSlotName,
+    question: question.question,
+    transition_phrase: question.transitionPhrase,
+    targetMainSlotId: question.targetMainSlotId,
+    targetSubSlotId: question.targetSubSlotId,
+    questionPurpose: question.questionPurpose,
+    reasonForSelection: question.reasonForSelection,
+    basedOnUtteranceId: question.basedOnUtteranceId,
+    slotRevision: question.slotRevision,
+    status: question.status,
+    audioStatus: question.audioStatus,
+    audioReference: question.audioReference,
+    audioGeneratedAt: question.audioGeneratedAt?.toISOString() ?? null,
+    audioGenerationMs: question.audioGenerationMs,
+    audioError: question.audioError,
+    generated_at: question.generatedAt.toISOString(),
+  };
+}
+
+function toProcessingStateResponse(state: {
+  processingStatus: string;
+  lastProcessedUtteranceId: string | null;
+  lastProcessedAt: Date | null;
+  slotRevision: number;
+  processingStartedAt: Date | null;
+  processingFinishedAt: Date | null;
+  lastError: string | null;
+  retryCount: number;
+}) {
+  return {
+    processingStatus: state.processingStatus,
+    lastProcessedUtteranceId: state.lastProcessedUtteranceId,
+    lastProcessedAt: state.lastProcessedAt?.toISOString() ?? null,
+    slotRevision: state.slotRevision,
+    processingStartedAt: state.processingStartedAt?.toISOString() ?? null,
+    processingFinishedAt: state.processingFinishedAt?.toISOString() ?? null,
+    lastError: state.lastError,
+    retryCount: state.retryCount,
+  };
+}
+
+function requiredString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function optionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
