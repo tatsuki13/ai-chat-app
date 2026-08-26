@@ -82,6 +82,7 @@ type ConversationContext = {
   currentTopicTitle?: string;
   nextTopic?: string;
   nextTopicTitle?: string;
+  useDeterministicQuestionText?: boolean;
 };
 
 const NEXT_QUESTION_RECENT_UTTERANCE_COUNT = 16;
@@ -1030,6 +1031,12 @@ export async function generateNextQuestion(
     context.subSlotStates,
     selectedCandidate,
   );
+  if (context.useDeterministicQuestionText) {
+    return isLegacyDialogueMode()
+      ? fallback
+      : applyUncertaintyNextQuestionPolicy(context, fallback);
+  }
+
   const result = await requestJson<Partial<NextQuestionResult>>(
     SYSTEM_NEXT_QUESTION,
     await buildQuestionPayload(context, selectedCandidate),

@@ -222,17 +222,6 @@ type PreparedQuestion = {
   generated_at: string;
 };
 
-type TTSAudioInfo = {
-  reference: string;
-  cacheKey: string;
-  model: string;
-  voice: string;
-  format: string;
-  byteLength: number;
-  cached: boolean;
-  generationDurationMs: number;
-};
-
 type PrepareQuestionResponse = {
   processing: {
     processingStatus: string;
@@ -259,16 +248,27 @@ const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const TIMER_TICK_MS = 1000;
 const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const PROMPT_ERROR_RESTORE_DELAY_MS = 3000;
-const BACKGROUND_PREPARE_DEBOUNCE_MS = 3500;
-const BACKGROUND_PREPARE_MAX_WAIT_MS = 12000;
-const BACKGROUND_PREPARE_UTTERANCE_THRESHOLD = 3;
+const MIN_UNPROCESSED_UTTERANCES = 3;
+const MIN_UNPROCESSED_CHARACTERS = 150;
+const BACKGROUND_IDLE_DELAY_MS = 10_000;
+const BACKGROUND_COOLDOWN_MS = 30_000;
 const AI_SPEECH_RELEASE_DELAY_MS = 500;
-const TTS_AUDIO_WAIT_MS = 2500;
+const BROWSER_TTS_FALLBACK_ENABLED =
+  process.env.NEXT_PUBLIC_BROWSER_TTS_FALLBACK !== "false";
 const REMOTE_MIC_SESSION_SYNC_MS = 3_000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
 
 let autoSessionStartPromise: Promise<SessionInfo> | null = null;
+
+const TOPIC_AUDIO_MAP: Record<string, string> = {
+  topic_1: "/audio/topics/topic-1.mp3",
+  topic_2: "/audio/topics/topic-2.mp3",
+  topic_3: "/audio/topics/topic-3.mp3",
+  topic_4: "/audio/topics/topic-4.mp3",
+  topic_5: "/audio/topics/topic-5.mp3",
+  topic_6: "/audio/topics/topic-6.mp3",
+};
 
 function createOpeningPrompt(
   topic: (typeof DISCUSSION_TOPICS)[number] = DISCUSSION_TOPICS[0],
@@ -307,7 +307,9 @@ function SessionPageClient() {
   const [utteranceTotal, setUtteranceTotal] = useState(0);
   const [speaker, setSpeaker] = useState<Speaker>("elder");
   const [draft, setDraft] = useState("");
-  const [busyAction, setBusyAction] = useState<ButtonType | "start" | "id" | null>("start");
+  const [busyAction, setBusyAction] = useState<
+    ButtonType | "start" | "id" | "dialogue_start" | null
+  >("start");
   const [promptPanel, setPromptPanel] = useState<PromptPanelState | null>(
     createOpeningPrompt(),
   );
@@ -356,7 +358,6 @@ function SessionPageClient() {
   const [developerSlotError, setDeveloperSlotError] = useState("");
   const [preparedQuestion, setPreparedQuestion] = useState<PreparedQuestion | null>(null);
   const [backgroundProcessingStatus, setBackgroundProcessingStatus] = useState("idle");
-  const [topicAudioById, setTopicAudioById] = useState<Record<string, TTSAudioInfo>>({});
   const [aiSpeechActive, setAiSpeechActive] = useState(false);
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
@@ -384,13 +385,15 @@ function SessionPageClient() {
   const backgroundPreparePromiseRef = useRef<Promise<PrepareQuestionResponse | null> | null>(null);
   const firstUnprocessedUtteranceAtRef = useRef<number | null>(null);
   const pendingBackgroundUtteranceCountRef = useRef(0);
+  const pendingBackgroundCharacterCountRef = useRef(0);
+  const lastBackgroundPrepareAtRef = useRef(0);
   const latestPrepareKeyRef = useRef("");
-  const topicAudioByIdRef = useRef<Record<string, TTSAudioInfo>>({});
   const activeAudioElementRef = useRef<HTMLAudioElement | null>(null);
   const aiSpeechPlaybackRef = useRef<{ sessionId: string; playbackId: string } | null>(null);
 
   const participantCode = session?.participant_code || "未設定";
   const hasParticipantCode = Boolean(session?.participant_code?.trim());
+  const dialogueStarted = Boolean(session?.dialogue_started_at);
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
   const nextTopic = DISCUSSION_TOPICS[currentTopicIndex + 1] ?? null;
   const visibleUtterances = limitUtteranceState(utterances);
@@ -425,7 +428,8 @@ function SessionPageClient() {
     topicStartedAt !== null &&
     completionState === "active" &&
     !busyAction &&
-    !transitionProposal;
+    !transitionProposal &&
+    !aiSpeechActive;
   const remoteMicrophoneConnected =
     remoteMicStatuses.elder.status === "connected" ||
     remoteMicStatuses.caregiver.status === "connected";
@@ -551,7 +555,11 @@ function SessionPageClient() {
 
           if (hasNewPersistedUtterance) {
             markTopicInteractionStarted("remote_voice");
-            scheduleBackgroundQuestionPreparation("remote_utterance_saved");
+            const newText = persistedUtterances
+              .filter((utterance) => !currentUtteranceIds.has(utterance.id))
+              .map((utterance) => utterance.text)
+              .join("\n");
+            scheduleBackgroundQuestionPreparation("remote_utterance_saved", newText);
           }
 
           setSession(detail.session);
@@ -612,43 +620,12 @@ function SessionPageClient() {
   }, [preparedQuestion]);
 
   useEffect(() => {
-    topicAudioByIdRef.current = topicAudioById;
-  }, [topicAudioById]);
-
-  useEffect(() => {
     return () => {
       clearPromptRestoreTimeout();
       clearBackgroundPrepareTimers();
       void cancelActiveAiSpeechPlayback();
     };
   }, []);
-
-  useEffect(() => {
-    if (!session?.id) return;
-
-    for (const topic of DISCUSSION_TOPICS) {
-      void prepareSpokenAudio({
-        sessionId: session.id,
-        participantCode: session.participant_code,
-        topicId: topic.id,
-        contentType: "topic",
-        text: topic.opening_prompt,
-      })
-        .then((audio) => {
-          setTopicAudioById((current) => ({
-            ...current,
-            [topic.id]: audio,
-          }));
-        })
-        .catch((error) => {
-          console.warn("[ai tts topic preload failed]", {
-            sessionId: session.id,
-            topicId: topic.id,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-    }
-  }, [session?.id]);
 
   useEffect(() => {
     if (!session?.id) {
@@ -887,7 +864,7 @@ function SessionPageClient() {
       );
       setUtteranceTotal((current) => current + 1);
       markSessionUsed(session.id);
-      scheduleBackgroundQuestionPreparation("manual_utterance_saved");
+      scheduleBackgroundQuestionPreparation("manual_utterance_saved", text);
       setStatusText("保存済み");
     } catch {
       setDraft(text);
@@ -1061,7 +1038,7 @@ function SessionPageClient() {
       );
       setUtteranceTotal((current) => current + 1);
       markSessionUsed(currentSession.id);
-      scheduleBackgroundQuestionPreparation(`${source}_utterance_saved`);
+      scheduleBackgroundQuestionPreparation(`${source}_utterance_saved`, transcript);
       setStatusText("保存済み");
     } catch (error) {
       console.warn("Voice audio transcription failed", error);
@@ -1117,7 +1094,10 @@ function SessionPageClient() {
           return next;
         });
         setUtteranceTotal((current) => current + 1);
-        scheduleBackgroundQuestionPreparation("pending_utterance_saved");
+        scheduleBackgroundQuestionPreparation(
+          "pending_utterance_saved",
+          localUtterance.text,
+        );
       }
     };
 
@@ -1158,7 +1138,7 @@ function SessionPageClient() {
         ),
       );
       invalidatePreparedQuestion("utterance_edited");
-      scheduleBackgroundQuestionPreparation("utterance_edited");
+      scheduleBackgroundQuestionPreparation("utterance_edited", text);
       setStatusText(getAudioAwareSavedStatus());
     } catch (error) {
       setStatusText("保存エラー");
@@ -1250,11 +1230,14 @@ function SessionPageClient() {
     preparedQuestionRef.current = null;
   }
 
-  function scheduleBackgroundQuestionPreparation(reason: string) {
+  function scheduleBackgroundQuestionPreparation(reason: string, text = "") {
     if (!sessionRef.current || completionState !== "active") return;
+    if (aiSpeechActive) return;
+    if (preparedQuestionRef.current) return;
 
     invalidatePreparedQuestion(reason);
     pendingBackgroundUtteranceCountRef.current += 1;
+    pendingBackgroundCharacterCountRef.current += text.trim().length;
     firstUnprocessedUtteranceAtRef.current ??= Date.now();
 
     if (backgroundPrepareDebounceRef.current !== null) {
@@ -1262,24 +1245,27 @@ function SessionPageClient() {
       backgroundPrepareDebounceRef.current = null;
     }
 
-    const shouldPrepareSoon =
-      pendingBackgroundUtteranceCountRef.current >=
-      BACKGROUND_PREPARE_UTTERANCE_THRESHOLD;
+    const hasEnoughNewInput =
+      pendingBackgroundUtteranceCountRef.current >= MIN_UNPROCESSED_UTTERANCES ||
+      pendingBackgroundCharacterCountRef.current >= MIN_UNPROCESSED_CHARACTERS;
+
+    if (!hasEnoughNewInput) return;
+
+    const now = Date.now();
+    const cooldownRemainingMs = Math.max(
+      0,
+      BACKGROUND_COOLDOWN_MS - (now - lastBackgroundPrepareAtRef.current),
+    );
+    const delayMs = Math.max(BACKGROUND_IDLE_DELAY_MS, cooldownRemainingMs);
 
     backgroundPrepareDebounceRef.current = window.setTimeout(
       () => {
         backgroundPrepareDebounceRef.current = null;
+        if (aiSpeechActive || preparedQuestionRef.current) return;
         void prepareQuestionNow(reason);
       },
-      shouldPrepareSoon ? 0 : BACKGROUND_PREPARE_DEBOUNCE_MS,
+      delayMs,
     );
-
-    if (backgroundPrepareMaxWaitRef.current === null) {
-      backgroundPrepareMaxWaitRef.current = window.setTimeout(() => {
-        backgroundPrepareMaxWaitRef.current = null;
-        void prepareQuestionNow(`${reason}_max_wait`);
-      }, BACKGROUND_PREPARE_MAX_WAIT_MS);
-    }
   }
 
   async function prepareQuestionNow(
@@ -1299,6 +1285,8 @@ function SessionPageClient() {
     clearBackgroundPrepareTimers();
     pendingBackgroundUtteranceCountRef.current = 0;
     firstUnprocessedUtteranceAtRef.current = null;
+    pendingBackgroundCharacterCountRef.current = 0;
+    lastBackgroundPrepareAtRef.current = Date.now();
     latestPrepareKeyRef.current = prepareKey;
     setBackgroundProcessingStatus("updating_slots");
 
@@ -1387,11 +1375,8 @@ function SessionPageClient() {
       contentType: "question",
       topicId: question.topic_id,
       text: question.question,
-      audioReference: question.audioReference,
-      preparedAudioUsed: question.audioStatus === "ready",
-      ttsModel: null,
-      ttsVoice: null,
-      audioGenerationDurationMs: question.audioGenerationMs,
+      audioReference: null,
+      preparedAudioUsed: false,
     });
   }
 
@@ -1401,69 +1386,16 @@ function SessionPageClient() {
     text: string;
     audioReference?: string | null;
     preparedAudioUsed: boolean;
-    ttsModel: string | null;
-    ttsVoice: string | null;
-    audioGenerationDurationMs: number | null;
   }) {
     const currentSession = sessionRef.current;
     const text = input.text.trim();
     if (!currentSession || !text || aiSpeechPlaybackRef.current) return;
 
-    let audioInfo: TTSAudioInfo | null = input.audioReference
-      ? {
-          reference: input.audioReference,
-          cacheKey: "",
-          model: input.ttsModel ?? "",
-          voice: input.ttsVoice ?? "",
-          format: "mp3",
-          byteLength: 0,
-          cached: true,
-          generationDurationMs: input.audioGenerationDurationMs ?? 0,
-        }
-      : null;
-
-    if (!audioInfo) {
-      audioInfo = await withTimeout(
-        prepareSpokenAudio({
-          sessionId: currentSession.id,
-          participantCode: currentSession.participant_code,
-          topicId: input.topicId,
-          contentType: input.contentType,
-          text,
-        }),
-        TTS_AUDIO_WAIT_MS,
-      ).catch((error) => {
-        console.warn("[ai tts on-demand prepare failed]", {
-          sessionId: currentSession.id,
-          contentType: input.contentType,
-          topicId: input.topicId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return null;
-      });
-    }
-
-    if (!audioInfo?.reference) {
-      await writeAiSpeechPlaybackLog({
-        sessionId: currentSession.id,
-        playbackId: crypto.randomUUID(),
-        contentType: input.contentType,
-        topicId: input.topicId,
-        text,
-        playbackStatus: "text_only",
-        preparedAudioUsed: false,
-        ttsModel: input.ttsModel,
-        ttsVoice: input.ttsVoice,
-        audioGenerationDurationMs: input.audioGenerationDurationMs,
-        playbackErrorCode: "tts_unavailable",
-      }).catch(() => undefined);
-      return;
-    }
-
     const playbackId = crypto.randomUUID();
     let playbackStartedAt: string | null = null;
     let playbackEndedAt: string | null = null;
-    let playbackStatus: "completed" | "failed" | "cancelled" = "failed";
+    let playbackStatus: "completed" | "failed" | "cancelled" | "text_only" =
+      "failed";
     let playbackErrorCode: string | null = null;
     aiSpeechPlaybackRef.current = { sessionId: currentSession.id, playbackId };
 
@@ -1476,14 +1408,30 @@ function SessionPageClient() {
       });
       setAiSpeechActive(true);
       playbackStartedAt = new Date().toISOString();
-      const audio = new Audio(audioInfo.reference);
-      activeAudioElementRef.current = audio;
-      audio.volume = 1;
-      await playAudioElement(audio);
-      playbackStatus = "completed";
+      if (input.contentType === "topic" && input.audioReference) {
+        const audio = new Audio(input.audioReference);
+        activeAudioElementRef.current = audio;
+        audio.volume = 1;
+        await playAudioElement(audio);
+        playbackStatus = "completed";
+      } else if (input.contentType === "question" && BROWSER_TTS_FALLBACK_ENABLED) {
+        await playBrowserSpeech(text);
+        playbackStatus = "completed";
+      } else {
+        playbackStatus = "text_only";
+        playbackErrorCode =
+          input.contentType === "topic"
+            ? "static_topic_audio_missing"
+            : "browser_tts_unavailable";
+      }
     } catch (error) {
-      playbackStatus = "failed";
-      playbackErrorCode = error instanceof Error ? error.name || error.message : "playback_failed";
+      playbackStatus = input.contentType === "topic" ? "text_only" : "failed";
+      playbackErrorCode =
+        input.contentType === "topic"
+          ? "static_topic_audio_missing_or_unplayable"
+          : error instanceof Error
+            ? error.name || error.message
+            : "playback_failed";
       console.warn("[ai tts playback failed]", {
         sessionId: currentSession.id,
         contentType: input.contentType,
@@ -1506,11 +1454,13 @@ function SessionPageClient() {
         playbackStatus,
         playbackStartedAt,
         playbackEndedAt,
-        ttsModel: audioInfo.model || input.ttsModel,
-        ttsVoice: audioInfo.voice || input.ttsVoice,
-        preparedAudioUsed: input.preparedAudioUsed || audioInfo.cached,
-        audioGenerationDurationMs:
-          input.audioGenerationDurationMs ?? audioInfo.generationDurationMs,
+        ttsModel:
+          input.contentType === "question"
+            ? "browser-speechSynthesis"
+            : "static-audio",
+        ttsVoice: null,
+        preparedAudioUsed: input.preparedAudioUsed,
+        audioGenerationDurationMs: null,
         playbackErrorCode,
       }).catch((error) => {
         console.warn("[ai speech-state release failed]", error);
@@ -1543,16 +1493,18 @@ function SessionPageClient() {
   }
 
   function playTopicPrompt(topic: (typeof DISCUSSION_TOPICS)[number]) {
-    const topicAudio = topicAudioByIdRef.current[topic.id];
+    const audioReference = TOPIC_AUDIO_MAP[topic.id] ?? null;
+    if (!audioReference) {
+      console.info("[ai topic audio missing]", {
+        topicId: topic.id,
+      });
+    }
     void playSpokenContent({
       contentType: "topic",
       topicId: topic.id,
       text: topic.opening_prompt,
-      audioReference: topicAudio?.reference ?? null,
-      preparedAudioUsed: Boolean(topicAudio),
-      ttsModel: topicAudio?.model ?? null,
-      ttsVoice: topicAudio?.voice ?? null,
-      audioGenerationDurationMs: topicAudio?.generationDurationMs ?? null,
+      audioReference,
+      preparedAudioUsed: Boolean(audioReference),
     });
   }
 
@@ -1856,6 +1808,47 @@ function SessionPageClient() {
       });
     } finally {
       setRemoteMicConnecting(false);
+    }
+  }
+
+  async function handleStartDialogue() {
+    if (!session || busyAction || dialogueStarted) return;
+
+    if (!hasParticipantCode) {
+      setStatusText("参加者ID未設定");
+      showTemporaryErrorPrompt({
+        title: "参加者IDを設定してください",
+        body: "セッション開始前に、参加者IDを登録してください。",
+        tone: "error",
+      });
+      return;
+    }
+
+    setBusyAction("dialogue_start");
+    setStatusText("開始中");
+    setIdError("");
+
+    try {
+      const updated = await startDialogueSession(session.id);
+      sessionRef.current = updated;
+      setSession(updated);
+      const startedAt = updated.dialogue_started_at
+        ? new Date(updated.dialogue_started_at).getTime()
+        : Date.now();
+      startTopicTimerAt(startedAt, "text");
+      setPromptPanel(createOpeningPrompt(currentTopic));
+      playTopicPrompt(currentTopic);
+      await handleConnectRemoteMics();
+      setStatusText("対話中");
+    } catch {
+      setStatusText("開始エラー");
+      showTemporaryErrorPrompt({
+        title: "セッションを開始できません",
+        body: "データベース接続またはスマートフォンマイク接続を確認してください。",
+        tone: "error",
+      });
+    } finally {
+      setBusyAction(null);
     }
   }
 
@@ -2183,14 +2176,17 @@ function SessionPageClient() {
   function markTopicInteractionStarted(source: TopicTimerStartSource) {
     if (!sessionRef.current || topicStartedAtRef.current !== null) return;
 
-    const now = Date.now();
-    topicStartedAtRef.current = now;
+    startTopicTimerAt(Date.now(), source);
+  }
+
+  function startTopicTimerAt(startedAt: number, source: TopicTimerStartSource) {
+    topicStartedAtRef.current = startedAt;
     timerPausedStartedAtRef.current = null;
     timerRunningRef.current = true;
     setTopicPausedMs(0);
     setTopicTimerSource(source);
-    setTopicStartedAt(now);
-    setTimerNow(now);
+    setTopicStartedAt(startedAt);
+    setTimerNow(Date.now());
   }
 
   function advanceTopic() {
@@ -2299,14 +2295,29 @@ function SessionPageClient() {
                       </button>
                     </div>
                   ) : (
-                    <button
-                      type="button"
-                      onClick={startEditingId}
-                      disabled={!session || Boolean(busyAction)}
-                      className="max-w-[260px] truncate rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[12px] font-black text-stone-700 shadow-sm disabled:text-stone-400"
-                    >
-                      {participantCode}
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={startEditingId}
+                        disabled={!session || Boolean(busyAction)}
+                        className="max-w-[260px] truncate rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[12px] font-black text-stone-700 shadow-sm disabled:text-stone-400"
+                      >
+                        {participantCode}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleStartDialogue()}
+                        disabled={
+                          !session ||
+                          Boolean(busyAction) ||
+                          !hasParticipantCode ||
+                          dialogueStarted
+                        }
+                        className="min-h-8 rounded-md border border-emerald-200 bg-emerald-100 px-3 text-[12px] font-black text-emerald-900 shadow-sm active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
+                      >
+                        セッション開始
+                      </button>
+                    </>
                   )}
                 </div>
                 {idError ? (
@@ -3943,6 +3954,17 @@ async function updateSessionDisplayId(
   return data.session;
 }
 
+async function startDialogueSession(sessionId: string): Promise<SessionInfo> {
+  const data = await patchJson<{ session: SessionInfo }>(
+    `/api/session/${encodeURIComponent(sessionId)}`,
+    {
+      start_dialogue: true,
+    },
+  );
+
+  return data.session;
+}
+
 async function startSession(): Promise<SessionInfo> {
   const data = await postJson<{ session: SessionInfo }>("/api/session/start", {
     condition: "mvp",
@@ -4010,24 +4032,6 @@ async function displayPreparedQuestion(
   });
 }
 
-async function prepareSpokenAudio(input: {
-  sessionId: string;
-  participantCode: string | null;
-  topicId: string | null;
-  contentType: "topic" | "question";
-  text: string;
-}) {
-  const data = await postJson<{ audio: TTSAudioInfo }>("/api/ai/tts", {
-    sessionId: input.sessionId,
-    participantCode: input.participantCode,
-    topicId: input.topicId,
-    contentType: input.contentType,
-    text: input.text,
-  });
-
-  return data.audio;
-}
-
 async function updateAiSpeechState(input: {
   sessionId: string;
   action: "start" | "end" | "cancel";
@@ -4045,27 +4049,6 @@ async function updateAiSpeechState(input: {
   playbackErrorCode?: string | null;
 }) {
   return postJson("/api/ai/speech-state", input);
-}
-
-async function writeAiSpeechPlaybackLog(input: {
-  sessionId: string;
-  playbackId: string;
-  contentType: "topic" | "question";
-  topicId?: string | null;
-  text?: string;
-  playbackStatus: "started" | "completed" | "failed" | "cancelled" | "text_only";
-  playbackStartedAt?: string | null;
-  playbackEndedAt?: string | null;
-  ttsModel?: string | null;
-  ttsVoice?: string | null;
-  preparedAudioUsed?: boolean;
-  audioGenerationDurationMs?: number | null;
-  playbackErrorCode?: string | null;
-}) {
-  return updateAiSpeechState({
-    ...input,
-    action: "cancel",
-  });
 }
 
 function playAudioElement(audio: HTMLAudioElement) {
@@ -4099,15 +4082,33 @@ function playAudioElement(audio: HTMLAudioElement) {
   });
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
-  return new Promise<T>((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => {
-      reject(new Error("timeout"));
-    }, timeoutMs);
+function playBrowserSpeech(text: string) {
+  return new Promise<void>((resolve, reject) => {
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+      reject(new Error("browser_tts_unavailable"));
+      return;
+    }
 
-    promise
-      .then(resolve, reject)
-      .finally(() => window.clearTimeout(timeoutId));
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voices = window.speechSynthesis.getVoices();
+    const japaneseVoice =
+      voices.find((voice) => voice.lang.toLowerCase().startsWith("ja")) ??
+      voices.find((voice) => /japanese|japan|日本/i.test(voice.name)) ??
+      null;
+
+    if (japaneseVoice) {
+      utterance.voice = japaneseVoice;
+    }
+    utterance.lang = "ja-JP";
+    utterance.rate = 0.88;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+    utterance.onend = () => resolve();
+    utterance.onerror = (event) => {
+      reject(new Error(event.error || "browser_tts_error"));
+    };
+    window.speechSynthesis.speak(utterance);
   });
 }
 

@@ -9,7 +9,6 @@ import {
   generateNextQuestion,
   updateSlotStateBundleFromConversation,
 } from "../../../../lib/ai";
-import { getOrCreateTTSAudio } from "../../../../lib/ai/tts";
 import { prisma } from "../../../../lib/prisma";
 
 export const runtime = "nodejs";
@@ -142,6 +141,7 @@ export async function POST(request: Request) {
       currentTopicTitle,
       currentTopicQuestionCount: aiQuestionLogs.length,
       aiQuestionHistory: aiQuestionLogs,
+      useDeterministicQuestionText: true,
     });
 
     await prisma.preparedQuestion.updateMany({
@@ -191,16 +191,11 @@ export async function POST(request: Request) {
         basedOnUtteranceId: latestUtterance?.id ?? null,
         slotRevision: nextRevision,
         status: "prepared",
+        audioStatus: "expired",
+        audioError: "openai_tts_disabled_for_background_preparation",
         generatedAt: new Date(),
         expiresAt: new Date(Date.now() + PREPARED_QUESTION_TTL_MS),
       },
-    });
-    const preparedWithAudio = await prepareAudioForPreparedQuestion({
-      preparedQuestionId: prepared.id,
-      sessionId,
-      participantCode: refreshedContext.session.participantCode,
-      topicId: topic.id,
-      question: result.question,
     });
     const finished = await prisma.aIProcessingState.update({
       where: { sessionId },
@@ -214,14 +209,14 @@ export async function POST(request: Request) {
     console.info("[ai prepare-question ready]", {
       sessionId,
       topicId: topic.id,
-      preparedQuestionId: preparedWithAudio.id,
+      preparedQuestionId: prepared.id,
       slotRevision: nextRevision,
       elapsedMs: Date.now() - requestedAt.getTime(),
     });
 
     return NextResponse.json({
       processing: toProcessingStateResponse(finished),
-      prepared_question: toPreparedQuestionResponse(preparedWithAudio),
+      prepared_question: toPreparedQuestionResponse(prepared),
       reused: false,
     });
   } catch (error) {
@@ -305,56 +300,6 @@ async function loadQuestionHistory(
           : null,
     };
   });
-}
-
-async function prepareAudioForPreparedQuestion(input: {
-  preparedQuestionId: string;
-  sessionId: string;
-  participantCode: string | null;
-  topicId: string;
-  question: string;
-}) {
-  const started = Date.now();
-
-  try {
-    await prisma.preparedQuestion.update({
-      where: { id: input.preparedQuestionId },
-      data: { audioStatus: "generating", audioError: null },
-    });
-    const audio = await getOrCreateTTSAudio({
-      text: input.question,
-      contentType: "question",
-      topicId: input.topicId,
-      sessionId: input.sessionId,
-      participantCode: input.participantCode,
-    });
-
-    return prisma.preparedQuestion.update({
-      where: { id: input.preparedQuestionId },
-      data: {
-        audioStatus: "ready",
-        audioReference: audio.audioReference,
-        audioGeneratedAt: new Date(),
-        audioGenerationMs: audio.generationDurationMs,
-        audioError: null,
-      },
-    });
-  } catch (error) {
-    console.warn("[ai prepare-question tts failed]", {
-      sessionId: input.sessionId,
-      preparedQuestionId: input.preparedQuestionId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-
-    return prisma.preparedQuestion.update({
-      where: { id: input.preparedQuestionId },
-      data: {
-        audioStatus: "failed",
-        audioGenerationMs: Date.now() - started,
-        audioError: error instanceof Error ? error.message : String(error),
-      },
-    });
-  }
 }
 
 function toPreparedQuestionResponse(question: {

@@ -29,6 +29,12 @@ export async function POST(request: Request) {
   if (!active || active.sessionId !== sessionId || active.endedAt) {
     return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
   }
+  if (!active.dialogueStartedAt) {
+    return NextResponse.json(
+      { error: "dialogue has not started" },
+      { status: 409 },
+    );
+  }
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {

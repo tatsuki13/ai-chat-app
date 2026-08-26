@@ -87,6 +87,44 @@ export async function PATCH(request: Request, context: RouteContext) {
     const { id } = await context.params;
     const body = await request.json();
 
+    const shouldStartDialogue = Boolean(
+      body.start_dialogue ?? body.startDialogue,
+    );
+
+    if (
+      shouldStartDialogue &&
+      !("participant_code" in body) &&
+      !("participantCode" in body)
+    ) {
+      const existing = await prisma.session.findUnique({
+        where: { id },
+      });
+
+      if (!existing) {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+
+      const session = existing.dialogueStartedAt
+        ? existing
+        : await prisma.session.update({
+            where: { id },
+            data: {
+              dialogueStartedAt: new Date(),
+            },
+          });
+
+      return NextResponse.json({
+        session: {
+          id: session.id,
+          participant_code: session.participantCode,
+          condition: session.condition,
+          started_at: session.startedAt.toISOString(),
+          dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
+          ended_at: session.endedAt?.toISOString() ?? null,
+        },
+      });
+    }
+
     if (!("participant_code" in body) && !("participantCode" in body)) {
       return NextResponse.json(
         { error: "participant_code is required" },

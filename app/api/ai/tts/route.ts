@@ -5,6 +5,16 @@ export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
+    if (process.env.OPENAI_TTS_API_ENABLED !== "true") {
+      return NextResponse.json(
+        {
+          error: "OpenAI TTS is disabled",
+          code: "openai_tts_disabled",
+        },
+        { status: 503 },
+      );
+    }
+
     const body = (await request.json().catch(() => null)) as {
       sessionId?: unknown;
       participantCode?: unknown;
@@ -43,13 +53,35 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
+    const status =
+      typeof error === "object" &&
+      error !== null &&
+      "status" in error &&
+      typeof error.status === "number"
+        ? error.status
+        : 500;
+    const code =
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+        ? error.code
+        : null;
     console.error("[ai tts prepare failed]", {
       error: error instanceof Error ? error.message : String(error),
+      status,
+      code,
     });
 
     return NextResponse.json(
-      { error: "Failed to prepare TTS audio" },
-      { status: 500 },
+      {
+        error:
+          code === "credit_balance_exhausted"
+            ? "OpenAI TTS credit balance exhausted"
+            : "Failed to prepare TTS audio",
+        code,
+      },
+      { status: status === 429 ? 503 : 500 },
     );
   }
 }
