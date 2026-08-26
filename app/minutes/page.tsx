@@ -261,12 +261,10 @@ function MinutesPageClient() {
     <MinutesShell>
       <MinutesPrintStyles />
       <div className="print-hidden mb-4 flex flex-wrap items-center justify-between gap-3">
-        <a
-          href={`/session?sessionId=${encodeURIComponent(sessionId)}`}
+        <BackToPreviousPageButton
+          sessionId={sessionId}
           className="rounded-md border border-stone-300 bg-white px-3 py-2 text-[13px] font-black text-stone-700"
-        >
-          セッションへ戻る
-        </a>
+        />
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[12px] font-bold text-stone-500">
             印刷画面から「PDFとして保存」を選択できます。
@@ -486,14 +484,40 @@ function MissingNarrativeNotice(props: { sessionId: string }) {
         この議事録データには根拠となった発言だけが保存されており、「現在の考え」や「その背景・理由」などの要約本文が入っていません。
         セッション画面に戻って、議事録をもう一度生成してください。
       </p>
-      <a
-        href={`/session?sessionId=${encodeURIComponent(props.sessionId)}`}
+      <BackToPreviousPageButton
+        sessionId={props.sessionId}
         className="mt-4 inline-flex rounded-md bg-stone-950 px-4 py-2 text-[13px] font-black text-white"
-      >
-        セッションへ戻る
-      </a>
+      />
     </section>
   );
+}
+
+function BackToPreviousPageButton(props: { sessionId: string; className: string }) {
+  return (
+    <button
+      type="button"
+      onClick={() => navigateBackOrSession(props.sessionId)}
+      className={props.className}
+    >
+      ページを戻る
+    </button>
+  );
+}
+
+function navigateBackOrSession(sessionId: string) {
+  const fallbackPath = `/session?sessionId=${encodeURIComponent(sessionId)}`;
+  const referrer = document.referrer;
+  const canUseHistory =
+    window.history.length > 1 &&
+    referrer &&
+    new URL(referrer).origin === window.location.origin;
+
+  if (canUseHistory) {
+    window.history.back();
+    return;
+  }
+
+  window.location.assign(fallbackPath);
 }
 
 function TextSection(props: {
