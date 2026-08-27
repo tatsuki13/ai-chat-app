@@ -4,17 +4,19 @@ const UTTERANCE_SOURCES = new Set([
   "manual",
   "local_voice",
   "remote_realtime",
+  "remote_local_asr",
 ]);
 
 export function normalizeUtteranceSource(
   value: unknown,
-  fallback: "manual" | "local_voice" | "remote_realtime",
+  fallback: "manual" | "local_voice" | "remote_realtime" | "remote_local_asr",
 ) {
   if (typeof value !== "string") return fallback;
 
   const trimmed = value.trim();
 
   if (trimmed.startsWith("remote_realtime:")) return trimmed;
+  if (trimmed.startsWith("remote_local_asr:")) return trimmed;
   if (UTTERANCE_SOURCES.has(trimmed)) return trimmed;
 
   return fallback;

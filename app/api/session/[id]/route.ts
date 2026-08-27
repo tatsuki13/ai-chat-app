@@ -203,7 +203,6 @@ export async function DELETE(_request: Request, context: RouteContext) {
           select: {
             utterances: true,
             finalMinutes: true,
-            remoteMicTokens: true,
           },
         },
       },
@@ -215,8 +214,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
     if (
       session._count.utterances > 0 ||
-      session._count.finalMinutes > 0 ||
-      session._count.remoteMicTokens > 0
+      session._count.finalMinutes > 0
     ) {
       return NextResponse.json({
         discarded: false,
