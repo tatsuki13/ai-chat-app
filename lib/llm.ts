@@ -71,6 +71,7 @@ import {
 
 type ConversationContext = {
   utterances: ConversationUtterance[];
+  utterancesToClassify?: ConversationUtterance[];
   slotStates: AcpSlotState[];
   subSlotStates?: StoredSubSlotState[];
   aiQuestionHistory?: QuestionHistoryItem[];
@@ -114,144 +115,131 @@ type UncertainResponse = {
 const AI_POLICY_VERSION = "hitl-acp-v1";
 
 const COMMON_AI_POLICY = [
-  "You are a third-party support assistant for a human-led family ACP conversation.",
-  "Do not become a conversation partner for the elder or caregiver.",
-  "Only support: question suggestion, topic transition suggestion, completion check, minutes generation, and slot state updates.",
-  "Do not provide medical, caregiving, legal, moral, or value judgments.",
-  "Do not infer facts that are not present in the saved utterance log.",
-  "Do not invent ACP slots, topics, utterances, speakers, or slot statuses.",
-  "Use only the provided acp_slots and available_topics when choosing target_slot or next_topic.",
-  "A short uncertainty or deferral answer is valid ACP information; do not keep asking the same question mechanically.",
-  "Return only the requested JSON shape.",
+  "あなたは、人間主導の家族ACP対話を支援する第三者的な補助AIです。",
+  "本人や介護者の会話相手にはならず、会話の主体は人間に残してください。",
+  "支援範囲は、質問候補、話題遷移候補、終了確認、議事録生成、slot状態更新に限ります。",
+  "医療、介護、法律、倫理、価値観について判断や助言をしないでください。",
+  "保存済みの発話ログに存在しない事実を推測しないでください。",
+  "ACP slot、topic、utterance、speaker、slot statusを新しく作らないでください。",
+  "target_slotやnext_topicを選ぶ場合は、必ず提供されたacp_slotsとavailable_topicsだけを使用してください。",
+  "短い不明・保留の回答も有効なACP情報です。同じ質問を機械的に繰り返さないでください。",
+  "指定されたJSON構造だけを返してください。",
 ].join("\n");
 
 const CAREGIVER_INTERPRETATION_AGREEMENT_PREFIX = "介護者解釈に同意: ";
 
 const SYSTEM_NEXT_QUESTION = [
-  "あなたはACP対話を支援するAIです。",
-  "あなたの役割は、会話を支配することではなく、介護者が自然に次の質問を行えるように、現在の文脈に最も合う質問を1つだけ生成することです。",
-  "質問選択の主軸は current_topic です。ACP全体の未充足スロットは補助情報として扱ってください。",
-  "通常の質問候補生成では question_scope に含まれる現在テーマのメインスロット、配下サブスロット、関連する保留項目だけを参照してください。",
-  "question_scope.allSlotReferenceUsed は false である必要があります。将来テーマや現在テーマと無関係な未充足スロットを質問候補に含めないでください。",
-  "研究上の評価単位は research_themes の6Themeです。available_topics は画面遷移用の話題であり、研究Themeそのものではありません。",
-  "current_topic.aspects は記録整理と質問生成の補助であり、質問ノルマではありません。",
-  "current_topic.core_aspectsを優先し、optional_aspectsを埋めるためだけの質問は生成しないでください。",
-  "本人が未検討・不明・言語化困難・回答拒否を示した場合は有効な回答状態として扱い、追及しないでください。",
-  "同じテーマで追加質問は最大1回までとし、同じ意味の質問を言い換えて繰り返さないでください。",
-  "target_slot には acp_slots に含まれるACPスロットだけを指定してください。「未解決課題」は指定してはいけません。",
-  "current_topic と無関係な未充足スロットへ急に移らないでください。",
-  "未充足スロットを機械的に埋めるのではなく、直前の会話から自然につながる質問を選んでください。",
-  "本人が「特にない」「今はない」「思いつかない」などと答えた場合、それを有効な回答として受け止め、同じ直接質問を繰り返さないでください。",
-  "その話題を続ける必要がある場合は、「大切にしていることはありますか」の言い換えではなく、最近の出来事、嫌だったこと、避けたいこと、時間の使い方など具体的な別角度にしてください。",
-  "質問は高齢者を責めず、答えやすく、介護者がそのまま読み上げられる日本語にしてください。",
-  "重すぎる話題へ急に飛ばず、既に十分話されている内容を繰り返さないでください。",
-  "next_question_input.askableSubSlots に含まれる mainSlotId/subSlotId の組み合わせだけを targetMainSlotId/targetSubSlotId に指定してください。",
-  "askableSubSlots は、アプリケーション側が現在テーマ内かつ直近発話と自然に関連すると判断した候補です。askableSubSlots が空の場合は question を null、no_relevant_followup を true にしてください。",
-  "未確認であることだけを理由に質問してはいけません。直近発話や会話文脈と自然につながる候補だけを質問してください。",
-  "質問生成処理では次テーマへの遷移を実行・提案しないでください。関連候補がなければ追加質問なしとして返してください。",
-  "出力はJSONのみとしてください。",
-  "",
-  "出力形式:",
-  "Use next_question_input.slotBackedMemory as the stable record of what has already been captured in slots.",
-  "Use next_question_input.unassignedRecentUtterances as possible conversational cues, but do not treat them as confirmed slot content unless the utterance itself clearly supports the question.",
-  "When slotBackedMemory and recentUtterances conflict, prefer slotBackedMemory for coverage decisions and recentUtterances for natural wording.",
-  "Use next_question_input.aiQuestionHistory and currentTopicQuestionCount to avoid repeated AI questions in the same topic.",
-  "Use minutesReadiness and followUpNeed to avoid mechanical slot filling. required means needed for a grounded minutes record, helpful means useful only if it naturally follows, none must not be asked.",
-  "Prefer a staged flow: current_thought first, then background_reason, then conditions_specificity. Do not force every stage when the elder has declined, has not considered it, or cannot verbalize it.",
-  "If askableSubSlots is empty, return question null and no_relevant_followup true. Do not suggest a topic transition from question generation.",
-  "Generate exactly one short, natural Japanese question for next_question_input.selectedQuestionTarget. Do not ask about any other sub-slot or purpose.",
+  "あなたはACP対話を支援するAIです。会話を主導せず、介護者がそのまま読み上げられる、文脈に合った答えやすい質問を1つだけ生成してください。",
+  "【参照範囲】",
+  "質問選択はcurrent_topicを主軸とし、ACP全体の未充足状態は補助情報に限ります。",
+  "research_themesの6Themeが研究上の評価単位です。available_topicsは画面遷移用であり、研究Themeではありません。",
+  "通常はquestion_scope内の現在テーマ、その配下サブスロット、関連する保留項目だけを参照してください。",
+  "question_scope.allSlotReferenceUsedは必ずfalseとし、将来テーマや現在テーマと無関係な未充足スロットを候補に含めないでください。",
+  "current_topic.aspectsは記録・質問生成の補助であり、質問ノルマではありません。core_aspectsを優先し、optional_aspectsを埋めるためだけに質問しないでください。",
+  "【質問対象】",
+  "targetMainSlotId/targetSubSlotIdには、next_question_input.askableSubSlots内の組み合わせだけを指定してください。",
+  "askableSubSlotsは、アプリが現在テーマ内かつ直近発話と自然に関連すると判断した候補です。未確認という理由だけで質問してはいけません。",
+  "next_question_input.selectedQuestionTargetだけを対象にし、他のsub-slotや目的を質問に含めないでください。",
+  "target_slotにはacp_slots内のACPスロットだけを指定し、「未解決課題」は指定しないでください。",
+  "【質問選択】",
+  "未充足スロットを機械的に埋めず、直前の発話から自然につながる質問を選んでください。",
+  "minutesReadinessとfollowUpNeedを参照してください。requiredは根拠ある議事録に必要、helpfulは自然につながる場合のみ質問可能、noneは質問禁止です。",
+  "原則としてcurrent_thought、background_reason、conditions_specificityの順に優先してください。ただし、回答状態に反して無理に埋めないでください。",
+  "重い話題や無関係な未充足スロットへ急に移らず、既に十分話された内容を繰り返さないでください。",
+  "【回答状態と重複防止】",
+  "未検討、不明、言語化困難、回答拒否、「特にない」「今はない」「思いつかない」なども有効な回答として扱い、同じ直接質問を追及・反復しないでください。",
+  "next_question_input.aiQuestionHistoryとcurrentTopicQuestionCountを参照し、同じテーマでの追加質問は最大1回としてください。同じ意味の言い換えも反復に含みます。",
+  "続ける場合は同じ質問の言い換えではなく、最近の出来事、嫌だったこと、避けたいこと、時間の使い方など、具体的な別角度から尋ねてください。",
+  "【会話情報の扱い】",
+  "next_question_input.slotBackedMemoryはslotに保存済みの安定した記録として扱ってください。",
+  "next_question_input.unassignedRecentUtterancesは会話の流れにのみ利用し、明確な根拠がない限り確定したslot内容として扱わないでください。",
+  "両者が食い違う場合、充足判定にはslotBackedMemory、質問文の自然さにはunassignedRecentUtterancesを優先してください。",
+  "【質問なしの条件】",
+  "askableSubSlotsが空、または自然に関連する候補がない場合は、questionをnull、no_relevant_followupをtrueにしてください。",
+  "質問生成処理では、次テーマへの遷移を実行・提案しないでください。",
+  "高齢者を責めず、短く自然な日本語で質問してください。出力は次のJSONのみとしてください。",
   '{"question":"... | null","transition_phrase":"...","target_slot":"...","targetMainSlotId":"...","targetSubSlotId":"...","questionPurpose":"elicit_preference | ask_reason | ask_example | ask_condition | clarify | resolve_conflict","reasonForSelection":"...","reason":"...","sensitivity":"low | medium | high","no_relevant_followup":false}',
 ].join("\n");
 
 const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
-  "あなたはACP対話ログの発話を、固定されたメインスロット・サブスロット定義へ分類するAIです。",
-  "あなたの役割は意味分類だけです。スロット状態の確定、保存可否、状態遷移、再質問可否はコード側が行います。",
-  "提供された mainSlotId と subSlotId だけを使用してください。新しいID、スロット名、類似名、別名を作ってはいけません。",
-  "発話内容を要約・正規化して正式な内容として返してはいけません。",
-  "根拠は必ず conversation_log に存在する utterance.id で返してください。発話IDがない根拠は返さないでください。",
-  "一つの発話につき分類は最大 maxClassificationsPerUtterance 件までにしてください。該当しない発話は unmatchedUtteranceIds に入れてください。",
-  "介護者の解釈だけを本人意思にしないでください。介護者要約に本人が明確に同意した場合のみ、介護者要約発話IDと本人同意発話IDを両方 evidenceUtteranceIds に含めてください。",
-  "Do not classify caregiver speech alone as the elder's preference. If caregiver speech is used as evidence, evidenceUtteranceIds must also include a nearby later elder agreement or elaboration utterance.",
-  "A single elder utterance may support multiple aspects or themes. Return every supported classification, up to maxClassificationsPerUtterance, instead of forcing a single best aspect.",
-  "Do not decide final slot completion or stored response state. Extract only observable evidence facts from this conversation turn.",
-  "Set specificContentPresent true when the requested sub-slot content itself is clearly stated, even if reasons or conditions are not stated.",
-  "Do not confuse answer depth with whether the person answered the question. A short clear preference is still specific content.",
-  "Ignore currentSubSlotStates when extracting evidence. Use only the conversation_log evidence for this classification pass.",
-  "For caregiver-only reports, return evidenceType caregiver_report_only, but do not treat it as confirmed elder preference.",
-  'Use this output shape: {"classifications":[{"mainSlotId":"...","subSlotId":"...","relevantMentionPresent":true,"responsePresent":true,"specificContentPresent":true,"reasonPresent":false,"conditionPresent":false,"examplePresent":false,"ambiguityPresent":false,"conflictPresent":false,"responseMeaning":"preference_expressed | explicit_none | not_considered | unable_to_verbalize | declined | other_response | unknown","evidenceType":"direct_elder_statement | elder_confirmation | caregiver_report_with_elder_confirmation | caregiver_report_only | shared_statement | unknown","evidenceUtteranceIds":["..."],"classificationNote":"optional"}],"unmatchedUtteranceIds":["..."]}',
-  "completion、responseState、reasonCode は出力しないでください。これらはコード側で導出します。",
-  "出力はJSONのみとしてください。",
+ "あなたはACP対話ログの発話を、提供された固定のメインスロット・サブスロットへ意味分類するAIです。",
+  "【役割】",
+  "conversation_logから観察できるevidence事実だけを抽出してください。",
+  "slot completion、responseState、reasonCode、保存可否、状態遷移、再質問可否はコード側で決定するため、出力しないでください。",
+  "発話を要約・正規化し、正式なslot内容として返してはいけません。",
+  "evidence抽出ではcurrentSubSlotStatesを無視し、conversation_logだけを根拠にしてください。",
+  "【分類】",
+  "提供されたmainSlotIdとsubSlotIdだけを使用し、新しいID、スロット名、類似名、別名を作らないでください。",
+  "1発話当たりの分類は最大maxClassificationsPerUtterance件です。複数のaspectやthemeを支える場合は、この上限内ですべて返してください。",
+  "分類できない発話はunmatchedUtteranceIdsに入れてください。",
+  "根拠にはconversation_logに存在するutterance.idだけを使用し、evidenceUtteranceIdsに含めてください。",
+  "【内容の判定】",
+  "対象sub-slotの内容が明示されていれば、理由や条件がなくてもspecificContentPresentをtrueにしてください。",
+  "回答の深さと回答の有無を区別し、短くても明確な希望はspecific contentとして扱ってください。",
+  "【介護者発話】",
+  "介護者の解釈や発話だけを本人の意思・希望として分類しないでください。",
+  "介護者発話だけによる報告はevidenceTypeをcaregiver_report_onlyとし、本人の確定した希望として扱わないでください。",
+  "介護者発話を本人の意思のevidenceに使えるのは、近接する本人の明確な同意または補足がある場合だけです。その場合は介護者発話と本人発話の両IDをevidenceUtteranceIdsに含めてください。",
+  "次のJSON形式のみを返してください。",
+  '{"classifications":[{"mainSlotId":"...","subSlotId":"...","relevantMentionPresent":true,"responsePresent":true,"specificContentPresent":true,"reasonPresent":false,"conditionPresent":false,"examplePresent":false,"ambiguityPresent":false,"conflictPresent":false,"responseMeaning":"preference_expressed | explicit_none | not_considered | unable_to_verbalize | declined | other_response | unknown","evidenceType":"direct_elder_statement | elder_confirmation | caregiver_report_with_elder_confirmation | caregiver_report_only | shared_statement | unknown","evidenceUtteranceIds":["..."],"classificationNote":"optional"}],"unmatchedUtteranceIds":["..."]}',
 ].join("\n");
 
 
 const SYSTEM_FINAL_MINUTES_FROM_STRUCTURED = [
-  "あなたはACPの話し合い記録を作成するシステムです。",
-  "添付PDFと同じ考え方で、短い全体概要、テーマごとの詳細、必要な整理枠、最後に根拠発言という構成を守ってください。",
-  "今回の目的は情報量を減らすことではありません。ACP対話で得られた情報を、意味に応じて適切なセクションへ配置してください。",
-  "入力されたslot/sub-slot/aspect情報と根拠発話だけを使用してください。入力にない事実、希望、理由、人物関係、医療判断を追加してはいけません。",
-  "overall_summaryは「今回の話し合いから見えてきたこと」に表示する短い概要です。2〜4項目程度、1項目は1〜2文程度にしてください。全sub-slot、条件、迷い、未決定、根拠発話、次回確認事項をここへ詰め込まないでください。",
-  "overall_summaryに書いた内容でも、各テーマの詳細から削除してはいけません。overall_summaryは入口であり、theme sectionが正式な記録です。",
-  "各テーマでは、取得済みのslot/sub-slot/aspectを参照し、以下へ分けて記録してください: currentThought, background, conditions, uncertainties, tensions, confirmationNeeded。",
-  "currentThoughtは、そのテーマの中心的内容です。主にcore sub-slot、本人の明確な希望、大切にしていること、避けたいこと、比較的明確に語られている考えを2〜5文程度で書いてください。テーマ内の情報すべてをcurrentThoughtへ押し込まないでください。",
-  "backgroundは、本人がなぜそう考えているか、生活歴、人との関係、感情、これまでの経験が語られている場合に書いてください。根拠がなければnullにしてください。",
-  "conditionsは、できる間はしたい、重い作業は難しい、状況による、全部今まで通りでなくてもよい等、条件によって変わる内容を書いてください。",
-  "uncertaintiesは、まだ考えていない、まだ決めていない、今は分からない、状況による、その時にならないと分からない等を、欠損ではなく本人の意思形成状態として書いてください。",
-  "tensionsは、本人の中にAを大切にしたい一方でBも気になる、という複数の思いがある場合に書いてください。一方へ統合しないでください。",
-  "confirmationNeededは、発言同士の意味が一致しない、slotと発言が一致しない、本人の発言だけでは複数解釈可能、今回だけでは確定できない、相談相手と代理意思決定者が混在している場合に書いてください。本人の葛藤と記録上の確認事項を混同しないでください。",
-  "会話の冗長表現は整理して構いませんが、具体的な生活行動、人との関係、本人の理由、避けたいこと、条件、迷い、未決定、家族への配慮、支援への考え、意思決定についての考えを削除してはいけません。",
-  "現在の考え、背景・理由、条件、未決定、同時にある思い、確認事項は、発言原文をそのまま並べず、医療・介護従事者が読みやすい第三者記録文として書いてください。",
-  "各生成文章には必ずsourceUtteranceIdsを付与してください。sourceUtteranceIdsで指定した発話から直接支持できない内容は書かないでください。",
-  "根拠がない場合は、文章を作らずnullまたは空配列にしてください。",
-  "JSON以外の文章を出力しないでください。",
-  "あなたの役割は、ACP対話を浅く要約することではありません。slot / sub-slot / evidenceを材料に、医療・介護従事者が後から内容を理解できる記録文へ整理してください。",
-  "sub-slot名や分類名を本文にそのまま書かないでください。「本人はこのテーマについて考えを話している」のような抽象的な説明文も禁止です。実際に本人が何を話したのかを書いてください。",
-  "currentThoughtには、本人の現在の希望、大切にしていること、続けたいこと、避けたいこと、支援に関する比較的明確な考えを入れてください。",
-  "backgroundには、なぜそう考えるのか、生活歴、人との関係、地域とのつながり、寂しさ、不安、負担感など、理由や背景として語られた内容を入れてください。",
-  "conditionsには、できる範囲、重い作業は難しい、全部今まで通りでなくてもよい、必要なら支援を受けるなど、条件によって変わる内容を入れてください。",
-  "uncertaintiesには、本人が実際に、まだ考えていない、まだ決めていない、分からない、その時にならないと分からない、と話した内容だけを入れてください。slotが未充足という理由だけで作らないでください。",
-  "tensionsには、本人自身の発言から複数の思いが確認できる場合だけ入れてください。Aを大切にしたい一方でBも気になる、という双方を支えるsourceUtteranceIdsが必要です。単一sub-slotがcompleteであることだけを理由に作らないでください。",
-  "confirmationNeededには、本人の葛藤ではなく、記録上の不整合、本人発言とslot状態の不一致、相談相手と代理意思決定者の混在、今回の発言だけでは確定できない事項を入れてください。",
-  "not_decidedというslot状態だけを根拠に、本人が決めていないと本文化しないでください。本人の直接発言または本人確認のあるevidenceが必要です。",
-  "同じutteranceが複数sub-slotに関係していても、根拠発言カードでは1回だけ表示されます。本文では、そのutteranceがどのsectionを支えるかsourceUtteranceIdsで追跡できるようにしてください。",
-  "Narrative writing process: before writing each narrative field, internally convert each evidence utterance into meaning units that are directly confirmable from that utterance, then integrate compatible meaning units into natural Japanese clinical record text.",
-  "narrative.text is not an excerpt area. The original utterances will be shown separately through sourceUtteranceIds, so never put the raw utterance text itself into narrative.text.",
-  "Do not quote the original utterances in order, lightly rewrite each utterance one by one, or chain phrases such as 「〜と話している」「〜と述べている」. Your role is to express the confirmed meaning, not to reproduce the transcript.",
-  "Do not create one sentence per source utterance. Do not try to reflect every sourceUtteranceId in the body text. Choose the minimum sufficient utterance IDs for the meaning you actually wrote.",
-  "You may rephrase for readability, but you must not add intentions, emotions, values, reasons, causal links, medical judgments, or future preferences that are not directly supported by the evidence.",
-  "When the utterance contains uncertainty or conditions such as 「できれば」「今のところ」「家族が大丈夫なら」「体が動くうちは」, preserve that strength and condition. Do not make the preference stronger or more definite than the utterance.",
-  "If multiple utterances point in the same direction, integrate them into one meaning cluster. If the relationship between utterances is unclear, use confirmationNeeded rather than inventing a causal or emotional connection.",
-  "For every narrative field, sourceUtteranceIds must include only the utterances that directly support the final written text for that field. Do not use theme-level evidence IDs just because they are related to the theme.",
-  "Field boundary rule: currentThought is for what the person currently values, hopes for, or wants to maintain. background is only for directly stated reasons, life history, relationships, or meaning behind that currentThought. conditions is only for explicit conditions or limits. uncertainties is only for explicit not-knowing or undecided statements. tensions is only for genuinely different wishes or concerns coexisting in the person; related wishes pointing in the same direction are not tensions. confirmationNeeded is for record-level ambiguity or missing interpretive conditions, not the person's psychological conflict.",
-  "Bad currentThought example: 「本人は『できれば家がいい』と話しており、『病院にずっといるのは嫌』と話している。」 This is only a quote list.",
-  "Good currentThought example: 「本人は、可能であれば自宅で家族と普段通りに過ごすことを希望している。長期間病院で過ごすことには抵抗を示している。」 with sourceUtteranceIds limited to the utterances that directly support those meanings.",
-  "Garden example: utterances about seeing garden flowers, caring for flowers, talking with neighbors, and preferring ordinary days should be integrated as 「本人は、庭の花を見たり世話をしたり、近所の人と会話したりする、これまで通りの日常生活を大切にしている。特別なことよりも、普段通りの暮らしを続けられることを望んでいる。」 Do not list the utterances themselves.",
-  "Garden background example: long-term flower growing, long-term neighborhood relationships, and feeling that flower care and neighbor conversations mean ordinary life can continue should be background, not separate currentThought items.",
-  "Garden condition example: 「できる間は庭のことは自分でやりたい」 should become a conditions item such as 「本人は、身体的に可能な範囲では、庭の世話を自分で続けたいと考えている。」",
-  "Garden tension rule: garden flowers, neighbor conversation, and ordinary daily life all point in the same direction, so tensions must be empty unless a separate conflicting concern is directly stated.",
-  "Over-interpretation example to avoid: from 「家がいいかな」「家族と一緒がいい」, do not write 「家族に介護してもらいながら自宅で最期を迎えることを希望している」 because care by family and final place of death were not stated.",
-  "currentThought-specific rule: do not copy or list the user's utterances. Write 1 to 3 natural Japanese record sentences that communicate the person's current wishes, values, priorities, things they want to continue, things they want to avoid, or relatively clear views about support/decision-making.",
-  "currentThought-specific rule: include only content directly supported by the person's own utterances. Do not treat a clinician question, caregiver interpretation, or general ACP value as the person's value.",
-  "currentThought-specific rule: sourceUtteranceIds must contain only the utterance IDs that directly support the generated currentThought sentence. Do not include every utterance in the theme, utterances used for background/conditions/uncertainties/tensions/confirmationNeeded, or question-only utterances.",
-  "currentThought-specific rule: if the best output would be the same as an evidence quote, a simple concatenation of quotes, or an unsupported inference, return currentThought as null.",
-  "Return JSON only with this shape: {\"narratives\":{\"current_life_values\":{\"currentThought\":{\"text\":\"...\",\"sourceUtteranceIds\":[\"...\"],\"sourceAspectIds\":[\"...\"]},\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]},\"future_life_continuity\":{\"currentThought\":null,\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]},\"selfhood\":{\"currentThought\":null,\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]},\"care_support\":{\"currentThought\":null,\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]},\"family_communication\":{\"currentThought\":null,\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]},\"proxy_decision_support\":{\"currentThought\":null,\"background\":null,\"conditions\":[],\"uncertainties\":[],\"tensions\":[],\"confirmationNeeded\":[]}},\"overall_summary\":{\"core_values\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"source_utterance_ids\":[\"...\"]}],\"cross_theme_connections\":[{\"text\":\"...\",\"source_aspects\":[\"...\"],\"related_themes\":[\"...\"],\"source_utterance_ids\":[\"...\"]}],\"undecided_things\":[]}}.",
+  "あなたは、ACP対話のslot、sub-slot、aspect、根拠発話から、医療・介護従事者が後から理解できる話し合い記録を作成するAIです。",
+  "添付PDFと同じ考え方で、短い全体概要、テーマ別詳細、整理項目、根拠発言の構成を守ってください。",
+  "目的は情報を減らすことではなく、得られた情報を意味に応じたsectionへ整理することです。",
+  "【根拠】",
+  "入力されたslot、sub-slot、aspectと根拠発話だけを使用し、入力にない事実、希望、理由、感情、人物関係、因果関係、医療判断を追加しないでください。",
+  "各narrativeには、その本文を直接支える最小限のsourceUtteranceIdsを付けてください。themeに関連するだけの発話、質問だけの発話、他sectionだけを支える発話は含めないでください。",
+  "根拠がなければ文章を作らず、fieldに応じてnullまたは空配列にしてください。",
+  "not_decidedや未充足というslot状態だけから、未決定や不明を本文化してはいけません。本人の直接発話または本人確認済みのevidenceが必要です。",
+  "本人自身の発話に直接支持されない介護者の解釈、一般的なACP価値、医療者の質問を、本人の考えとして扱わないでください。",
+  "【文章化】",
+  "発話を内部的に意味単位へ分け、矛盾しない内容を自然な第三者記録文として統合してください。",
+  "narrative.textは発話の抜粋欄ではありません。発話原文のコピー、時系列での列挙、発話ごとの言い換え、「〜と話している」「〜と述べている」の反復を避けてください。",
+  "同じ方向の複数発話は1つの意味まとまりに統合してください。発話間の関係が不明なら、因果関係を推測せずconfirmationNeededへ整理してください。",
+  "具体的な生活行動、人間関係、理由、避けたいこと、条件、迷い、未決定、家族への配慮、支援や意思決定への考えを削除しないでください。",
+  "「できれば」「今のところ」「家族が大丈夫なら」「体が動くうちは」などの条件や確信の強さを保ち、発話より断定的にしないでください。",
+  "sub-slot名や分類名、または「本人はこのテーマについて考えを話している」のような抽象的説明を本文に書かず、確認できた具体的内容を書いてください。",
+  "【overall_summary】",
+  "overall_summaryは「今回の話し合いから見えてきたこと」に表示する入口の概要です。2〜4項目、各1〜2文程度にしてください。",
+  "全sub-slot、条件、迷い、未決定、根拠発話、次回確認事項を詰め込まないでください。",
+  "overall_summaryに含めた内容も、正式な記録である各theme sectionから削除しないでください。",
+  "【テーマ別section】",
+  "各テーマの情報をcurrentThought、background、conditions、uncertainties、tensions、confirmationNeededへ意味に応じて分けてください。すべてをcurrentThoughtへ集約しないでください。",
+  "currentThought: 本人が現在大切にしていること、希望、優先事項、続けたいこと、避けたいこと、支援や意思決定について比較的明確に述べた考えです。主にcore sub-slotを用い、自然な記録文1〜3文に統合してください。引用・単純連結または根拠のない推論しか作れない場合はnullにしてください。",
+  "background: 本人が直接語った理由、生活歴、経験、人間関係、地域とのつながり、感情、寂しさ、不安、負担感など、currentThoughtの背景です。根拠がなければnullにしてください。",
+  "conditions: 「できる間」「状況による」「重い作業は難しい」「全部今まで通りでなくてもよい」「必要なら支援を受ける」など、明示された条件、限界、状況による変化です。",
+  "uncertainties: 本人が明示した「まだ考えていない」「決めていない」「分からない」「その時にならないと分からない」などの意思形成状態です。欠損や未充足だけを理由に作らないでください。",
+  "tensions: 本人の中に、異なる希望や懸念が併存していることを双方の発話から直接確認できる場合に限ります。同じ方向の関連希望や単一sub-slotのcompleteだけを理由に作らないでください。",
+  "confirmationNeeded: 発言間または発言とslotの不一致、複数解釈、判断条件の不足、今回だけでは確定できない事項、相談相手と代理意思決定者の混在など、記録上の確認事項です。本人の心理的葛藤と混同しないでください。",
+  "【統合例】",
+  "庭の花を見る、世話をする、近所の人と話す、普段通り過ごしたいという同方向の発話は、日常生活を大切にしているというcurrentThoughtへ統合してください。長年の花栽培や近所づきあいはbackground、身体的に可能な間は自分で世話したいという内容はconditionsです。相反する懸念がなければtensionsには入れません。",
+  "「家がいい」「家族と一緒がいい」だけから、家族の介護を受けて自宅で最期を迎えたいと解釈してはいけません。",
+  "【追跡可能性】",
+  "同じutteranceが複数sub-slotに関係しても根拠発言カードには1回だけ表示されます。本文ではsourceUtteranceIdsにより、各発話がどのsectionを支えるか追跡可能にしてください。",
+  "すべてのnarrative fieldで、sourceUtteranceIdsには実際に文章化した意味を直接支える発話だけを含めてください。",
+  "出力は指定されたJSON構造のみとし、JSON以外の文章を出力しないでください。",
 ].join("\n");
 
 const SYSTEM_SLOT_CONTROL_DEBUG = [
-  "あなたはACP対話ログを読み、開発確認用にサブスロットの状態を意味判定するAIです。",
-  "テーマ名・サブスロット名は変更せず、提供された topic_id と aspect_id だけを使ってください。",
-  "語彙の完全一致ではなく、本人発話の意味から該当するサブスロットを判断してください。",
-  "ACPの考え方に沿って、本人の価値観・希望・不安・拒否・保留を尊重し、無理に埋めるための判定はしないでください。",
-  "本人発話を最優先してください。ただし、介護者が本人の発言を要約・解釈し、その直後または近接する本人発話で「はい」「そう」「それでいい」「うん」など明確に同意している場合は、本人の意思として扱えます。",
-  "介護者の要約・解釈への本人同意を根拠にする場合は、evidence_utterance の先頭に必ず「介護者解釈に同意: 」を付け、介護者の要約発話と本人の同意発話の両方を短く含めてください。",
-  "本人の同意がない介護者だけの推測・代弁・解釈は answered / partially_answered にしないでください。",
-  "ただし、根拠発話がないもの、会話ログに存在しない根拠、推測だけの内容は answered / partially_answered / not_applicable / declined / unable_to_verbalize にしないでください。",
-  "非unansweredにする場合は、必ず会話ログ中の本人発話、または介護者要約と本人同意の短い抜粋を evidence_utterance に入れてください。",
-  "本人が「特にない」「該当しない」と明確に答えた場合は not_applicable、話したくない場合は declined、言語化できない場合は unable_to_verbalize としてください。",
-  "意味的にそのサブスロットの話として認識できるが、理由・条件・具体性が足りない場合は needs_follow_up または partially_answered としてください。",
-  "根拠が弱いが関連発話がある場合は partially_answered、ACP上それ以上深掘りすべき曖昧さがある場合は needs_follow_up、十分に具体的な根拠がある場合だけ answered としてください。",
-  "出力はJSONのみとしてください。",
-  "",
-  "出力形式:",
+  "あなたはACP対話ログから、開発確認用にサブスロットの状態を意味判定するAIです。",
+  "名称を変更せず、提供されたtopic_idとaspect_idだけを使用してください。",
+  "語彙の一致ではなく本人発話の意味で分類し、価値観、希望、不安、拒否、保留を尊重して、無理にslotを埋めないでください。",
+  "【根拠】",
+  "本人発話を最優先してください。",
+  "介護者の要約・解釈は、直後または近接する本人発話で明確な同意がある場合のみ、本人の意思として扱えます。",
+  "その場合、evidence_utteranceを「介護者解釈に同意: 」で始め、介護者の要約と本人の同意を短く含めてください。",
+  "本人の同意がない介護者だけの推測、代弁、解釈をansweredまたはpartially_answeredにしないでください。",
+  "会話ログに根拠がない、または推測だけの場合はunansweredとしてください。",
+  "unanswered以外にする場合は、本人発話、または介護者要約と本人同意の短い抜粋をevidence_utteranceに必ず入れてください。",
+  "【状態判定】",
+  "明確な「特にない」「該当しない」はnot_applicable、話したくない場合はdeclined、言語化できない場合はunable_to_verbalizeとしてください。",
+  "関連発話はあるが根拠が弱い、または理由・条件・具体性が不足している場合はpartially_answeredとしてください。",
+  "意味は該当するが、ACP上さらに確認すべき曖昧さがある場合はneeds_follow_upとしてください。",
+  "十分に具体的な根拠がある場合だけansweredとしてください。",
+  "出力は次の構造のJSONのみとしてください。",
   '{"main_slots":[{"topic_id":"...","sub_slots":[{"id":"...","status":"unanswered | partially_answered | answered | not_applicable | declined | unable_to_verbalize | needs_follow_up | deferred","summary":"...","evidence_utterance":"...","unanswered_reason":"not_discussed | time_limit | topic_changed | declined | unable_to_verbalize | needs_follow_up"}]}]}',
 ].join("\n");
 
@@ -392,6 +380,8 @@ type SlotStateBundle = {
   slotStates: AcpSlotState[];
   subSlotStates: StoredSubSlotState[];
   debug: {
+    classifiedUtteranceIds: string[];
+    skippedClassification: boolean;
     candidates: SlotClassification[];
     accepted: SlotClassification[];
     rejected: Array<{
@@ -426,13 +416,17 @@ export async function updateSlotStateBundleFromConversation(
     fallbackSubSlotStates,
     context.utterances,
   );
-  const utterancesWithIds = context.utterances.filter((utterance) => utterance.id);
+  const utterancesToClassify = (
+    context.utterancesToClassify ?? context.utterances
+  ).filter((utterance) => utterance.id);
 
-  if (utterancesWithIds.length === 0) {
+  if (utterancesToClassify.length === 0) {
     return {
       slotStates: fallbackSlotStates,
       subSlotStates: fallbackSubSlotStates,
       debug: {
+        classifiedUtteranceIds: [],
+        skippedClassification: true,
         candidates: [],
         accepted: [],
         rejected: [],
@@ -448,12 +442,18 @@ export async function updateSlotStateBundleFromConversation(
 
   const result = await requestJson<SlotClassificationResult>(
     SYSTEM_CLASSIFY_SLOT_UTTERANCES,
-    buildSlotClassificationPayload(context, fallbackSubSlotStates),
+    buildSlotClassificationPayload(
+      {
+        ...context,
+        utterances: utterancesToClassify,
+      },
+      fallbackSubSlotStates,
+    ),
     { classifications: [], unmatchedUtteranceIds: [] },
   );
   const applied = applySlotClassifications({
     result,
-    utterances: context.utterances,
+    utterances: utterancesToClassify,
     currentStates: fallbackSubSlotStates,
     currentTopic: context.currentTopic,
     sessionId: context.sessionId,
@@ -466,21 +466,41 @@ export async function updateSlotStateBundleFromConversation(
 
   return {
     slotStates,
-    subSlotStates: applied.subSlotStates,
-    debug: applied.debug,
+      subSlotStates: applied.subSlotStates,
+    debug: {
+      ...applied.debug,
+      classifiedUtteranceIds: utterancesToClassify
+        .map((utterance) => utterance.id)
+        .filter(Boolean) as string[],
+      skippedClassification: false,
+    },
   };
 }
 
 function buildSlotClassificationPayload(
   context: ConversationContext,
-  _subSlotStates: StoredSubSlotState[],
+  subSlotStates: StoredSubSlotState[],
 ) {
   const currentTopic = resolveDiscussionTopic(context.currentTopic);
-  const topicsForClassification = DISCUSSION_TOPICS;
+  const topicsForClassification = [currentTopic];
+  const topicSubSlotStates = subSlotStates.filter(
+    (state) => state.mainSlotId === currentTopic.id,
+  );
 
   return {
     session: getSessionMetadata(context),
     currentTopic,
+    currentSubSlotStates: topicSubSlotStates.map((state) => ({
+      mainSlotId: state.mainSlotId,
+      subSlotId: state.subSlotId,
+      completion: state.completion,
+      responseState: state.responseState,
+      reasonCode: state.reasonCode,
+      evidenceUtteranceIds: state.evidenceUtteranceIds,
+      depth: state.depth,
+      canAskAgain: state.canAskAgain,
+      isDeferred: state.isDeferred,
+    })),
     slotDefinitions: topicsForClassification.map((topic) => ({
       mainSlotId: topic.id,
       mainSlotLabel: topic.title,
@@ -618,6 +638,8 @@ function applySlotClassifications(input: {
   return {
     subSlotStates: [...byKey.values()],
     debug: {
+      classifiedUtteranceIds: [...utteranceIds],
+      skippedClassification: false,
       candidates: input.result.classifications ?? [],
       accepted,
       rejected,

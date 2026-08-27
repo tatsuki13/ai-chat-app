@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  getUnprocessedSlotUtterances,
   getSessionContext,
   saveSlotStates,
   saveSubSlotStates,
@@ -38,6 +39,10 @@ export async function POST(request: Request) {
     const activeState = await prisma.aIProcessingState.findUnique({
       where: { sessionId },
     });
+    const utterancesToClassify = getUnprocessedSlotUtterances(
+      context.utterances,
+      activeState?.lastProcessedUtteranceId,
+    );
     const existingPrepared = await prisma.preparedQuestion.findFirst({
       where: {
         sessionId,
@@ -97,6 +102,7 @@ export async function POST(request: Request) {
       sessionId,
       topicId: topic.id,
       utteranceCount: context.utterances.length,
+      utterancesToClassifyCount: utterancesToClassify.length,
       startedAt: requestedAt.toISOString(),
     });
 
@@ -117,18 +123,28 @@ export async function POST(request: Request) {
       ...context,
       currentTopic,
       currentTopicTitle,
+      utterancesToClassify,
     });
+    if (
+      utterancesToClassify.length > 0 &&
+      bundle.debug.summary.llmSucceeded !== true
+    ) {
+      throw new Error("Failed to update slots from new utterances");
+    }
     await saveSlotStates(sessionId, bundle.slotStates);
     await saveSubSlotStates(sessionId, bundle.subSlotStates);
 
-    const nextRevision = state.slotRevision + 1;
+    const latestProcessedUtterance = utterancesToClassify.at(-1);
+    const nextRevision =
+      state.slotRevision + (latestProcessedUtterance?.id ? 1 : 0);
     await prisma.aIProcessingState.update({
       where: { sessionId },
       data: {
         processingStatus: "generating_question",
         slotRevision: nextRevision,
-        lastProcessedUtteranceId: latestUtterance?.id ?? null,
-        lastProcessedAt: new Date(),
+        lastProcessedUtteranceId:
+          latestProcessedUtterance?.id ?? state.lastProcessedUtteranceId,
+        lastProcessedAt: latestProcessedUtterance?.id ? new Date() : state.lastProcessedAt,
       },
     });
 
@@ -186,7 +202,7 @@ export async function POST(request: Request) {
         targetSubSlotId: result.targetSubSlotId ?? "",
         questionPurpose: result.questionPurpose ?? "elicit_preference",
         reasonForSelection: result.reasonForSelection ?? result.reason,
-        basedOnUtteranceId: latestUtterance?.id ?? null,
+        basedOnUtteranceId: latestProcessedUtterance?.id ?? latestUtterance?.id ?? null,
         slotRevision: nextRevision,
         status: "prepared",
         generatedAt: new Date(),

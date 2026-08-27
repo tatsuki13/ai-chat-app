@@ -98,6 +98,8 @@ export default function RemoteMicClient(props: {
   const speechRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const levelStopRef = useRef<(() => void) | null>(null);
   const recordingActiveRef = useRef(false);
+  const remoteMicRef = useRef<RemoteMicSession | null>(null);
+  const micStateRef = useRef<MicState>("idle");
   const speechRecognitionStopRequestedRef = useRef(false);
   const partialTextByTranscriptRef = useRef<Map<string, string>>(new Map());
   const speechStartedAtByTranscriptRef = useRef<Map<string, number>>(new Map());
@@ -122,6 +124,14 @@ export default function RemoteMicClient(props: {
     return "スマートフォンマイク";
   }, [remoteMic?.role]);
   const canStart = Boolean(remoteMic) && micState === "idle";
+
+  useEffect(() => {
+    remoteMicRef.current = remoteMic;
+  }, [remoteMic]);
+
+  useEffect(() => {
+    micStateRef.current = micState;
+  }, [micState]);
 
   function handleAiSpeechEvent(event: AiSpeechEvent) {
     if (!remoteMic?.sessionId || event.sessionId !== remoteMic.sessionId) return;
@@ -211,6 +221,8 @@ export default function RemoteMicClient(props: {
       });
       if (recordingActiveRef.current) {
         void setFixedMicMuted(false).catch(() => undefined);
+      } else if (remoteMicRef.current && micStateRef.current === "idle") {
+        void start();
       }
       setAiSpeechLabel("通常受付");
     }, delayMs);

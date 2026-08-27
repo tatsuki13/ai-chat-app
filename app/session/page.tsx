@@ -1474,10 +1474,6 @@ function SessionPageClient() {
       await commitPendingUtterances();
 
       if (nextTopic) {
-        advanceTopic();
-        setPromptPanel(createTopicTransitionPrompt(nextTopic));
-        playTopicPrompt(nextTopic);
-
         const updateResult = await postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
           session_id: previousSessionId,
           current_topic: previousTopic.slot_name,
@@ -1490,6 +1486,9 @@ function SessionPageClient() {
         if (updateResult.slot_control) {
           setDeveloperSlotControl(updateResult.slot_control);
         }
+        advanceTopic();
+        setPromptPanel(createTopicTransitionPrompt(nextTopic));
+        playTopicPrompt(nextTopic);
         setStatusText("保存済み");
         return;
       }

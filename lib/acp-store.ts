@@ -86,6 +86,95 @@ export async function getSessionContext(sessionId: string) {
   };
 }
 
+export function getUnprocessedSlotUtterances(
+  utterances: ConversationUtterance[],
+  lastProcessedUtteranceId?: string | null,
+) {
+  const withIds = utterances.filter((utterance) => utterance.id);
+  if (!lastProcessedUtteranceId) return withIds;
+
+  const lastProcessedIndex = withIds.findIndex(
+    (utterance) => utterance.id === lastProcessedUtteranceId,
+  );
+  if (lastProcessedIndex < 0) return withIds;
+
+  return withIds.slice(lastProcessedIndex + 1);
+}
+
+export async function resetSlotProcessingAfterUtteranceChange(
+  sessionId: string,
+  utteranceIds: string[],
+) {
+  const idsToRemove = [...new Set(utteranceIds.map((id) => id.trim()).filter(Boolean))];
+  const invalidatedAt = new Date();
+
+  if (idsToRemove.length > 0) {
+    const states = await prisma.slotSubState.findMany({
+      where: { sessionId },
+      select: {
+        id: true,
+        evidenceUtteranceIds: true,
+      },
+    });
+
+    await Promise.all(
+      states.flatMap((state) => {
+        const currentEvidenceIds = normalizeEvidenceIds(state.evidenceUtteranceIds);
+        const nextEvidenceIds = currentEvidenceIds.filter(
+          (id) => !idsToRemove.includes(id),
+        );
+        if (nextEvidenceIds.length === currentEvidenceIds.length) return [];
+
+        const data: Prisma.SlotSubStateUpdateInput =
+          nextEvidenceIds.length > 0
+            ? {
+                evidenceUtteranceIds: toJsonValue(nextEvidenceIds) as Prisma.InputJsonValue,
+              }
+            : {
+                completion: "none",
+                responseState: "no_response",
+                reasonCode: "not_discussed",
+                evidenceUtteranceIds: toJsonValue([]) as Prisma.InputJsonValue,
+                depth: "none",
+                canAskAgain: true,
+                isDeferred: true,
+                lastUpdatedTopicId: null,
+              };
+
+        return [
+          prisma.slotSubState.update({
+            where: { id: state.id },
+            data,
+          }),
+        ];
+      }),
+    );
+  }
+
+  await Promise.all([
+    prisma.aIProcessingState.updateMany({
+      where: { sessionId },
+      data: {
+        lastProcessedUtteranceId: null,
+        lastProcessedAt: null,
+        processingStatus: "idle",
+        lastError: null,
+      },
+    }),
+    prisma.preparedQuestion.updateMany({
+      where: {
+        sessionId,
+        status: "prepared",
+      },
+      data: {
+        status: "invalidated",
+        invalidatedAt,
+        invalidationReason: "utterance_changed",
+      },
+    }),
+  ]);
+}
+
 export async function createInitialSlotStates(sessionId: string) {
   const slots = createEmptySlotStates();
   const subSlots = createEmptySubSlotStates();

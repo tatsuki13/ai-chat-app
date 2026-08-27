@@ -5,16 +5,16 @@ const DEFAULT_REALTIME_VAD_SILENCE_MS = 1600;
 const DEFAULT_REALTIME_VAD_THRESHOLD = 0.65;
 const WHISPER_REALTIME_PROMPT = [
   "ACP",
-  "advance care planning",
-  "Japanese",
-  "medical care",
-  "nursing care",
-  "home care",
-  "facility care",
-  "emergency transport",
-  "life-sustaining treatment",
-  "family",
-  "wishes",
+  "アドバンス・ケア・プランニング",
+  "日本語",
+  "医療",
+  "介護",
+  "在宅",
+  "施設",
+  "救急搬送",
+  "延命治療",
+  "家族",
+  "希望",
 ].join(", ");
 
 export function getRealtimeTranscribeModel() {

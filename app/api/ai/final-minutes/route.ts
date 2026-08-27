@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  getUnprocessedSlotUtterances,
   getSessionContext,
   saveFinalMinutes,
   saveSlotStates,
@@ -30,13 +31,54 @@ export async function POST(request: Request) {
     );
     const finalize = body.finalize === true;
     const initialContext = await getSessionContext(sessionId);
+    const processingState = await prisma.aIProcessingState.findUnique({
+      where: { sessionId },
+    });
+    const utterancesToClassify = getUnprocessedSlotUtterances(
+      initialContext.utterances,
+      processingState?.lastProcessedUtteranceId,
+    );
     const bundle = await updateSlotStateBundleFromConversation({
       ...initialContext,
       currentTopic,
       currentTopicTitle,
+      utterancesToClassify,
     });
+    if (
+      utterancesToClassify.length > 0 &&
+      bundle.debug.summary.llmSucceeded !== true
+    ) {
+      return NextResponse.json(
+        { error: "Failed to update slots from new utterances" },
+        { status: 502 },
+      );
+    }
     await saveSlotStates(sessionId, bundle.slotStates);
     await saveSubSlotStates(sessionId, bundle.subSlotStates);
+    const latestProcessedUtterance = utterancesToClassify.at(-1);
+    if (latestProcessedUtterance?.id) {
+      await prisma.aIProcessingState.upsert({
+        where: { sessionId },
+        create: {
+          sessionId,
+          participantCode: initialContext.session.participantCode,
+          lastProcessedUtteranceId: latestProcessedUtterance.id,
+          lastProcessedAt: new Date(),
+          slotRevision: 1,
+          processingStatus: "ready",
+          processingFinishedAt: new Date(),
+        },
+        update: {
+          participantCode: initialContext.session.participantCode,
+          lastProcessedUtteranceId: latestProcessedUtterance.id,
+          lastProcessedAt: new Date(),
+          slotRevision: { increment: 1 },
+          processingStatus: "ready",
+          processingFinishedAt: new Date(),
+          lastError: null,
+        },
+      });
+    }
 
     const context = await getSessionContext(sessionId);
     const minutes = await generateFinalMinutes({

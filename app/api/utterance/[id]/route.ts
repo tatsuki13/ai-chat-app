@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
+import { resetSlotProcessingAfterUtteranceChange } from "../../../../lib/acp-store";
 import { prisma } from "../../../../lib/prisma";
 
 export const runtime = "nodejs";
@@ -32,6 +33,8 @@ export async function PATCH(request: Request, context: RouteContext) {
         text,
       },
     });
+    await resetSlotProcessingAfterUtteranceChange(utterance.sessionId, [utterance.id]);
+
     return NextResponse.json({
       utterance: {
         id: utterance.id,
@@ -62,6 +65,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       where: { id },
       select: {
         id: true,
+        sessionId: true,
       },
     });
 
@@ -72,6 +76,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
     await prisma.sessionUtterance.delete({
       where: { id },
     });
+    await resetSlotProcessingAfterUtteranceChange(utterance.sessionId, [utterance.id]);
 
     return NextResponse.json({ ok: true });
   } catch (error) {
