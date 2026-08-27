@@ -56,7 +56,6 @@ import {
   type SlotClassificationResponseState,
   type SlotCompletion,
   type ScopedSlotStatus,
-  type EndCheckResult,
   type FinalMinutesResult,
   type NextQuestionResult,
   type QuestionPurpose,
@@ -184,19 +183,6 @@ const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
   "出力はJSONのみとしてください。",
 ].join("\n");
 
-const SYSTEM_END_CHECK = [
-  "あなたはACP対話の終了確認を支援するAIです。",
-  "会話ログとTheme単位のACPスロット状態を見て、今日の対話を終えてよいかを判定してください。",
-  "終了判断の主対象は research_themes の6Themeです。optional_research_themes の未充足だけで終了不可にしないでください。",
-  "すべてのAspectがfilledであることを終了条件にしてはいけません。",
-  "未検討・不明・言語化困難・希望なし・回答拒否は有効なresponseStateとして扱い、単純な未回答にしないでください。",
-  "任意Aspectや細かいAspectが未充足であることだけを理由に終了不可にしないでください。",
-  "重要な未確認事項がある場合は、介護者が穏やかに確認できる一文を返してください。",
-  "出力はJSONのみとしてください。",
-  "",
-  "出力形式:",
-  '{"can_end":true,"message":"...","reason":"...","remaining_slots":["..."]}',
-].join("\n");
 
 const SYSTEM_FINAL_MINUTES_FROM_STRUCTURED = [
   "あなたはACPの話し合い記録を作成するシステムです。",
@@ -1048,26 +1034,6 @@ export async function generateNextQuestion(
   return isLegacyDialogueMode()
     ? output
     : applyUncertaintyNextQuestionPolicy(context, output);
-}
-
-export async function checkConversationEnd(
-  context: ConversationContext,
-): Promise<EndCheckResult> {
-  const fallback = fallbackEndCheck(context.slotStates);
-  const result = await requestJson<Partial<EndCheckResult>>(
-    SYSTEM_END_CHECK,
-    buildConversationPayload(context),
-    fallback,
-  );
-
-  const output = {
-    can_end: typeof result.can_end === "boolean" ? result.can_end : fallback.can_end,
-    message: nonEmpty(result.message, fallback.message),
-    reason: nonEmpty(result.reason, fallback.reason),
-    remaining_slots: normalizeRemainingSlots(result.remaining_slots, fallback.remaining_slots),
-  };
-
-  return output;
 }
 
 export async function generateFinalMinutes(
@@ -2689,25 +2655,6 @@ function questionForSubSlotFollowUp(label: string, purpose: QuestionPurpose) {
   }
 
   return `今のお話に関連して、「${label}」についてもう少し聞いてもよいですか。`;
-}
-
-function fallbackEndCheck(slotStates: AcpSlotState[]): EndCheckResult {
-  const remaining = RESEARCH_THEMES.filter(
-    (theme) => !getResearchThemeResponseState(theme, slotStates),
-  ).map((theme) => theme.title);
-  const metrics = calculateThemeCompletenessMetrics(slotStates);
-  const canEnd = remaining.length <= 1 || metrics.responseStateCoverage >= 0.8;
-
-  return {
-    can_end: canEnd,
-    message: canEnd
-      ? "今日のところは大切なお話がかなり確認できています。最後に、言い残したことがないかだけ確認して終えてもよさそうです。"
-      : "まだ大切な確認が少し残っています。無理のない範囲で、もう一つだけ確認してから終えると安心です。",
-    reason: canEnd
-      ? "Theme単位で本人の回答状態または根拠発話が概ね確認できています。Aspect未充足は終了不可の理由にしていません。"
-      : "Theme単位で本人の回答状態が未確認の項目が残っています。",
-    remaining_slots: remaining,
-  };
 }
 
 function resolveTopic(value: string | undefined) {

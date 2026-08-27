@@ -27,7 +27,6 @@ model Session {
   aiActionEvents         AIActionEvent[]
   aiProcessingState      AIProcessingState?
   aiSpeechState          AISpeechState?
-  ttsAudioCaches         TTSAudioCache[]
   preparedQuestions      PreparedQuestion[]
   subSlotStates          SlotSubState[]
   slotStates             SlotState[]
@@ -253,11 +252,6 @@ model PreparedQuestion {
   basedOnUtteranceId    String?   @map("based_on_utterance_id")
   slotRevision          Int       @map("slot_revision")
   status                String
-  audioStatus           String    @default("pending") @map("audio_status")
-  audioReference        String?   @map("audio_reference")
-  audioGeneratedAt      DateTime? @map("audio_generated_at")
-  audioGenerationMs     Int?      @map("audio_generation_ms")
-  audioError            String?   @map("audio_error")
   generatedAt           DateTime  @default(now()) @map("generated_at")
   displayedAt           DateTime? @map("displayed_at")
   invalidatedAt         DateTime? @map("invalidated_at")
@@ -273,32 +267,6 @@ model PreparedQuestion {
   @@index([participantCode])
   @@index([generatedAt])
   @@map("prepared_questions")
-}
-
-model TTSAudioCache {
-  id             String   @id @default(cuid())
-  cacheKey       String   @unique @map("cache_key")
-  participantCode String? @map("participant_code")
-  sessionId      String?  @map("session_id")
-  contentType    String   @map("content_type")
-  topicId        String?  @map("topic_id")
-  text           String
-  model          String
-  voice          String
-  instructions   String
-  format         String
-  audio          Bytes
-  byteLength     Int      @map("byte_length")
-  durationMs     Int?     @map("duration_ms")
-  createdAt      DateTime @default(now()) @map("created_at")
-  lastUsedAt     DateTime @default(now()) @map("last_used_at")
-  session        Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
-
-  @@index([contentType, topicId])
-  @@index([sessionId])
-  @@index([participantCode])
-  @@index([lastUsedAt])
-  @@map("tts_audio_caches")
 }
 
 model AISpeechState {

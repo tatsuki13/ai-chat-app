@@ -5,7 +5,6 @@ import {
   startAiSpeech,
   type AiSpeechContentType,
 } from "../../../../lib/ai/speech-state";
-import { getTTSOpenAIModel, getTTSOpenAIVoice } from "../../../../lib/ai/client";
 import { logAIIntervention } from "../../../../lib/ai/intervention-log";
 import { prisma } from "../../../../lib/prisma";
 
@@ -37,8 +36,7 @@ export async function POST(request: Request) {
       playbackStatus?: unknown;
       playbackStartedAt?: unknown;
       playbackEndedAt?: unknown;
-      ttsModel?: unknown;
-      ttsVoice?: unknown;
+      speechEngine?: unknown;
       preparedAudioUsed?: unknown;
       audioGenerationDurationMs?: unknown;
       playbackErrorCode?: unknown;
@@ -112,8 +110,7 @@ async function logPlaybackIfRequested(input: {
     playbackStatus?: unknown;
     playbackStartedAt?: unknown;
     playbackEndedAt?: unknown;
-    ttsModel?: unknown;
-    ttsVoice?: unknown;
+    speechEngine?: unknown;
     preparedAudioUsed?: unknown;
     audioGenerationDurationMs?: unknown;
     playbackErrorCode?: unknown;
@@ -138,7 +135,7 @@ async function logPlaybackIfRequested(input: {
     generatedAt: parseDate(input.body?.playbackEndedAt) ?? new Date(),
     displayedAt: parseDate(input.body?.playbackStartedAt),
     metadata: {
-      kind: "tts_playback",
+      kind: "speech_playback",
       playbackId: input.playbackId,
       contentType:
         input.contentType === "topic" || input.contentType === "question"
@@ -147,8 +144,8 @@ async function logPlaybackIfRequested(input: {
       playbackStatus: playbackStatus || "completed",
       playbackStartedAt: optionalString(input.body?.playbackStartedAt),
       playbackEndedAt: optionalString(input.body?.playbackEndedAt),
-      ttsModel: optionalString(input.body?.ttsModel) ?? getTTSOpenAIModel(),
-      ttsVoice: optionalString(input.body?.ttsVoice) ?? getTTSOpenAIVoice(),
+      speechEngine:
+        optionalString(input.body?.speechEngine) ?? "browser-speechSynthesis",
       preparedAudioUsed: Boolean(input.body?.preparedAudioUsed),
       audioGenerationDurationMs:
         typeof input.body?.audioGenerationDurationMs === "number"

@@ -108,7 +108,6 @@ export async function POST(request: Request) {
       },
       data: {
         status: "expired",
-        audioStatus: "expired",
         invalidatedAt: requestedAt,
         invalidationReason: "topic_changed",
       },
@@ -152,7 +151,6 @@ export async function POST(request: Request) {
       },
       data: {
         status: "invalidated",
-        audioStatus: "expired",
         invalidatedAt: new Date(),
         invalidationReason: "superseded",
       },
@@ -191,8 +189,6 @@ export async function POST(request: Request) {
         basedOnUtteranceId: latestUtterance?.id ?? null,
         slotRevision: nextRevision,
         status: "prepared",
-        audioStatus: "expired",
-        audioError: "openai_tts_disabled_for_background_preparation",
         generatedAt: new Date(),
         expiresAt: new Date(Date.now() + PREPARED_QUESTION_TTL_MS),
       },
@@ -316,11 +312,6 @@ function toPreparedQuestionResponse(question: {
   basedOnUtteranceId: string | null;
   slotRevision: number;
   status: string;
-  audioStatus: string;
-  audioReference: string | null;
-  audioGeneratedAt: Date | null;
-  audioGenerationMs: number | null;
-  audioError: string | null;
   generatedAt: Date;
 }) {
   return {
@@ -337,11 +328,6 @@ function toPreparedQuestionResponse(question: {
     basedOnUtteranceId: question.basedOnUtteranceId,
     slotRevision: question.slotRevision,
     status: question.status,
-    audioStatus: question.audioStatus,
-    audioReference: question.audioReference,
-    audioGeneratedAt: question.audioGeneratedAt?.toISOString() ?? null,
-    audioGenerationMs: question.audioGenerationMs,
-    audioError: question.audioError,
     generated_at: question.generatedAt.toISOString(),
   };
 }

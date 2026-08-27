@@ -214,11 +214,6 @@ type PreparedQuestion = {
   basedOnUtteranceId: string | null;
   slotRevision: number;
   status: "prepared" | "displayed" | "invalidated" | "expired" | "failed";
-  audioStatus: "pending" | "generating" | "ready" | "failed" | "expired";
-  audioReference: string | null;
-  audioGeneratedAt: string | null;
-  audioGenerationMs: number | null;
-  audioError: string | null;
   generated_at: string;
 };
 
@@ -248,27 +243,14 @@ const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const TIMER_TICK_MS = 1000;
 const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const PROMPT_ERROR_RESTORE_DELAY_MS = 3000;
-const MIN_UNPROCESSED_UTTERANCES = 3;
-const MIN_UNPROCESSED_CHARACTERS = 150;
-const BACKGROUND_IDLE_DELAY_MS = 10_000;
-const BACKGROUND_COOLDOWN_MS = 30_000;
 const AI_SPEECH_RELEASE_DELAY_MS = 500;
-const BROWSER_TTS_FALLBACK_ENABLED =
-  process.env.NEXT_PUBLIC_BROWSER_TTS_FALLBACK !== "false";
+const BROWSER_SPEECH_ENABLED =
+  process.env.NEXT_PUBLIC_BROWSER_SPEECH_ENABLED !== "false";
 const REMOTE_MIC_SESSION_SYNC_MS = 3_000;
 const AUDIO_TRANSCRIPTION_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_TRANSCRIPTION !== "false";
 
 let autoSessionStartPromise: Promise<SessionInfo> | null = null;
-
-const TOPIC_AUDIO_MAP: Record<string, string> = {
-  topic_1: "/audio/topics/topic-1.mp3",
-  topic_2: "/audio/topics/topic-2.mp3",
-  topic_3: "/audio/topics/topic-3.mp3",
-  topic_4: "/audio/topics/topic-4.mp3",
-  topic_5: "/audio/topics/topic-5.mp3",
-  topic_6: "/audio/topics/topic-6.mp3",
-};
 
 function createOpeningPrompt(
   topic: (typeof DISCUSSION_TOPICS)[number] = DISCUSSION_TOPICS[0],
@@ -380,15 +362,8 @@ function SessionPageClient() {
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
   const preparedQuestionRef = useRef<PreparedQuestion | null>(null);
-  const backgroundPrepareDebounceRef = useRef<number | null>(null);
-  const backgroundPrepareMaxWaitRef = useRef<number | null>(null);
   const backgroundPreparePromiseRef = useRef<Promise<PrepareQuestionResponse | null> | null>(null);
-  const firstUnprocessedUtteranceAtRef = useRef<number | null>(null);
-  const pendingBackgroundUtteranceCountRef = useRef(0);
-  const pendingBackgroundCharacterCountRef = useRef(0);
-  const lastBackgroundPrepareAtRef = useRef(0);
   const latestPrepareKeyRef = useRef("");
-  const activeAudioElementRef = useRef<HTMLAudioElement | null>(null);
   const aiSpeechPlaybackRef = useRef<{ sessionId: string; playbackId: string } | null>(null);
 
   const participantCode = session?.participant_code || "未設定";
@@ -555,11 +530,7 @@ function SessionPageClient() {
 
           if (hasNewPersistedUtterance) {
             markTopicInteractionStarted("remote_voice");
-            const newText = persistedUtterances
-              .filter((utterance) => !currentUtteranceIds.has(utterance.id))
-              .map((utterance) => utterance.text)
-              .join("\n");
-            scheduleBackgroundQuestionPreparation("remote_utterance_saved", newText);
+            invalidatePreparedQuestion("remote_utterance_saved");
           }
 
           setSession(detail.session);
@@ -622,7 +593,6 @@ function SessionPageClient() {
   useEffect(() => {
     return () => {
       clearPromptRestoreTimeout();
-      clearBackgroundPrepareTimers();
       void cancelActiveAiSpeechPlayback();
     };
   }, []);
@@ -864,7 +834,7 @@ function SessionPageClient() {
       );
       setUtteranceTotal((current) => current + 1);
       markSessionUsed(session.id);
-      scheduleBackgroundQuestionPreparation("manual_utterance_saved", text);
+      invalidatePreparedQuestion("manual_utterance_saved");
       setStatusText("保存済み");
     } catch {
       setDraft(text);
@@ -1038,7 +1008,7 @@ function SessionPageClient() {
       );
       setUtteranceTotal((current) => current + 1);
       markSessionUsed(currentSession.id);
-      scheduleBackgroundQuestionPreparation(`${source}_utterance_saved`, transcript);
+      invalidatePreparedQuestion(`${source}_utterance_saved`);
       setStatusText("保存済み");
     } catch (error) {
       console.warn("Voice audio transcription failed", error);
@@ -1094,10 +1064,7 @@ function SessionPageClient() {
           return next;
         });
         setUtteranceTotal((current) => current + 1);
-        scheduleBackgroundQuestionPreparation(
-          "pending_utterance_saved",
-          localUtterance.text,
-        );
+        invalidatePreparedQuestion("pending_utterance_saved");
       }
     };
 
@@ -1138,7 +1105,6 @@ function SessionPageClient() {
         ),
       );
       invalidatePreparedQuestion("utterance_edited");
-      scheduleBackgroundQuestionPreparation("utterance_edited", text);
       setStatusText(getAudioAwareSavedStatus());
     } catch (error) {
       setStatusText("保存エラー");
@@ -1169,7 +1135,6 @@ function SessionPageClient() {
       );
       setUtteranceTotal((current) => Math.max(0, current - 1));
       invalidatePreparedQuestion("utterance_deleted");
-      scheduleBackgroundQuestionPreparation("utterance_deleted");
       setStatusText(getAudioAwareSavedStatus());
     } catch (error) {
       setStatusText("保存エラー");
@@ -1213,59 +1178,9 @@ function SessionPageClient() {
     );
   }
 
-  function clearBackgroundPrepareTimers() {
-    if (backgroundPrepareDebounceRef.current !== null) {
-      window.clearTimeout(backgroundPrepareDebounceRef.current);
-      backgroundPrepareDebounceRef.current = null;
-    }
-
-    if (backgroundPrepareMaxWaitRef.current !== null) {
-      window.clearTimeout(backgroundPrepareMaxWaitRef.current);
-      backgroundPrepareMaxWaitRef.current = null;
-    }
-  }
-
   function invalidatePreparedQuestion(_reason: string) {
     setPreparedQuestion(null);
     preparedQuestionRef.current = null;
-  }
-
-  function scheduleBackgroundQuestionPreparation(reason: string, text = "") {
-    if (!sessionRef.current || completionState !== "active") return;
-    if (aiSpeechActive) return;
-    if (preparedQuestionRef.current) return;
-
-    invalidatePreparedQuestion(reason);
-    pendingBackgroundUtteranceCountRef.current += 1;
-    pendingBackgroundCharacterCountRef.current += text.trim().length;
-    firstUnprocessedUtteranceAtRef.current ??= Date.now();
-
-    if (backgroundPrepareDebounceRef.current !== null) {
-      window.clearTimeout(backgroundPrepareDebounceRef.current);
-      backgroundPrepareDebounceRef.current = null;
-    }
-
-    const hasEnoughNewInput =
-      pendingBackgroundUtteranceCountRef.current >= MIN_UNPROCESSED_UTTERANCES ||
-      pendingBackgroundCharacterCountRef.current >= MIN_UNPROCESSED_CHARACTERS;
-
-    if (!hasEnoughNewInput) return;
-
-    const now = Date.now();
-    const cooldownRemainingMs = Math.max(
-      0,
-      BACKGROUND_COOLDOWN_MS - (now - lastBackgroundPrepareAtRef.current),
-    );
-    const delayMs = Math.max(BACKGROUND_IDLE_DELAY_MS, cooldownRemainingMs);
-
-    backgroundPrepareDebounceRef.current = window.setTimeout(
-      () => {
-        backgroundPrepareDebounceRef.current = null;
-        if (aiSpeechActive || preparedQuestionRef.current) return;
-        void prepareQuestionNow(reason);
-      },
-      delayMs,
-    );
   }
 
   async function prepareQuestionNow(
@@ -1282,11 +1197,6 @@ function SessionPageClient() {
       return backgroundPreparePromiseRef.current;
     }
 
-    clearBackgroundPrepareTimers();
-    pendingBackgroundUtteranceCountRef.current = 0;
-    firstUnprocessedUtteranceAtRef.current = null;
-    pendingBackgroundCharacterCountRef.current = 0;
-    lastBackgroundPrepareAtRef.current = Date.now();
     latestPrepareKeyRef.current = prepareKey;
     setBackgroundProcessingStatus("updating_slots");
 
@@ -1375,7 +1285,6 @@ function SessionPageClient() {
       contentType: "question",
       topicId: question.topic_id,
       text: question.question,
-      audioReference: null,
       preparedAudioUsed: false,
     });
   }
@@ -1384,7 +1293,6 @@ function SessionPageClient() {
     contentType: "topic" | "question";
     topicId: string | null;
     text: string;
-    audioReference?: string | null;
     preparedAudioUsed: boolean;
   }) {
     const currentSession = sessionRef.current;
@@ -1408,31 +1316,18 @@ function SessionPageClient() {
       });
       setAiSpeechActive(true);
       playbackStartedAt = new Date().toISOString();
-      if (input.contentType === "topic" && input.audioReference) {
-        const audio = new Audio(input.audioReference);
-        activeAudioElementRef.current = audio;
-        audio.volume = 1;
-        await playAudioElement(audio);
-        playbackStatus = "completed";
-      } else if (input.contentType === "question" && BROWSER_TTS_FALLBACK_ENABLED) {
+      if (BROWSER_SPEECH_ENABLED) {
         await playBrowserSpeech(text);
         playbackStatus = "completed";
       } else {
         playbackStatus = "text_only";
-        playbackErrorCode =
-          input.contentType === "topic"
-            ? "static_topic_audio_missing"
-            : "browser_tts_unavailable";
+        playbackErrorCode = "browser_speech_unavailable";
       }
     } catch (error) {
-      playbackStatus = input.contentType === "topic" ? "text_only" : "failed";
+      playbackStatus = "failed";
       playbackErrorCode =
-        input.contentType === "topic"
-          ? "static_topic_audio_missing_or_unplayable"
-          : error instanceof Error
-            ? error.name || error.message
-            : "playback_failed";
-      console.warn("[ai tts playback failed]", {
+        error instanceof Error ? error.name || error.message : "playback_failed";
+      console.warn("[ai speech playback failed]", {
         sessionId: currentSession.id,
         contentType: input.contentType,
         topicId: input.topicId,
@@ -1441,7 +1336,6 @@ function SessionPageClient() {
       });
     } finally {
       playbackEndedAt = new Date().toISOString();
-      activeAudioElementRef.current = null;
       aiSpeechPlaybackRef.current = null;
 
       await updateAiSpeechState({
@@ -1454,11 +1348,7 @@ function SessionPageClient() {
         playbackStatus,
         playbackStartedAt,
         playbackEndedAt,
-        ttsModel:
-          input.contentType === "question"
-            ? "browser-speechSynthesis"
-            : "static-audio",
-        ttsVoice: null,
+        speechEngine: "browser-speechSynthesis",
         preparedAudioUsed: input.preparedAudioUsed,
         audioGenerationDurationMs: null,
         playbackErrorCode,
@@ -1475,8 +1365,9 @@ function SessionPageClient() {
 
   async function cancelActiveAiSpeechPlayback() {
     const activePlayback = aiSpeechPlaybackRef.current;
-    activeAudioElementRef.current?.pause();
-    activeAudioElementRef.current = null;
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
     aiSpeechPlaybackRef.current = null;
     setAiSpeechActive(false);
 
@@ -1493,18 +1384,11 @@ function SessionPageClient() {
   }
 
   function playTopicPrompt(topic: (typeof DISCUSSION_TOPICS)[number]) {
-    const audioReference = TOPIC_AUDIO_MAP[topic.id] ?? null;
-    if (!audioReference) {
-      console.info("[ai topic audio missing]", {
-        topicId: topic.id,
-      });
-    }
     void playSpokenContent({
       contentType: "topic",
       topicId: topic.id,
       text: topic.opening_prompt,
-      audioReference,
-      preparedAudioUsed: Boolean(audioReference),
+      preparedAudioUsed: false,
     });
   }
 
@@ -1592,26 +1476,21 @@ function SessionPageClient() {
       if (nextTopic) {
         advanceTopic();
         setPromptPanel(createTopicTransitionPrompt(nextTopic));
-        setStatusText("保存済み");
         playTopicPrompt(nextTopic);
 
-        void postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
+        const updateResult = await postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
           session_id: previousSessionId,
           current_topic: previousTopic.slot_name,
           current_topic_title: previousTopicTitle,
-        })
-          .then((updateResult) => {
-            setDeveloperSlotStates(updateResult.slot_states);
-            setDeveloperSlotClassificationDebug(
-              updateResult.slot_classification_debug ?? null,
-            );
-            if (updateResult.slot_control) {
-              setDeveloperSlotControl(updateResult.slot_control);
-            }
-          })
-          .catch((error) => {
-            console.warn("[ai background update-slots after topic switch failed]", error);
-          });
+        });
+        setDeveloperSlotStates(updateResult.slot_states);
+        setDeveloperSlotClassificationDebug(
+          updateResult.slot_classification_debug ?? null,
+        );
+        if (updateResult.slot_control) {
+          setDeveloperSlotControl(updateResult.slot_control);
+        }
+        setStatusText("保存済み");
         return;
       }
 
@@ -1679,20 +1558,12 @@ function SessionPageClient() {
           return;
         }
 
-        const data = await postJson<EndCheckResponse>("/api/ai/check-end", {
-          session_id: session.id,
-          current_topic: currentTopic.slot_name,
-          current_topic_title: currentTopic.title,
+        setPromptPanel({
+          title: "全体終了確認",
+          body: action.reason,
+          tone: "end",
         });
-
-        if (!data.suggestion.can_end) {
-          setBusyAction(null);
-          await handleNextQuestionAction();
-          return;
-        } else {
-          showEndConfirmation(data.suggestion.reason || data.suggestion.message);
-          return;
-        }
+        return;
       }
 
       if (buttonType === "update_slots") {
@@ -2077,7 +1948,9 @@ function SessionPageClient() {
     setTransitionProposal(null);
 
     if (isLastTopic) {
-      await completeSession();
+      showEndConfirmation(
+        "最後の話題の最大時間に達しました。必要であれば終了確認に進んでください。",
+      );
       return;
     }
 
@@ -4042,8 +3915,7 @@ async function updateAiSpeechState(input: {
   playbackStatus?: "started" | "completed" | "failed" | "cancelled" | "text_only";
   playbackStartedAt?: string | null;
   playbackEndedAt?: string | null;
-  ttsModel?: string | null;
-  ttsVoice?: string | null;
+  speechEngine?: string | null;
   preparedAudioUsed?: boolean;
   audioGenerationDurationMs?: number | null;
   playbackErrorCode?: string | null;
@@ -4051,41 +3923,10 @@ async function updateAiSpeechState(input: {
   return postJson("/api/ai/speech-state", input);
 }
 
-function playAudioElement(audio: HTMLAudioElement) {
-  return new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      audio.removeEventListener("ended", handleEnded);
-      audio.removeEventListener("error", handleError);
-      audio.removeEventListener("abort", handleAbort);
-    };
-    const handleEnded = () => {
-      cleanup();
-      resolve();
-    };
-    const handleError = () => {
-      cleanup();
-      reject(new Error("audio_playback_error"));
-    };
-    const handleAbort = () => {
-      cleanup();
-      reject(new Error("audio_playback_cancelled"));
-    };
-
-    audio.addEventListener("ended", handleEnded);
-    audio.addEventListener("error", handleError);
-    audio.addEventListener("abort", handleAbort);
-
-    void audio.play().catch((error) => {
-      cleanup();
-      reject(error);
-    });
-  });
-}
-
 function playBrowserSpeech(text: string) {
   return new Promise<void>((resolve, reject) => {
     if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
-      reject(new Error("browser_tts_unavailable"));
+      reject(new Error("browser_speech_unavailable"));
       return;
     }
 
@@ -4106,7 +3947,7 @@ function playBrowserSpeech(text: string) {
     utterance.volume = 1;
     utterance.onend = () => resolve();
     utterance.onerror = (event) => {
-      reject(new Error(event.error || "browser_tts_error"));
+      reject(new Error(event.error || "browser_speech_error"));
     };
     window.speechSynthesis.speak(utterance);
   });
@@ -4489,13 +4330,5 @@ type NextQuestionResponse = {
     questionPurpose?: string;
     reasonForSelection?: string;
     no_relevant_followup?: boolean;
-  };
-};
-
-type EndCheckResponse = {
-  suggestion: {
-    can_end: boolean;
-    message: string;
-    reason?: string;
   };
 };

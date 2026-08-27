@@ -618,12 +618,6 @@ export type TopicSwitchResult = {
   next_topic: string;
 };
 
-export type EndCheckResult = {
-  can_end: boolean;
-  message: string;
-  reason: string;
-  remaining_slots: string[];
-};
 
 export type FinalMinutesResult = {
   markdown: string;
