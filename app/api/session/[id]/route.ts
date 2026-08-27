@@ -158,6 +158,34 @@ export async function PATCH(request: Request, context: RouteContext) {
       );
     }
 
+    const targetSession = await prisma.session.findUnique({
+      where: { id },
+      select: {
+        dialogueStartedAt: true,
+        _count: {
+          select: {
+            utterances: true,
+            finalMinutes: true,
+          },
+        },
+      },
+    });
+
+    if (!targetSession) {
+      return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    }
+
+    if (
+      targetSession.dialogueStartedAt ||
+      targetSession._count.utterances > 0 ||
+      targetSession._count.finalMinutes > 0
+    ) {
+      return NextResponse.json(
+        { error: "participant_code cannot be changed after session has content" },
+        { status: 409 },
+      );
+    }
+
     const session = await prisma.session.update({
       where: { id },
       data: {

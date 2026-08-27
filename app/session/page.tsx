@@ -1755,10 +1755,28 @@ function SessionPageClient() {
     setIdError("");
 
     try {
-      const updated = await updateSessionDisplayId(session.id, nextId);
-      setSession(updated);
+      stopVoiceAudioInput();
+      await discardUnusedSession(sessionRef.current?.id);
+      const created = await startSession(nextId);
+      window.localStorage.setItem(STORAGE_KEY, created.id);
+      sessionRef.current = created;
+      setSession(created);
+      setUtterances([]);
+      setUtteranceTotal(0);
+      setDraft("");
+      setDeveloperSlotStates([]);
+      setDeveloperSlotControl(null);
+      setDeveloperSlotClassificationDebug(null);
+      setDeveloperSlotError("");
+      resetTopicTiming();
+      setCompletionState("active");
+      setFinalMinutes(null);
+      setCompletionError("");
+      setPromptPanel(createOpeningPrompt());
       setRemoteMicStatuses(emptyFixedRemoteMicStatus().roles);
       setIsEditingId(false);
+      setIdDraft("");
+      router.replace("/session");
       setStatusText("保存済み");
     } catch (error) {
       const message =
@@ -3812,20 +3830,6 @@ function shouldIgnorePushToTalkShortcut(target: EventTarget | null) {
   );
 }
 
-async function updateSessionDisplayId(
-  sessionId: string,
-  participantCode: string,
-): Promise<SessionInfo> {
-  const data = await patchJson<{ session: SessionInfo }>(
-    `/api/session/${encodeURIComponent(sessionId)}`,
-    {
-      participant_code: participantCode,
-    },
-  );
-
-  return data.session;
-}
-
 async function startDialogueSession(sessionId: string): Promise<SessionInfo> {
   const data = await patchJson<{ session: SessionInfo }>(
     `/api/session/${encodeURIComponent(sessionId)}`,
@@ -3837,10 +3841,19 @@ async function startDialogueSession(sessionId: string): Promise<SessionInfo> {
   return data.session;
 }
 
-async function startSession(): Promise<SessionInfo> {
-  const data = await postJson<{ session: SessionInfo }>("/api/session/start", {
+async function startSession(participantCode?: string): Promise<SessionInfo> {
+  const body: {
+    condition: string;
+    participant_code?: string;
+  } = {
     condition: "mvp",
-  });
+  };
+
+  if (participantCode) {
+    body.participant_code = participantCode;
+  }
+
+  const data = await postJson<{ session: SessionInfo }>("/api/session/start", body);
 
   return data.session;
 }
