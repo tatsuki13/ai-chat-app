@@ -52,6 +52,14 @@ export async function POST(request: Request) {
 
     const active = await getFixedRemoteMicActiveSession();
     if (!active || active.sessionId !== sessionId || active.endedAt) {
+      console.warn("[remote-mic local frame rejected]", {
+        reason: "active_session_mismatch",
+        sessionId,
+        activeSessionId: active?.sessionId ?? null,
+        role,
+        streamId,
+        sequence,
+      });
       return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
     }
 
@@ -82,6 +90,20 @@ export async function POST(request: Request) {
       ? (workerResponse.transcripts as LocalAsrTranscript[])
       : [];
     const saved = [];
+    const shouldLogFrame =
+      sequence === 0 || sequence % 20 === 0 || transcripts.length > 0;
+    if (shouldLogFrame) {
+      console.info("[remote-mic local frame processed]", {
+        sessionId,
+        role,
+        streamId,
+        sequence,
+        averageLevel: toNumber(body?.averageLevel),
+        peakLevel: toNumber(body?.peakLevel),
+        transcriptStatuses: summarizeTranscriptStatuses(transcripts),
+        transcriptReasons: summarizeTranscriptReasons(transcripts),
+      });
+    }
 
     for (const transcript of transcripts) {
       if (transcript.status !== "accepted") continue;
@@ -105,6 +127,16 @@ export async function POST(request: Request) {
           asrModel: requiredString(transcript.asrModel) || null,
         }),
       );
+    }
+    if (saved.length > 0) {
+      console.info("[remote-mic local utterance saved]", {
+        sessionId,
+        role,
+        streamId,
+        sequence,
+        savedCount: saved.length,
+        savedIds: saved.map((utterance) => utterance.id),
+      });
     }
 
     return NextResponse.json({
@@ -181,4 +213,25 @@ function toNumber(value: unknown) {
 function toInteger(value: unknown) {
   const number = Number(value);
   return Number.isInteger(number) ? number : null;
+}
+
+function summarizeTranscriptStatuses(transcripts: LocalAsrTranscript[]) {
+  return transcripts.reduce<Record<string, number>>((summary, transcript) => {
+    const status = transcript.status ?? "unknown";
+    summary[status] = (summary[status] ?? 0) + 1;
+    return summary;
+  }, {});
+}
+
+function summarizeTranscriptReasons(transcripts: LocalAsrTranscript[]) {
+  return transcripts
+    .map((transcript) => {
+      const reason = requiredString(transcript.reason);
+      if (!reason) return null;
+      return {
+        status: transcript.status ?? "unknown",
+        reason: reason.slice(0, 240),
+      };
+    })
+    .filter((reason): reason is { status: string; reason: string } => Boolean(reason));
 }

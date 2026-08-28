@@ -20,6 +20,7 @@ export type LocalAsrTranscript = {
   finalized?: boolean;
   asrProvider?: string;
   asrModel?: string;
+  reason?: string;
 };
 
 export async function appendOrCreateLocalAsrUtterance(input: {

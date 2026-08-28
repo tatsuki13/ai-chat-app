@@ -1,3 +1,4 @@
+import os
 import tempfile
 import wave
 from functools import lru_cache
@@ -17,18 +18,26 @@ def transcribe_pcm16(pcm: np.ndarray) -> str:
     if pcm.size == 0:
         return ""
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as file:
-        with wave.open(file.name, "wb") as wav:
+    fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+
+    try:
+        with wave.open(path, "wb") as wav:
             wav.setnchannels(1)
             wav.setsampwidth(2)
             wav.setframerate(SAMPLE_RATE)
             wav.writeframes(pcm.astype("<i2").tobytes())
 
         segments, _info = get_model().transcribe(
-            file.name,
+            path,
             language="ja",
             task="transcribe",
             vad_filter=False,
             beam_size=1,
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
+    finally:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass

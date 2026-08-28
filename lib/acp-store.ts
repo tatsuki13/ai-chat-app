@@ -237,6 +237,22 @@ export async function saveSlotStates(
   );
 }
 
+export function getChangedSlotStates(
+  currentStates: AcpSlotState[],
+  nextStates: AcpSlotState[],
+) {
+  const currentByName = new Map(
+    currentStates.map((state) => [state.slot_name, state]),
+  );
+
+  return nextStates.filter((nextState) => {
+    const currentState = currentByName.get(nextState.slot_name);
+    if (!currentState) return true;
+
+    return !areSlotStatesEqual(currentState, nextState);
+  });
+}
+
 export async function saveSubSlotStates(
   sessionId: string,
   states: StoredSubSlotState[],
@@ -280,6 +296,27 @@ export async function saveSubSlotStates(
   );
 }
 
+export function getChangedSubSlotStates(
+  currentStates: StoredSubSlotState[],
+  nextStates: StoredSubSlotState[],
+) {
+  const currentByKey = new Map(
+    currentStates.map((state) => [
+      getSubSlotStateKey(state.mainSlotId, state.subSlotId),
+      state,
+    ]),
+  );
+
+  return nextStates.filter((nextState) => {
+    const currentState = currentByKey.get(
+      getSubSlotStateKey(nextState.mainSlotId, nextState.subSlotId),
+    );
+    if (!currentState) return true;
+
+    return !areSubSlotStatesEqual(currentState, nextState);
+  });
+}
+
 export async function saveFinalMinutes(
   sessionId: string,
   minutes: FinalMinutesResult,
@@ -312,6 +349,48 @@ function normalizeEvidenceIds(value: unknown) {
   if (!Array.isArray(value)) return [];
 
   return [...new Set(value.map(String).map((item) => item.trim()).filter(Boolean))];
+}
+
+function areSlotStatesEqual(current: AcpSlotState, next: AcpSlotState) {
+  return (
+    current.status === next.status &&
+    current.summary === next.summary &&
+    current.evidence_utterance === next.evidence_utterance
+  );
+}
+
+function areSubSlotStatesEqual(
+  current: StoredSubSlotState,
+  next: StoredSubSlotState,
+) {
+  return (
+    current.completion === next.completion &&
+    current.responseState === next.responseState &&
+    nullableString(current.reasonCode) === nullableString(next.reasonCode) &&
+    nullableString(current.depth) === nullableString(next.depth) &&
+    current.canAskAgain === next.canAskAgain &&
+    current.isDeferred === next.isDeferred &&
+    nullableString(current.lastUpdatedTopicId) ===
+      nullableString(next.lastUpdatedTopicId) &&
+    areStringArraysEqual(
+      normalizeEvidenceIds(current.evidenceUtteranceIds),
+      normalizeEvidenceIds(next.evidenceUtteranceIds),
+    )
+  );
+}
+
+function getSubSlotStateKey(mainSlotId: string, subSlotId: string) {
+  return `${mainSlotId}:${subSlotId}`;
+}
+
+function nullableString(value: string | null | undefined) {
+  return value ?? null;
+}
+
+function areStringArraysEqual(current: string[], next: string[]) {
+  if (current.length !== next.length) return false;
+
+  return current.every((value, index) => value === next[index]);
 }
 
 function inferLegacyDepth(completion: string, responseState: string): AnswerDepth {

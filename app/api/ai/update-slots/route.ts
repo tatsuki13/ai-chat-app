@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import {
+  getChangedSlotStates,
+  getChangedSubSlotStates,
   getUnprocessedSlotUtterances,
   getSessionContext,
   saveSubSlotStates,
@@ -11,10 +13,14 @@ import { prisma } from "../../../../lib/prisma";
 
 export const runtime = "nodejs";
 
+const SLOT_UPDATE_TRANSACTION_MAX_WAIT_MS = 10_000;
+const SLOT_UPDATE_TRANSACTION_TIMEOUT_MS = 20_000;
+
 export async function POST(request: Request) {
   let sessionId = "";
 
   try {
+    const startedAt = Date.now();
     const body = await request.json();
     sessionId = requiredString(body.session_id ?? body.sessionId);
 
@@ -34,12 +40,20 @@ export async function POST(request: Request) {
       context.utterances,
       processingState?.lastProcessedUtteranceId,
     );
+    console.info("[ai update-slots start]", {
+      sessionId,
+      utterancesToClassifyCount: utterancesToClassify.length,
+      slotStateCount: context.slotStates.length,
+      subSlotStateCount: context.subSlotStates.length,
+      lastProcessedUtteranceId: processingState?.lastProcessedUtteranceId ?? null,
+    });
     const bundle = await updateSlotStateBundleFromConversation({
       ...context,
       currentTopic,
       currentTopicTitle,
       utterancesToClassify,
     });
+    const classificationFinishedAt = Date.now();
     if (
       utterancesToClassify.length > 0 &&
       bundle.debug.summary.llmSucceeded !== true
@@ -74,44 +88,81 @@ export async function POST(request: Request) {
       );
     }
     const latestProcessedUtterance = utterancesToClassify.at(-1);
-    await prisma.$transaction(async (tx) => {
-      await saveSlotStates(sessionId, bundle.slotStates, tx);
-      await saveSubSlotStates(sessionId, bundle.subSlotStates, tx);
-      if (latestProcessedUtterance?.id) {
-        await tx.preparedQuestion.updateMany({
-          where: {
-            sessionId,
-            status: "prepared",
-          },
-          data: {
-            status: "invalidated",
-            invalidatedAt: new Date(),
-            invalidationReason: "slot_state_updated",
-          },
-        });
+    const changedSlotStates = getChangedSlotStates(
+      context.slotStates,
+      bundle.slotStates,
+    );
+    const changedSubSlotStates = getChangedSubSlotStates(
+      context.subSlotStates,
+      bundle.subSlotStates,
+    );
+    console.info("[ai update-slots diff]", {
+      sessionId,
+      slotTotal: bundle.slotStates.length,
+      slotChanged: changedSlotStates.length,
+      subSlotTotal: bundle.subSlotStates.length,
+      subSlotChanged: changedSubSlotStates.length,
+    });
+    const transactionStartedAt = Date.now();
+    await prisma.$transaction(
+      async (tx) => {
+        if (changedSlotStates.length > 0) {
+          await saveSlotStates(sessionId, changedSlotStates, tx);
+        }
+        if (changedSubSlotStates.length > 0) {
+          await saveSubSlotStates(sessionId, changedSubSlotStates, tx);
+        }
+        if (latestProcessedUtterance?.id) {
+          await tx.preparedQuestion.updateMany({
+            where: {
+              sessionId,
+              status: "prepared",
+            },
+            data: {
+              status: "invalidated",
+              invalidatedAt: new Date(),
+              invalidationReason: "slot_state_updated",
+            },
+          });
 
-        await tx.aIProcessingState.upsert({
-          where: { sessionId },
-          create: {
-            sessionId,
-            participantCode: context.session.participantCode,
-            lastProcessedUtteranceId: latestProcessedUtterance.id,
-            lastProcessedAt: new Date(),
-            slotRevision: 1,
-            processingStatus: "ready",
-            processingFinishedAt: new Date(),
-          },
-          update: {
-            participantCode: context.session.participantCode,
-            lastProcessedUtteranceId: latestProcessedUtterance.id,
-            lastProcessedAt: new Date(),
-            slotRevision: { increment: 1 },
-            processingStatus: "ready",
-            processingFinishedAt: new Date(),
-            lastError: null,
-          },
-        });
-      }
+          await tx.aIProcessingState.upsert({
+            where: { sessionId },
+            create: {
+              sessionId,
+              participantCode: context.session.participantCode,
+              lastProcessedUtteranceId: latestProcessedUtterance.id,
+              lastProcessedAt: new Date(),
+              slotRevision: 1,
+              processingStatus: "ready",
+              processingFinishedAt: new Date(),
+            },
+            update: {
+              participantCode: context.session.participantCode,
+              lastProcessedUtteranceId: latestProcessedUtterance.id,
+              lastProcessedAt: new Date(),
+              slotRevision: { increment: 1 },
+              processingStatus: "ready",
+              processingFinishedAt: new Date(),
+              lastError: null,
+            },
+          });
+        }
+      },
+      {
+        maxWait: SLOT_UPDATE_TRANSACTION_MAX_WAIT_MS,
+        timeout: SLOT_UPDATE_TRANSACTION_TIMEOUT_MS,
+      },
+    );
+    console.info("[ai update-slots saved]", {
+      sessionId,
+      utterancesToClassifyCount: utterancesToClassify.length,
+      slotStateCount: bundle.slotStates.length,
+      subSlotStateCount: bundle.subSlotStates.length,
+      slotWrites: changedSlotStates.length,
+      subSlotWrites: changedSubSlotStates.length,
+      classificationMs: classificationFinishedAt - startedAt,
+      transactionMs: Date.now() - transactionStartedAt,
+      totalMs: Date.now() - startedAt,
     });
     const slotControl = buildSlotControlDebugState({
       slots: bundle.slotStates,
@@ -130,6 +181,7 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("[ai update-slots failed]", {
       sessionId,
+      stage: "update_slots",
       error: error instanceof Error ? error.message : String(error),
     });
 
