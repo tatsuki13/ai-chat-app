@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from audio_stream import AudioStreamRegistry
 from config import COMPUTE_TYPE, DEVICE, MODEL_NAME
 from crosstalk import remember, should_suppress
-from models import FrameRequest, TranscriptResult
+from models import FlushRequest, FrameRequest, TranscriptResult
 from transcriber import transcribe_pcm16
 
 app = FastAPI(title="Local ASR Worker")
@@ -27,6 +27,19 @@ def frame(request: FrameRequest):
     if segment is None:
         return {"ok": True, "worker": "connected", "transcripts": []}
 
+    return process_segment(request.sessionId, request.role, request.streamId, segment)
+
+
+@app.post("/flush")
+def flush(request: FlushRequest):
+    segment = streams.flush(request)
+    if segment is None:
+        return {"ok": True, "worker": "connected", "transcripts": []}
+
+    return process_segment(request.sessionId, request.role, request.streamId, segment)
+
+
+def process_segment(session_id: str, role: str, stream_id: str, segment):
     try:
         text = transcribe_pcm16(segment.pcm)
     except Exception as error:
@@ -36,13 +49,15 @@ def frame(request: FrameRequest):
             "transcripts": [
                 TranscriptResult(
                     status="error",
-                    sessionId=request.sessionId,
-                    role=request.role,
-                    streamId=request.streamId,
+                    sessionId=session_id,
+                    role=role,
+                    streamId=stream_id,
                     segmentId=segment.segment_id,
                     utteranceGroupId=segment.group_id,
                     startMs=segment.start_ms,
                     endMs=segment.end_ms,
+                    startedAt=segment.started_at,
+                    endedAt=segment.ended_at,
                     asrModel=MODEL_NAME,
                     reason=str(error),
                 ).model_dump()
@@ -56,24 +71,26 @@ def frame(request: FrameRequest):
             "transcripts": [
                 TranscriptResult(
                     status="empty",
-                    sessionId=request.sessionId,
-                    role=request.role,
-                    streamId=request.streamId,
+                    sessionId=session_id,
+                    role=role,
+                    streamId=stream_id,
                     segmentId=segment.segment_id,
                     utteranceGroupId=segment.group_id,
                     startMs=segment.start_ms,
                     endMs=segment.end_ms,
+                    startedAt=segment.started_at,
+                    endedAt=segment.ended_at,
                     asrModel=MODEL_NAME,
                 ).model_dump()
             ],
         }
 
     suppressed, source_segment_id = should_suppress(
-        request.sessionId,
-        request.role,
+        session_id,
+        role,
         text,
-        segment.start_ms,
-        segment.end_ms,
+        segment.absolute_start_ms,
+        segment.absolute_end_ms,
     )
     if suppressed:
         return {
@@ -82,14 +99,16 @@ def frame(request: FrameRequest):
             "transcripts": [
                 TranscriptResult(
                     status="suppressed_crosstalk",
-                    sessionId=request.sessionId,
-                    role=request.role,
-                    streamId=request.streamId,
+                    sessionId=session_id,
+                    role=role,
+                    streamId=stream_id,
                     segmentId=segment.segment_id,
                     utteranceGroupId=segment.group_id,
                     text=text,
                     startMs=segment.start_ms,
                     endMs=segment.end_ms,
+                    startedAt=segment.started_at,
+                    endedAt=segment.ended_at,
                     asrModel=MODEL_NAME,
                     reason=source_segment_id,
                 ).model_dump()
@@ -97,11 +116,11 @@ def frame(request: FrameRequest):
         }
 
     remember(
-        request.sessionId,
-        request.role,
+        session_id,
+        role,
         text,
-        segment.start_ms,
-        segment.end_ms,
+        segment.absolute_start_ms,
+        segment.absolute_end_ms,
         segment.segment_id,
     )
     return {
@@ -110,14 +129,16 @@ def frame(request: FrameRequest):
         "transcripts": [
             TranscriptResult(
                 status="accepted",
-                sessionId=request.sessionId,
-                role=request.role,
-                streamId=request.streamId,
+                sessionId=session_id,
+                role=role,
+                streamId=stream_id,
                 segmentId=segment.segment_id,
                 utteranceGroupId=segment.group_id,
                 text=text,
                 startMs=segment.start_ms,
                 endMs=segment.end_ms,
+                startedAt=segment.started_at,
+                endedAt=segment.ended_at,
                 asrModel=MODEL_NAME,
             ).model_dump()
         ],

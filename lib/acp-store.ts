@@ -21,6 +21,8 @@ import {
   type StoredSubSlotState,
 } from "./acp-mvp";
 
+type PrismaClientLike = typeof prisma | Prisma.TransactionClient;
+
 export async function getSessionContext(sessionId: string) {
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
@@ -204,10 +206,14 @@ export async function createInitialSlotStates(sessionId: string) {
   return slots;
 }
 
-export async function saveSlotStates(sessionId: string, slots: AcpSlotState[]) {
+export async function saveSlotStates(
+  sessionId: string,
+  slots: AcpSlotState[],
+  db: PrismaClientLike = prisma,
+) {
   await Promise.all(
     slots.map((slot) =>
-      prisma.slotState.upsert({
+      db.slotState.upsert({
         where: {
           sessionId_slotName: {
             sessionId,
@@ -234,10 +240,11 @@ export async function saveSlotStates(sessionId: string, slots: AcpSlotState[]) {
 export async function saveSubSlotStates(
   sessionId: string,
   states: StoredSubSlotState[],
+  db: PrismaClientLike = prisma,
 ) {
   await Promise.all(
     states.map((state) =>
-      prisma.slotSubState.upsert({
+      db.slotSubState.upsert({
         where: {
           sessionId_mainSlotId_subSlotId: {
             sessionId,

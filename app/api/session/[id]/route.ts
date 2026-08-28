@@ -14,20 +14,27 @@ type RouteContext = {
 };
 
 export async function GET(_request: Request, context: RouteContext) {
+  let id = "";
+
   try {
-    const { id } = await context.params;
-    const [session, utteranceCount, utterances] = await prisma.$transaction([
-      prisma.session.findUnique({
-        where: { id },
-        select: {
-          id: true,
-          participantCode: true,
-          condition: true,
-          startedAt: true,
-          dialogueStartedAt: true,
-          endedAt: true,
-        },
-      }),
+    id = (await context.params).id;
+    const session = await prisma.session.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        participantCode: true,
+        condition: true,
+        startedAt: true,
+        dialogueStartedAt: true,
+        endedAt: true,
+      },
+    });
+
+    if (!session) {
+      return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    }
+
+    const [utteranceCount, utterances] = await Promise.all([
       prisma.sessionUtterance.count({
         where: { sessionId: id },
       }),
@@ -47,10 +54,6 @@ export async function GET(_request: Request, context: RouteContext) {
         },
       }),
     ]);
-
-    if (!session) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
 
     return NextResponse.json({
       session: {
@@ -74,7 +77,10 @@ export async function GET(_request: Request, context: RouteContext) {
       })),
     });
   } catch (error) {
-    console.error(error);
+    console.error("[session detail load failed]", {
+      sessionId: id,
+      error: error instanceof Error ? error.message : String(error),
+    });
 
     return NextResponse.json(
       { error: "Failed to load session" },

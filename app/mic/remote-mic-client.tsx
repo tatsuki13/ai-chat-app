@@ -75,9 +75,11 @@ export default function RemoteMicClient(props: {
   const streamIdRef = useRef("");
   const recordingActiveRef = useRef(false);
   const remoteMicRef = useRef<RemoteMicSession | null>(null);
+  const fixedRoleRef = useRef<RemoteMicRole | null>(null);
   const micStateRef = useRef<MicState>("idle");
   const postingFrameRef = useRef(false);
   const pendingFramesRef = useRef<LocalPcmFrame[]>([]);
+  const reconnectingAfterMismatchRef = useRef(false);
   const aiSpeechReleaseTimerRef = useRef<number | null>(null);
   const aiSpeechSafetyTimerRef = useRef<number | null>(null);
   const aiSpeechStateRef = useRef({
@@ -101,6 +103,10 @@ export default function RemoteMicClient(props: {
   useEffect(() => {
     micStateRef.current = micState;
   }, [micState]);
+
+  useEffect(() => {
+    fixedRoleRef.current = fixedRole;
+  }, [fixedRole]);
 
   useEffect(() => {
     const nextSecureContext = window.isSecureContext;
@@ -251,11 +257,11 @@ export default function RemoteMicClient(props: {
   async function loadActiveSession(
     role: RemoteMicRole | null,
     options: { quiet?: boolean } = {},
-  ) {
+  ): Promise<RemoteMicSession | null> {
     if (!role) {
       setServerLabel("役割未設定");
       setError("/mic/elder または /mic/caregiver で開いてください。");
-      return;
+      return null;
     }
 
     const controller = new AbortController();
@@ -266,17 +272,19 @@ export default function RemoteMicClient(props: {
       if (!data.active) {
         setRemoteMic(null);
         setServerLabel("PC待機中");
-        return;
+        return null;
       }
 
-      setRemoteMic({
+      const nextRemoteMic = {
         sessionId: data.active.sessionId,
         participantCode: data.active.participantCode,
         dialogueStartedAt: data.active.dialogueStartedAt,
         role: data.role,
-      });
+      };
+      setRemoteMic(nextRemoteMic);
       if (!options.quiet) setError("");
       setServerLabel("接続準備完了");
+      return nextRemoteMic;
     } catch (loadError) {
       setServerLabel("未接続");
       if (!options.quiet) {
@@ -288,13 +296,14 @@ export default function RemoteMicClient(props: {
               : "現在の対話セッションを確認できませんでした。",
         );
       }
+      return null;
     } finally {
       window.clearTimeout(timeoutId);
     }
   }
 
-  async function start() {
-    if (!canStart || !remoteMic) return;
+  async function start(targetRemoteMic = remoteMicRef.current) {
+    if (!targetRemoteMic || micStateRef.current !== "idle") return;
 
     setError("");
     setPermissionLabel("確認中");
@@ -327,7 +336,7 @@ export default function RemoteMicClient(props: {
         video: false,
       });
       streamRef.current = stream;
-      streamIdRef.current = `${remoteMic.role}:${Date.now()}:${crypto.randomUUID()}`;
+      streamIdRef.current = `${targetRemoteMic.role}:${Date.now()}:${crypto.randomUUID()}`;
       sequenceRef.current = 0;
 
       const audioContext = new AudioContextClass();
@@ -354,7 +363,7 @@ export default function RemoteMicClient(props: {
       setMicState("streaming");
       setConnectionLabel("送信中");
       setServerLabel("ローカル文字起こし中");
-      await setFixedMicMuted(false);
+      await setFixedMicMuted(false, targetRemoteMic);
     } catch (startError) {
       if (isPermissionError(startError)) {
         setPermissionLabel("拒否");
@@ -408,12 +417,12 @@ export default function RemoteMicClient(props: {
       while (pendingFramesRef.current.length > 0 && recordingActiveRef.current) {
         const frame = pendingFramesRef.current.shift();
         if (!frame) continue;
-        const response = await fetch("/api/remote-mic/local/frame", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(frame),
-        });
+        const response = await postFrame(frame);
         if (!response.ok) {
+          if (response.status === 409) {
+            await recoverFromActiveSessionMismatch();
+            return;
+          }
           throw new Error(`Local ASR frame failed: ${response.status}`);
         }
         const data = (await response.json()) as {
@@ -443,14 +452,66 @@ export default function RemoteMicClient(props: {
     }
   }
 
+  async function postFrame(frame: LocalPcmFrame) {
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await fetch("/api/remote-mic/local/frame", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(frame),
+        });
+        if (response.status !== 500 && response.status !== 502 && response.status !== 503) {
+          return response;
+        }
+        lastError = new Error(`Local ASR frame failed: ${response.status}`);
+      } catch (error) {
+        lastError = error;
+      }
+
+      await wait(300);
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("Local ASR frame failed");
+  }
+
+  async function recoverFromActiveSessionMismatch() {
+    if (reconnectingAfterMismatchRef.current) return;
+    reconnectingAfterMismatchRef.current = true;
+
+    try {
+      setConnectionLabel("蜀肴磁邯壻ｸｭ");
+      setServerLabel("PC蛛ｴ縺ｮ譁ｰsession繧堤｢ｺ隱堺ｸｭ");
+      await stop(false);
+      const nextRemoteMic = await loadActiveSession(fixedRoleRef.current, { quiet: true });
+      if (nextRemoteMic) {
+        await start(nextRemoteMic);
+      }
+    } finally {
+      reconnectingAfterMismatchRef.current = false;
+    }
+  }
+
   async function muteMicrophone() {
     await stop();
   }
 
   async function stop(notifyServer = true) {
+    const shouldFlush = Boolean(
+      notifyServer &&
+        recordingActiveRef.current &&
+        remoteMicRef.current &&
+        streamIdRef.current,
+    );
     recordingActiveRef.current = false;
     pendingFramesRef.current = [];
     clearAudioFrameBuffer();
+    if (shouldFlush) {
+      await flushCurrentStream().catch((flushError) => {
+        console.warn("[remote-mic local flush failed]", flushError);
+      });
+    }
     workletNodeRef.current?.disconnect();
     workletNodeRef.current = null;
     audioSourceRef.current?.disconnect();
@@ -481,15 +542,35 @@ export default function RemoteMicClient(props: {
     }
   }
 
-  async function setFixedMicMuted(muted: boolean) {
-    if (!remoteMic) return;
+  async function flushCurrentStream() {
+    const current = remoteMicRef.current;
+    const streamId = streamIdRef.current;
+    if (!current || !streamId) return;
+
+    const response = await fetch("/api/remote-mic/local/flush", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: current.sessionId,
+        role: current.role,
+        streamId,
+      }),
+    });
+
+    if (!response.ok && response.status !== 409) {
+      throw new Error(`Local ASR flush failed: ${response.status}`);
+    }
+  }
+
+  async function setFixedMicMuted(muted: boolean, targetRemoteMic = remoteMicRef.current) {
+    if (!targetRemoteMic) return;
 
     const response = await fetch("/api/remote-mic/fixed/mute", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        sessionId: remoteMic.sessionId,
-        role: remoteMic.role,
+        sessionId: targetRemoteMic.sessionId,
+        role: targetRemoteMic.role,
         muted,
       }),
     });
@@ -815,4 +896,8 @@ function isPermissionError(error: unknown) {
   if (!(error instanceof DOMException)) return false;
 
   return error.name === "NotAllowedError" || error.name === "PermissionDeniedError";
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }

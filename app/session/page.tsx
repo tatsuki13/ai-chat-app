@@ -351,6 +351,7 @@ function SessionPageClient() {
   const promptRestoreTimeoutRef = useRef<number | null>(null);
   const sessionRef = useRef<SessionInfo | null>(null);
   const utterancesRef = useRef<Utterance[]>([]);
+  const sessionSyncInFlightRef = useRef(false);
   const pendingCommitPromiseRef = useRef<Promise<void> | null>(null);
   const speakerRef = useRef<Speaker>("elder");
   const pushToTalkPressedRef = useRef(false);
@@ -518,6 +519,9 @@ function SessionPageClient() {
     if (!session?.id || session.ended_at) return;
 
     const timerId = window.setInterval(() => {
+      if (sessionSyncInFlightRef.current) return;
+
+      sessionSyncInFlightRef.current = true;
       void fetchSessionDetail(session.id)
         .then((detail) => {
           const persistedUtterances = markPersistedUtterances(detail.utterances);
@@ -570,11 +574,15 @@ function SessionPageClient() {
             setSession(created);
             setStatusText("保存済み");
           });
+        })
+        .finally(() => {
+          sessionSyncInFlightRef.current = false;
         });
     }, REMOTE_MIC_SESSION_SYNC_MS);
 
     return () => {
       window.clearInterval(timerId);
+      sessionSyncInFlightRef.current = false;
     };
   }, [requestedSessionId, session?.id, session?.ended_at]);
 

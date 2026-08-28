@@ -73,32 +73,46 @@ export async function POST(request: Request) {
         { status: 502 },
       );
     }
-    await saveSlotStates(sessionId, bundle.slotStates);
-    await saveSubSlotStates(sessionId, bundle.subSlotStates);
     const latestProcessedUtterance = utterancesToClassify.at(-1);
-    if (latestProcessedUtterance?.id) {
-      await prisma.aIProcessingState.upsert({
-        where: { sessionId },
-        create: {
-          sessionId,
-          participantCode: context.session.participantCode,
-          lastProcessedUtteranceId: latestProcessedUtterance.id,
-          lastProcessedAt: new Date(),
-          slotRevision: 1,
-          processingStatus: "ready",
-          processingFinishedAt: new Date(),
-        },
-        update: {
-          participantCode: context.session.participantCode,
-          lastProcessedUtteranceId: latestProcessedUtterance.id,
-          lastProcessedAt: new Date(),
-          slotRevision: { increment: 1 },
-          processingStatus: "ready",
-          processingFinishedAt: new Date(),
-          lastError: null,
-        },
-      });
-    }
+    await prisma.$transaction(async (tx) => {
+      await saveSlotStates(sessionId, bundle.slotStates, tx);
+      await saveSubSlotStates(sessionId, bundle.subSlotStates, tx);
+      if (latestProcessedUtterance?.id) {
+        await tx.preparedQuestion.updateMany({
+          where: {
+            sessionId,
+            status: "prepared",
+          },
+          data: {
+            status: "invalidated",
+            invalidatedAt: new Date(),
+            invalidationReason: "slot_state_updated",
+          },
+        });
+
+        await tx.aIProcessingState.upsert({
+          where: { sessionId },
+          create: {
+            sessionId,
+            participantCode: context.session.participantCode,
+            lastProcessedUtteranceId: latestProcessedUtterance.id,
+            lastProcessedAt: new Date(),
+            slotRevision: 1,
+            processingStatus: "ready",
+            processingFinishedAt: new Date(),
+          },
+          update: {
+            participantCode: context.session.participantCode,
+            lastProcessedUtteranceId: latestProcessedUtterance.id,
+            lastProcessedAt: new Date(),
+            slotRevision: { increment: 1 },
+            processingStatus: "ready",
+            processingFinishedAt: new Date(),
+            lastError: null,
+          },
+        });
+      }
+    });
     const slotControl = buildSlotControlDebugState({
       slots: bundle.slotStates,
       currentTopic,

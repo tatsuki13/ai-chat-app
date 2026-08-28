@@ -14,7 +14,6 @@ def normalize_text(value: str) -> str:
 def should_suppress(session_id: str, role: str, text: str, start_ms: int | None, end_ms: int | None) -> tuple[bool, str | None]:
     normalized = normalize_text(text)
     if len(normalized) < 8:
-        remember(session_id, role, text, start_ms, end_ms)
         return False, None
 
     now = time()
@@ -31,7 +30,6 @@ def should_suppress(session_id: str, role: str, text: str, start_ms: int | None,
         if similarity >= CROSSTALK_SIMILARITY:
             return True, entry["segment_id"]
 
-    remember(session_id, role, text, start_ms, end_ms)
     return False, None
 
 

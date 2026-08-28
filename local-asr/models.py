@@ -14,6 +14,12 @@ class FrameRequest(BaseModel):
     pcmBase64: str
 
 
+class FlushRequest(BaseModel):
+    sessionId: str
+    role: str
+    streamId: str
+
+
 class TranscriptResult(BaseModel):
     status: str
     sessionId: str
@@ -24,6 +30,8 @@ class TranscriptResult(BaseModel):
     text: str = ""
     startMs: int | None = None
     endMs: int | None = None
+    startedAt: str | None = None
+    endedAt: str | None = None
     finalized: bool = True
     asrProvider: str = "local-asr"
     asrModel: str | None = None

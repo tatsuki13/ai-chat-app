@@ -1,15 +1,11 @@
 import { NextResponse } from "next/server";
-import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
 import { getFixedRemoteMicActiveSession } from "../../../../../lib/remote-mic/active-session-db";
+import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
 import {
   appendOrCreateLocalAsrUtterance,
   serializeLocalAsrUtterance,
   type LocalAsrTranscript,
 } from "../../../../../lib/remote-mic/local-asr-save";
-import {
-  getAiSpeechState,
-  isAiSpeechBlockingTranscription,
-} from "../../../../../lib/ai/speech-state";
 
 export const runtime = "nodejs";
 
@@ -21,63 +17,31 @@ export async function POST(request: Request) {
   let sessionId = "";
   let role: "elder" | "caregiver" | null = null;
   let streamId = "";
-  let sequence: number | null = null;
 
   try {
     const body = (await request.json().catch(() => null)) as {
       sessionId?: unknown;
       role?: unknown;
       streamId?: unknown;
-      sequence?: unknown;
-      capturedAt?: unknown;
-      durationMs?: unknown;
-      sampleRate?: unknown;
-      averageLevel?: unknown;
-      peakLevel?: unknown;
-      pcmBase64?: unknown;
     } | null;
 
     sessionId = requiredString(body?.sessionId);
     role = parseRemoteMicRole(requiredString(body?.role));
     streamId = requiredString(body?.streamId);
-    sequence = toInteger(body?.sequence);
-    const pcmBase64 = requiredString(body?.pcmBase64);
 
-    if (!sessionId || !role || !streamId || sequence === null || !pcmBase64) {
+    if (!sessionId || !role || !streamId) {
       return NextResponse.json(
-        { error: "sessionId, role, streamId, sequence, and pcmBase64 are required" },
+        { error: "sessionId, role, and streamId are required" },
         { status: 400 },
       );
     }
 
     const active = await getFixedRemoteMicActiveSession();
-    if (!active || active.sessionId !== sessionId || active.endedAt) {
+    if (!active || active.sessionId !== sessionId) {
       return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
     }
 
-    const aiSpeechState = await getAiSpeechState(sessionId);
-    if (isAiSpeechBlockingTranscription(aiSpeechState)) {
-      return NextResponse.json({
-        ok: true,
-        transcripts: [],
-        skipped: true,
-        reason: "ai_speech_active",
-      });
-    }
-
-    const workerResponse = await postToLocalAsr({
-      sessionId,
-      role,
-      streamId,
-      sequence,
-      capturedAt: requiredString(body?.capturedAt),
-      durationMs: toNumber(body?.durationMs),
-      sampleRate: toNumber(body?.sampleRate),
-      averageLevel: toNumber(body?.averageLevel),
-      peakLevel: toNumber(body?.peakLevel),
-      pcmBase64,
-    });
-
+    const workerResponse = await postFlushToLocalAsr({ sessionId, role, streamId });
     const transcripts = Array.isArray(workerResponse.transcripts)
       ? (workerResponse.transcripts as LocalAsrTranscript[])
       : [];
@@ -114,27 +78,30 @@ export async function POST(request: Request) {
       saved: saved.map(serializeLocalAsrUtterance),
     });
   } catch (error) {
-    console.error("[remote-mic local frame save failed]", {
-      error: error instanceof Error ? error.message : String(error),
+    console.error("[remote-mic local flush failed]", {
       sessionId,
       role,
       streamId,
-      sequence,
+      error: error instanceof Error ? error.message : String(error),
     });
 
     return NextResponse.json(
-      { error: "Failed to process local ASR frame" },
+      { error: "Failed to flush local ASR stream" },
       { status: 500 },
     );
   }
 }
 
-async function postToLocalAsr(payload: Record<string, unknown>) {
+async function postFlushToLocalAsr(payload: {
+  sessionId: string;
+  role: "elder" | "caregiver";
+  streamId: string;
+}) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), LOCAL_ASR_TIMEOUT_MS);
 
   try {
-    const response = await fetch(`${LOCAL_ASR_BASE_URL.replace(/\/+$/, "")}/frame`, {
+    const response = await fetch(`${LOCAL_ASR_BASE_URL.replace(/\/+$/, "")}/flush`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -143,27 +110,17 @@ async function postToLocalAsr(payload: Record<string, unknown>) {
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "");
-      console.error("[local-asr frame failed]", {
+      console.error("[local-asr flush failed]", {
         status: response.status,
         errorText,
         sessionId: payload.sessionId,
         role: payload.role,
         streamId: payload.streamId,
-        sequence: payload.sequence,
       });
-      throw new Error(`Local ASR worker failed: ${response.status}`);
+      throw new Error(`Local ASR worker flush failed: ${response.status}`);
     }
 
     return (await response.json()) as Record<string, unknown>;
-  } catch (error) {
-    console.error("[local-asr frame error]", {
-      error: error instanceof Error ? error.message : String(error),
-      sessionId: payload.sessionId,
-      role: payload.role,
-      streamId: payload.streamId,
-      sequence: payload.sequence,
-    });
-    throw error;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -171,11 +128,6 @@ async function postToLocalAsr(payload: Record<string, unknown>) {
 
 function requiredString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function toNumber(value: unknown) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
 }
 
 function toInteger(value: unknown) {

@@ -1,78 +1,93 @@
-# Secure Remote Smartphone Microphone Setup
+# Fixed Smartphone Microphone Setup
 
-This project keeps the Next.js dev server bound to `localhost` and exposes it
-only through Tailscale Serve. Do not use Tailscale Funnel, Cloudflare Quick
-Tunnel, or `next dev --hostname 0.0.0.0` for research sessions that contain
-sensitive conversation data.
+The current remote microphone path is fixed-phone Local ASR only:
+
+```text
+/mic/elder or /mic/caregiver
+-> AudioWorklet
+-> 16 kHz PCM frames
+-> /api/remote-mic/local/frame
+-> Local ASR Worker
+-> utterances
+-> PC /session
+```
+
+Retired pairing, browser-to-browser audio transfer, and chunk polling paths are
+not part of the current fixed-phone setup.
 
 ## Environment
 
-Set these values on the PC that runs Next.js:
+Run Next.js on the PC and expose it through Tailscale Serve. The app talks to
+the Local ASR Worker on the same PC by default:
 
 ```env
-REMOTE_MIC_ENABLED=true
-REMOTE_MIC_BASE_URL=https://YOUR-PC-NAME.YOUR-TAILNET.ts.net
-REMOTE_MIC_TOKEN_TTL_SECONDS=300
-REMOTE_MIC_STORE_RAW_AUDIO=false
-REMOTE_MIC_DEDUP_ENABLED=true
-REMOTE_MIC_COOKIE_SECRET=replace-with-a-long-random-secret
+LOCAL_ASR_BASE_URL=http://127.0.0.1:8765
+LOCAL_ASR_TIMEOUT_MS=8000
+LOCAL_ASR_MODEL=small
+LOCAL_ASR_DEVICE=cpu
+LOCAL_ASR_COMPUTE_TYPE=int8
+LOCAL_ASR_END_SILENCE_MS=1200
+LOCAL_ASR_MIN_SPEECH_MS=200
+LOCAL_ASR_SPEECH_THRESHOLD=0.015
+LOCAL_ASR_STREAM_TTL_MS=300000
 ```
 
-In production or public hosting, leave `REMOTE_MIC_ENABLED` unset or set it to
-`false`.
+No pairing-token or raw-audio chunk settings are needed for this path.
 
 ## PC Setup
 
 1. Install Tailscale on Windows.
 2. Sign in to the same tailnet that will be used by the two smartphones.
-3. Start the Next.js app locally:
+3. Start the Local ASR Worker:
+
+```powershell
+npm run asr:start
+```
+
+4. Start Next.js locally:
 
 ```powershell
 npm run dev
 ```
 
-4. Configure Tailscale Serve to forward HTTPS traffic to local Next.js.
+5. Configure Tailscale Serve to forward HTTPS traffic to `http://localhost:3000`.
 
-The exact Tailscale CLI syntax depends on the installed version. Check it on
-the PC:
+Check the command form supported by the installed Tailscale version:
 
 ```powershell
 tailscale serve --help
 ```
 
-Use the command form documented by that output to serve `http://localhost:3000`
-over the device's `https://*.ts.net` address.
-
 ## Smartphone Setup
 
 1. Install Tailscale on both smartphones.
 2. Sign in to the same tailnet as the PC.
-3. Open the PC app from the Tailscale HTTPS URL.
-4. Create the experiment session.
-5. Scan the "本人用マイク" QR with the older adult's phone.
-6. Scan the "介護者用マイク" QR with the caregiver's phone.
-7. On each phone, confirm the displayed role and tap "マイク開始".
+3. On the PC `/session` screen, set the participant ID and start/connect the session.
+4. Open these fixed URLs from the Tailscale HTTPS host:
 
-The QR token is one-time use and expires quickly. If a scan fails, use "QRを再発行"
-on the PC screen.
+```text
+https://YOUR-PC-NAME.YOUR-TAILNET.ts.net/mic/elder
+https://YOUR-PC-NAME.YOUR-TAILNET.ts.net/mic/caregiver
+```
 
-## Safety Notes
+5. Tap the connection refresh button if the PC session was changed after the
+   phone page was opened.
+6. Tap the microphone start button on each phone.
 
-- QR URLs contain a one-time token, not the raw session ID.
-- Tokens are stored only as SHA-256 hashes in the database.
-- The token is exchanged for an HttpOnly, Secure, SameSite=Strict cookie.
-- After exchange, `/mic/join` removes the token from the browser address bar.
-- Raw audio is not stored when `REMOTE_MIC_STORE_RAW_AUDIO=false`.
-- Smartphone microphone APIs are disabled unless `REMOTE_MIC_ENABLED=true`.
-- The health endpoint is `/api/remote-mic/health`; it does not return API keys,
-  tokens, session IDs, participant names, or conversation text.
+## Runtime State
+
+`RemoteMicActiveSession` in the database is the source of truth for the active
+session. The in-process runtime store is only short-lived state for role
+connection, mute, transmitting, last seen, and AI speech pause coordination.
 
 ## Troubleshooting
 
-- If the phone says HTTPS is required, make sure the page is opened through the
-  `https://*.ts.net` Tailscale Serve URL.
-- If the QR is expired or already used, reissue QR codes on the PC screen.
-- If audio stops arriving, confirm both devices are still connected to Tailscale.
-- If WSL is used for Next.js and Windows runs Tailscale, first confirm that
-  Windows can open `http://localhost:3000`. If not, fix WSL localhost forwarding
-  before configuring Serve.
+- If the phone says HTTPS is required, open the page through the `https://*.ts.net`
+  Tailscale Serve URL.
+- If the phone says the Local ASR Worker is unavailable, start `npm run asr:start`
+  on the PC and check `/api/remote-mic/local/health`.
+- If the PC session changes while a phone is streaming, the phone stops the old
+  stream, fetches `/api/remote-mic/fixed/current` once, and starts a new stream
+  when possible.
+- When the microphone is stopped, the phone asks `/api/remote-mic/local/flush`
+  to finalize any buffered speech before the stream is closed.
