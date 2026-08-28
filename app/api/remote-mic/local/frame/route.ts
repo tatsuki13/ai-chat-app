@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
-import { getActiveFixedRemoteMicSession } from "../../../../../lib/remote-mic/fixed-session";
+import { getFixedRemoteMicActiveSession } from "../../../../../lib/remote-mic/active-session-db";
 import { prisma } from "../../../../../lib/prisma";
 import {
   createUtteranceTiming,
@@ -34,106 +34,126 @@ type LocalAsrTranscript = {
 };
 
 export async function POST(request: Request) {
-  const body = (await request.json().catch(() => null)) as {
-    sessionId?: unknown;
-    role?: unknown;
-    streamId?: unknown;
-    sequence?: unknown;
-    capturedAt?: unknown;
-    durationMs?: unknown;
-    sampleRate?: unknown;
-    averageLevel?: unknown;
-    peakLevel?: unknown;
-    pcmBase64?: unknown;
-  } | null;
+  let sessionId = "";
+  let role: "elder" | "caregiver" | null = null;
+  let streamId = "";
+  let sequence: number | null = null;
 
-  const sessionId = requiredString(body?.sessionId);
-  const role = parseRemoteMicRole(requiredString(body?.role));
-  const streamId = requiredString(body?.streamId);
-  const sequence = toInteger(body?.sequence);
-  const pcmBase64 = requiredString(body?.pcmBase64);
+  try {
+    const body = (await request.json().catch(() => null)) as {
+      sessionId?: unknown;
+      role?: unknown;
+      streamId?: unknown;
+      sequence?: unknown;
+      capturedAt?: unknown;
+      durationMs?: unknown;
+      sampleRate?: unknown;
+      averageLevel?: unknown;
+      peakLevel?: unknown;
+      pcmBase64?: unknown;
+    } | null;
 
-  if (!sessionId || !role || !streamId || sequence === null || !pcmBase64) {
-    return NextResponse.json(
-      { error: "sessionId, role, streamId, sequence, and pcmBase64 are required" },
-      { status: 400 },
-    );
-  }
+    sessionId = requiredString(body?.sessionId);
+    role = parseRemoteMicRole(requiredString(body?.role));
+    streamId = requiredString(body?.streamId);
+    sequence = toInteger(body?.sequence);
+    const pcmBase64 = requiredString(body?.pcmBase64);
 
-  const active = getActiveFixedRemoteMicSession();
-  if (!active || active.sessionId !== sessionId || active.endedAt) {
-    return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
-  }
+    if (!sessionId || !role || !streamId || sequence === null || !pcmBase64) {
+      return NextResponse.json(
+        { error: "sessionId, role, streamId, sequence, and pcmBase64 are required" },
+        { status: 400 },
+      );
+    }
 
-  const aiSpeechState = await getAiSpeechState(sessionId);
-  if (isAiSpeechBlockingTranscription(aiSpeechState)) {
+    const active = await getFixedRemoteMicActiveSession();
+    if (!active || active.sessionId !== sessionId || active.endedAt) {
+      return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
+    }
+
+    const aiSpeechState = await getAiSpeechState(sessionId);
+    if (isAiSpeechBlockingTranscription(aiSpeechState)) {
+      return NextResponse.json({
+        ok: true,
+        transcripts: [],
+        skipped: true,
+        reason: "ai_speech_active",
+      });
+    }
+
+    const workerResponse = await postToLocalAsr({
+      sessionId,
+      role,
+      streamId,
+      sequence,
+      capturedAt: requiredString(body?.capturedAt),
+      durationMs: toNumber(body?.durationMs),
+      sampleRate: toNumber(body?.sampleRate),
+      averageLevel: toNumber(body?.averageLevel),
+      peakLevel: toNumber(body?.peakLevel),
+      pcmBase64,
+    });
+
+    const transcripts = Array.isArray(workerResponse.transcripts)
+      ? (workerResponse.transcripts as LocalAsrTranscript[])
+      : [];
+    const saved = [];
+
+    for (const transcript of transcripts) {
+      if (transcript.status !== "accepted") continue;
+      if (!transcript.finalized) continue;
+      const text = requiredString(transcript.text);
+      const utteranceGroupId = requiredString(transcript.utteranceGroupId);
+      if (!text || !utteranceGroupId) continue;
+
+      saved.push(
+        await appendOrCreateLocalAsrUtterance({
+          sessionId,
+          participantCode: active.participantCode,
+          role,
+          text,
+          sourceGroupId: utteranceGroupId,
+          startMs: toInteger(transcript.startMs),
+          endMs: toInteger(transcript.endMs),
+          asrProvider: requiredString(transcript.asrProvider) || "local-asr",
+          asrModel: requiredString(transcript.asrModel) || null,
+        }),
+      );
+    }
+
     return NextResponse.json({
       ok: true,
-      transcripts: [],
-      skipped: true,
-      reason: "ai_speech_active",
+      worker: workerResponse.worker ?? "connected",
+      transcripts,
+      saved: saved.map((utterance) => ({
+        id: utterance.id,
+        session_id: utterance.sessionId,
+        speaker: utterance.speaker,
+        text: utterance.text,
+        start_ms: utterance.startMs,
+        end_ms: utterance.endMs,
+        source: utterance.source,
+        source_group_id: utterance.sourceGroupId,
+        asr_provider: utterance.asrProvider,
+        asr_model: utterance.asrModel,
+        created_at: utterance.createdAt.toISOString(),
+        updated_at: utterance.updatedAt.toISOString(),
+      })),
     });
-  }
+  } catch (error) {
+    console.error("[remote-mic local frame save failed]", {
+      error: error instanceof Error ? error.message : String(error),
+      sessionId,
+      role,
+      streamId,
+      sequence,
+    });
 
-  const workerResponse = await postToLocalAsr({
-    sessionId,
-    role,
-    streamId,
-    sequence,
-    capturedAt: requiredString(body?.capturedAt),
-    durationMs: toNumber(body?.durationMs),
-    sampleRate: toNumber(body?.sampleRate),
-    averageLevel: toNumber(body?.averageLevel),
-    peakLevel: toNumber(body?.peakLevel),
-    pcmBase64,
-  });
-
-  const transcripts = Array.isArray(workerResponse.transcripts)
-    ? (workerResponse.transcripts as LocalAsrTranscript[])
-    : [];
-  const saved = [];
-
-  for (const transcript of transcripts) {
-    if (transcript.status !== "accepted") continue;
-    if (!transcript.finalized) continue;
-    const text = requiredString(transcript.text);
-    const utteranceGroupId = requiredString(transcript.utteranceGroupId);
-    if (!text || !utteranceGroupId) continue;
-
-    saved.push(
-      await appendOrCreateLocalAsrUtterance({
-        sessionId,
-        participantCode: active.participantCode,
-        role,
-        text,
-        sourceGroupId: utteranceGroupId,
-        startMs: toInteger(transcript.startMs),
-        endMs: toInteger(transcript.endMs),
-        asrProvider: requiredString(transcript.asrProvider) || "local-asr",
-        asrModel: requiredString(transcript.asrModel) || null,
-      }),
+    return NextResponse.json(
+      { error: "Failed to process local ASR frame" },
+      { status: 500 },
     );
   }
-
-  return NextResponse.json({
-    ok: true,
-    worker: workerResponse.worker ?? "connected",
-    transcripts,
-    saved: saved.map((utterance) => ({
-      id: utterance.id,
-      session_id: utterance.sessionId,
-      speaker: utterance.speaker,
-      text: utterance.text,
-      start_ms: utterance.startMs,
-      end_ms: utterance.endMs,
-      source: utterance.source,
-      source_group_id: utterance.sourceGroupId,
-      asr_provider: utterance.asrProvider,
-      asr_model: utterance.asrModel,
-      created_at: utterance.createdAt.toISOString(),
-      updated_at: utterance.updatedAt.toISOString(),
-    })),
-  });
 }
 
 async function postToLocalAsr(payload: Record<string, unknown>) {

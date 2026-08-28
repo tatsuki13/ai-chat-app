@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
-import { prisma } from "../../../../../lib/prisma";
+import {
+  clearFixedRemoteMicActiveSession,
+  getFixedRemoteMicActiveSession,
+  setFixedRemoteMicActiveSession,
+} from "../../../../../lib/remote-mic/active-session-db";
 import {
   clearActiveFixedRemoteMicSession,
-  getActiveFixedRemoteMicSession,
   setActiveFixedRemoteMicSession,
 } from "../../../../../lib/remote-mic/fixed-session";
 
@@ -16,12 +19,14 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "sessionId is required" }, { status: 400 });
   }
 
-  const active = getActiveFixedRemoteMicSession();
+  const active = await getFixedRemoteMicActiveSession();
   if (!active || active.sessionId !== sessionId || active.endedAt) {
     return NextResponse.json({ active: null });
   }
 
-  return NextResponse.json({ active: serializeState(active) });
+  const state = setActiveFixedRemoteMicSession(active);
+
+  return NextResponse.json({ active: serializeState(state) });
 }
 
 export async function POST(request: Request) {
@@ -34,26 +39,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "sessionId is required" }, { status: 400 });
   }
 
-  const session = await prisma.session.findUnique({
-    where: { id: sessionId },
-    select: {
-      id: true,
-      participantCode: true,
-      endedAt: true,
-      dialogueStartedAt: true,
-    },
-  });
+  const result = await setFixedRemoteMicActiveSession(sessionId);
 
-  if (!session) {
-    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  if (!result.ok) {
+    return NextResponse.json({ error: result.error }, { status: result.status });
   }
 
-  const state = setActiveFixedRemoteMicSession({
-    sessionId: session.id,
-    participantCode: session.participantCode,
-    endedAt: session.endedAt?.toISOString() ?? null,
-    dialogueStartedAt: session.dialogueStartedAt?.toISOString() ?? null,
-  });
+  const state = setActiveFixedRemoteMicSession(result.active);
 
   return NextResponse.json({ active: serializeState(state) });
 }
@@ -61,6 +53,7 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   const params = new URL(request.url).searchParams;
   const sessionId = params.get("sessionId") ?? undefined;
+  await clearFixedRemoteMicActiveSession(sessionId);
   clearActiveFixedRemoteMicSession(sessionId);
 
   return NextResponse.json({ ok: true });

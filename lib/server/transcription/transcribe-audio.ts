@@ -19,7 +19,7 @@ export async function transcribeAudioFile(audio: File) {
     timeout: getDefaultOpenAITimeoutMs(),
   });
 
-  console.info("[remote-mic transcription request]", {
+  console.info("[pc-stt] transcription request", {
     configured: true,
     model,
     fileName: audio.name,
@@ -36,7 +36,7 @@ export async function transcribeAudioFile(audio: File) {
       prompt: getTranscribePrompt(),
     });
   } catch (error) {
-    console.error("[remote-mic transcription failed]", {
+    console.error("[pc-stt] transcription failed", {
       errorName: error instanceof Error ? error.name : "UnknownError",
       errorMessage: error instanceof Error ? error.message : String(error),
       status:

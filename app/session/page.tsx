@@ -946,7 +946,7 @@ function SessionPageClient() {
     source: Extract<TopicTimerStartSource, "local_voice" | "remote_voice">,
   ) {
     const currentSession = sessionRef.current;
-    console.info("[remote-mic pc stt eligibility]", {
+    console.info("[pc-stt] eligibility", {
       hasSession: Boolean(currentSession),
       blobSize: chunk.blob.size,
       sttEnabled: sttEnabledRef.current,
@@ -954,7 +954,7 @@ function SessionPageClient() {
     });
 
     if (!currentSession || chunk.blob.size < 512 || !sttEnabledRef.current) {
-      console.warn("[remote-mic pc chunk skipped before stt]", {
+      console.warn("[pc-stt] chunk skipped before stt", {
         hasSession: Boolean(currentSession),
         blobSize: chunk.blob.size,
         sttEnabled: sttEnabledRef.current,
@@ -965,7 +965,7 @@ function SessionPageClient() {
 
     try {
       setStatusText("スマートフォン音声を文字起こし中");
-      console.info("[remote-mic pc stt request]", {
+      console.info("[pc-stt] transcription request", {
         speaker: chunk.speaker,
         blobSize: chunk.blob.size,
         mimeType: chunk.blob.type || chunk.mimeType,
@@ -978,7 +978,7 @@ function SessionPageClient() {
         chunk.sequence,
       );
 
-      console.info("[remote-mic pc stt result]", {
+      console.info("[pc-stt] transcription result", {
         speaker: chunk.speaker,
         skipped: Boolean(data.skipped),
         transcriptLength: data.transcript?.length ?? 0,
@@ -3786,7 +3786,7 @@ async function sendAudioChunkToStt(
 
   const data = (await response.json()) as TranscribeUtteranceResponse;
 
-  console.info("[remote-mic pc stt response]", {
+  console.info("[pc-stt] transcription response", {
     status: response.status,
     ok: response.ok,
     skipped: Boolean(data.skipped),

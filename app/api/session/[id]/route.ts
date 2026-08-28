@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { normalizeConversationSpeaker } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
+import { clearFixedRemoteMicActiveSession } from "../../../../lib/remote-mic/active-session-db";
 import { clearActiveFixedRemoteMicSession } from "../../../../lib/remote-mic/fixed-session";
 
 export const runtime = "nodejs";
@@ -250,6 +251,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       });
     }
 
+    await clearFixedRemoteMicActiveSession(id);
     await prisma.session.delete({
       where: { id },
     });

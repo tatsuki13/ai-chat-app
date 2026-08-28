@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getActiveFixedRemoteMicSession } from "../../../../../lib/remote-mic/fixed-session";
+import { getFixedRemoteMicActiveSession } from "../../../../../lib/remote-mic/active-session-db";
 
 export const runtime = "nodejs";
 
@@ -8,7 +9,23 @@ const LOCAL_ASR_BASE_URL =
 const LOCAL_ASR_TIMEOUT_MS = Number(process.env.LOCAL_ASR_TIMEOUT_MS || 3000);
 
 export async function GET() {
-  const active = getActiveFixedRemoteMicSession();
+  let activeSession: Awaited<ReturnType<typeof getFixedRemoteMicActiveSession>> = null;
+  let activeSessionError: string | null = null;
+
+  try {
+    activeSession = await getFixedRemoteMicActiveSession();
+  } catch (error) {
+    activeSessionError = error instanceof Error ? error.message : String(error);
+    console.error("[local-asr] active session health check failed", {
+      error: activeSessionError,
+    });
+  }
+
+  const runtimeState = getActiveFixedRemoteMicSession();
+  const roles =
+    runtimeState && activeSession && runtimeState.sessionId === activeSession.sessionId
+      ? runtimeState.roles
+      : null;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), LOCAL_ASR_TIMEOUT_MS);
 
@@ -23,8 +40,10 @@ export async function GET() {
           ok: false,
           worker: "error",
           status: response.status,
-          elder: active?.roles.elder.lastSeenAt ? "connected" : "disconnected",
-          caregiver: active?.roles.caregiver.lastSeenAt ? "connected" : "disconnected",
+          activeSession: activeSessionError ? "error" : activeSession ? "connected" : "none",
+          activeSessionId: activeSession?.sessionId ?? null,
+          elder: roles?.elder.lastSeenAt ? "connected" : "disconnected",
+          caregiver: roles?.caregiver.lastSeenAt ? "connected" : "disconnected",
         },
         { status: 502 },
       );
@@ -35,8 +54,10 @@ export async function GET() {
       ok: true,
       worker: "connected",
       ...data,
-      elder: active?.roles.elder.lastSeenAt ? "connected" : "disconnected",
-      caregiver: active?.roles.caregiver.lastSeenAt ? "connected" : "disconnected",
+      activeSession: activeSessionError ? "error" : activeSession ? "connected" : "none",
+      activeSessionId: activeSession?.sessionId ?? null,
+      elder: roles?.elder.lastSeenAt ? "connected" : "disconnected",
+      caregiver: roles?.caregiver.lastSeenAt ? "connected" : "disconnected",
     });
   } catch (error) {
     return NextResponse.json(
@@ -44,8 +65,10 @@ export async function GET() {
         ok: false,
         worker: "disconnected",
         error: error instanceof Error ? error.message : String(error),
-        elder: active?.roles.elder.lastSeenAt ? "connected" : "disconnected",
-        caregiver: active?.roles.caregiver.lastSeenAt ? "connected" : "disconnected",
+        activeSession: activeSessionError ? "error" : activeSession ? "connected" : "none",
+        activeSessionId: activeSession?.sessionId ?? null,
+        elder: roles?.elder.lastSeenAt ? "connected" : "disconnected",
+        caregiver: roles?.caregiver.lastSeenAt ? "connected" : "disconnected",
       },
       { status: 503 },
     );

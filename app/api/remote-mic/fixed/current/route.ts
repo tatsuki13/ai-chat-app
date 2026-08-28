@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import {
-  getActiveFixedRemoteMicSession,
+  setActiveFixedRemoteMicSession,
   updateFixedRemoteMicRole,
 } from "../../../../../lib/remote-mic/fixed-session";
+import { getFixedRemoteMicActiveSession } from "../../../../../lib/remote-mic/active-session-db";
 import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
 
 export const runtime = "nodejs";
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "role is required" }, { status: 400 });
   }
 
-  const active = getActiveFixedRemoteMicSession();
+  const active = await getFixedRemoteMicActiveSession();
 
   if (!active || active.endedAt) {
     return NextResponse.json({
@@ -24,8 +25,9 @@ export async function GET(request: Request) {
     });
   }
 
+  const cachedActive = setActiveFixedRemoteMicSession(active);
   const nextActive =
-    updateFixedRemoteMicRole(role, { connectedAt: Date.now() }) ?? active;
+    updateFixedRemoteMicRole(role, { connectedAt: Date.now() }) ?? cachedActive;
 
   return NextResponse.json({
     active: {

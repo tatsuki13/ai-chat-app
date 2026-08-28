@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../../lib/prisma";
+import { getFixedRemoteMicActiveSession } from "../../../../../lib/remote-mic/active-session-db";
 import {
-  getActiveFixedRemoteMicSession,
   setActiveFixedRemoteMicSession,
   updateFixedRemoteMicRole,
 } from "../../../../../lib/remote-mic/fixed-session";
@@ -26,7 +26,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const active = getActiveFixedRemoteMicSession();
+  const active = await getFixedRemoteMicActiveSession();
   if (!active || active.sessionId !== sessionId) {
     return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
   }

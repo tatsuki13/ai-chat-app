@@ -28,6 +28,7 @@ model Session {
   aiProcessingState      AIProcessingState?
   aiSpeechState          AISpeechState?
   preparedQuestions      PreparedQuestion[]
+  remoteMicActiveSessions RemoteMicActiveSession[]
   subSlotStates          SlotSubState[]
   slotStates             SlotState[]
   utterances             SessionUtterance[]
@@ -246,4 +247,17 @@ model AISpeechState {
   @@index([active])
   @@index([updatedAt])
   @@map("ai_speech_states")
+}
+
+model RemoteMicActiveSession {
+  id          String   @id @default(cuid())
+  channel     String   @unique
+  sessionId   String   @map("session_id")
+  activatedAt DateTime @default(now()) @map("activated_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  session     Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([updatedAt])
+  @@map("remote_mic_active_sessions")
 }

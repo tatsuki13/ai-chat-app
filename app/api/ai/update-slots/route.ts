@@ -12,9 +12,11 @@ import { prisma } from "../../../../lib/prisma";
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
+  let sessionId = "";
+
   try {
     const body = await request.json();
-    const sessionId = requiredString(body.session_id ?? body.sessionId);
+    sessionId = requiredString(body.session_id ?? body.sessionId);
 
     if (!sessionId) {
       return NextResponse.json({ error: "session_id is required" }, { status: 400 });
@@ -42,6 +44,30 @@ export async function POST(request: Request) {
       utterancesToClassify.length > 0 &&
       bundle.debug.summary.llmSucceeded !== true
     ) {
+      await prisma.aIProcessingState.upsert({
+        where: { sessionId },
+        create: {
+          sessionId,
+          participantCode: context.session.participantCode,
+          processingStatus: "failed",
+          lastError: "slot_classification_failed",
+          processingStartedAt: new Date(),
+          processingFinishedAt: new Date(),
+        },
+        update: {
+          participantCode: context.session.participantCode,
+          processingStatus: "failed",
+          lastError: "slot_classification_failed",
+          processingFinishedAt: new Date(),
+        },
+      });
+      console.error("[ai update-slots classification failed]", {
+        sessionId,
+        utterancesToClassifyCount: utterancesToClassify.length,
+        source: bundle.debug.summary.source,
+        llmSucceeded: bundle.debug.summary.llmSucceeded,
+      });
+
       return NextResponse.json(
         { error: "Failed to update slots from new utterances" },
         { status: 502 },
@@ -88,7 +114,35 @@ export async function POST(request: Request) {
       final_minutes: null,
     });
   } catch (error) {
-    console.error(error);
+    console.error("[ai update-slots failed]", {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    if (sessionId) {
+      await prisma.aIProcessingState
+        .upsert({
+          where: { sessionId },
+          create: {
+            sessionId,
+            processingStatus: "failed",
+            lastError: error instanceof Error ? error.message : "Failed to update slots",
+            processingStartedAt: new Date(),
+            processingFinishedAt: new Date(),
+          },
+          update: {
+            processingStatus: "failed",
+            lastError: error instanceof Error ? error.message : "Failed to update slots",
+            processingFinishedAt: new Date(),
+          },
+        })
+        .catch((stateError) => {
+          console.error("[ai update-slots failed to record state]", {
+            sessionId,
+            error: stateError instanceof Error ? stateError.message : String(stateError),
+          });
+        });
+    }
 
     return NextResponse.json(
       { error: "Failed to update slots" },
