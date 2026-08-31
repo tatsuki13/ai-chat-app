@@ -89,8 +89,16 @@ type EvidenceRecord = {
 type FollowUpItem = {
   key: string;
   label: string;
-  body: string;
+  statusLabel: string;
+  statusTone: FollowUpStatusTone;
 };
+
+type FollowUpStatusTone =
+  | "unchecked"
+  | "partial"
+  | "attention"
+  | "neutral"
+  | "deferred";
 
 type FollowUpThemeGroup = {
   themeId: string;
@@ -637,12 +645,8 @@ function FollowUpSection(props: { groups: FollowUpThemeGroup[] }) {
   return (
     <section className="minutes-subsection mt-10 border-t border-stone-200 pt-6">
       <h2 className="text-[19px] font-black text-stone-950">
-        今後確認したいこと・今回保留となったこと
+        今後確認する話題
       </h2>
-      <p className="mt-2 text-[12px] font-semibold leading-6 text-stone-600">
-        ここには、今回の対話で未確認の情報と、一部だけ確認できた項目、まだ考えていないこと、
-        言葉にしにくかったこと、今回は話さなかったことなどを整理しています。
-      </p>
       <div className="mt-5 space-y-5">
         {props.groups.map((group, index) => (
           <section key={group.themeId} className="space-y-2">
@@ -653,14 +657,18 @@ function FollowUpSection(props: { groups: FollowUpThemeGroup[] }) {
               {group.items.map((item) => (
                 <li
                   key={item.key}
-                  className="rounded-md border border-stone-200 bg-stone-50 px-3 py-2"
+                  className="flex items-center justify-between gap-3 rounded-md border border-stone-200 bg-stone-50 px-3 py-2"
                 >
-                  <div className="text-[13px] font-black leading-6 text-stone-900">
-                    ・{item.label}
-                  </div>
-                  <p className="mt-1 whitespace-pre-line text-[12px] font-semibold leading-6 text-stone-700">
-                    {item.body}
-                  </p>
+                  <span className="min-w-0 text-[13px] font-black leading-6 text-stone-900">
+                    {item.label}
+                  </span>
+                  <span
+                    className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-black leading-none ${followUpStatusToneClass(
+                      item.statusTone,
+                    )}`}
+                  >
+                    {item.statusLabel}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -858,163 +866,75 @@ function buildFollowUpThemeItem(
   const completion = aspect.completion;
   const responseState = aspect.responseState;
   const status = typeof aspect.status === "string" ? aspect.status : "";
+  const displayStatus = getFollowUpDisplayStatus(completion, responseState, status);
 
-  if (completion === "complete") return null;
-  if (completion !== "partial" && ["filled", "complete"].includes(status)) {
-    return null;
-  }
-
-  const evidenceText = buildFollowUpEvidenceText(aspect.evidence);
-  const deferredText =
-    aspect.isDeferred && aspect.canAskAgain !== false
-      ? "関連する話題になったときに、自然に確認できる内容として残します。"
-      : "";
-  const bodyParts: string[] = [];
-
-  switch (responseState) {
-    case "answered":
-      bodyParts.push(
-        evidenceText
-          ? `${evidenceText}という発言から一部確認できていますが、まだ部分的な確認にとどまっています。`
-          : "一部確認できていますが、まだ部分的な確認にとどまっています。",
-      );
-      break;
-    case "no_response":
-      bodyParts.push("今回の対話ではまだ話題になっていません。");
-      break;
-    case "explicit_none":
-      bodyParts.push(
-        "本人から特にない、または該当するものはないとの意向が示されています。",
-      );
-      break;
-    case "not_considered":
-      bodyParts.push(
-        "現時点ではまだ具体的には考えていない、または分からないとのことです。",
-      );
-      break;
-    case "unable_to_verbalize":
-      bodyParts.push("今回は十分に言葉にすることが難しい状況でした。");
-      break;
-    case "declined":
-      bodyParts.push(
-        "今回は話したくないとの意向が示されたため、それ以上の確認は行っていません。",
-      );
-      break;
-    case "ambiguous":
-      bodyParts.push(
-        "発言はありますが、今回の対話では意味を十分に明確化できていません。",
-      );
-      break;
-    case "conflicting":
-      bodyParts.push(
-        "複数の発言があり、現時点では考えが一つに整理されていません。",
-      );
-      break;
-    default:
-      if (completion === "partial" || status === "partial") {
-        bodyParts.push(
-          evidenceText
-            ? `${evidenceText}という発言から一部確認できていますが、まだ部分的な確認にとどまっています。`
-            : "一部確認できていますが、まだ部分的な確認にとどまっています。",
-        );
-      } else if (completion === "none" || status === "empty") {
-        bodyParts.push("今回の対話ではまだ話題になっていません。");
-      } else {
-        return null;
-      }
-  }
-
-  if (deferredText) bodyParts.push(deferredText);
+  if (!displayStatus) return null;
 
   return {
-    key: `${themeId}-${aspect.aspect_id ?? label}-${bodyParts.join("|")}`,
+    key: `${themeId}-${aspect.aspect_id ?? label}-${displayStatus.label}`,
     label,
-    body: bodyParts.join("\n"),
+    statusLabel: displayStatus.label,
+    statusTone: displayStatus.tone,
   };
 }
 
 function uniqueFollowUpItems(items: FollowUpItem[]) {
   const seen = new Set<string>();
   return items.filter((item) => {
-    const key = `${item.label}:${item.body}`;
+    const key = `${item.label}:${item.statusLabel}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 }
 
-function buildFollowUpItem(themeTitle: string, aspect: AspectSourceRecord) {
-  const label = aspect.label || "未確認の項目";
-  const completion = aspect.completion;
-  const responseState = aspect.responseState;
-  const status = typeof aspect.status === "string" ? aspect.status : "";
+function getFollowUpDisplayStatus(
+  completion: AspectSourceRecord["completion"],
+  responseState: AspectSourceRecord["responseState"],
+  status: string,
+): { label: string; tone: FollowUpStatusTone } | null {
+  if (completion === "complete" || responseState === "explicit_none") return null;
+  if (["filled", "complete"].includes(status)) return null;
 
-  if (completion === "complete" || ["filled", "complete", "answered"].includes(status)) {
-    return null;
+  if (responseState === "not_considered") {
+    return { label: "未検討", tone: "neutral" };
+  }
+  if (responseState === "ambiguous") {
+    return { label: "要確認", tone: "attention" };
+  }
+  if (responseState === "unable_to_verbalize") {
+    return { label: "言語化困難", tone: "deferred" };
+  }
+  if (responseState === "declined") {
+    return { label: "今回は見送り", tone: "deferred" };
+  }
+  if (responseState === "conflicting") {
+    return { label: "意見あり", tone: "attention" };
+  }
+  if (completion === "partial" || status === "partial" || responseState === "answered") {
+    return { label: "確認途中", tone: "partial" };
+  }
+  if (responseState === "no_response" || completion === "none" || status === "empty") {
+    return { label: "未確認", tone: "unchecked" };
   }
 
-  const prefix = `${themeTitle}について、「${label}」は`;
-  const evidenceText = buildFollowUpEvidenceText(aspect.evidence);
-  const deferredText =
-    aspect.isDeferred && aspect.canAskAgain !== false
-      ? "関連する話題になったときに、自然に確認できる内容として残します。"
-      : "";
-
-  switch (responseState) {
-    case "answered":
-      return [
-        evidenceText
-          ? `${prefix}${evidenceText}という発言から一部確認できていますが、まだ部分的な確認にとどまっています。`
-          : `${prefix}発言はありますが、まだ部分的な確認にとどまっています。`,
-        deferredText,
-      ].filter(Boolean).join("");
-    case "no_response":
-      return [
-        `${prefix}今回の対話ではまだ話題になっていません。`,
-        deferredText,
-      ].filter(Boolean).join("");
-    case "explicit_none":
-      return `${prefix}本人から特にない、または該当するものはないとの意向が示されています。`;
-    case "not_considered":
-      return `${prefix}現時点ではまだ具体的には考えていない、または分からないとのことです。`;
-    case "unable_to_verbalize":
-      return `${prefix}今回は十分に言葉にすることが難しい状態でした。`;
-    case "declined":
-      return `${prefix}今回は話したくないとの意向が示されたため、それ以上の確認は行っていません。`;
-    case "ambiguous":
-      return [
-        `${prefix}発言はありますが、今回の対話では意向を十分に明確化できていません。`,
-        deferredText,
-      ].filter(Boolean).join("");
-    case "conflicting":
-      return [
-        `${prefix}複数の発言があり、現時点では考えが一つに整理されていません。`,
-        deferredText,
-      ].filter(Boolean).join("");
-    default:
-      if (status === "partial") {
-        return [
-          evidenceText
-            ? `${prefix}${evidenceText}という発言から一部確認できていますが、まだ部分的な確認にとどまっています。`
-            : `${prefix}一部確認できていますが、まだ部分的な確認にとどまっています。`,
-          deferredText,
-        ].filter(Boolean).join("");
-      }
-      if (status === "empty") {
-        return [
-          `${prefix}今回の対話ではまだ話題になっていません。`,
-          deferredText,
-        ].filter(Boolean).join("");
-      }
-      return null;
-  }
+  return null;
 }
 
-function buildFollowUpEvidenceText(evidence: EvidenceRecord[] | undefined) {
-  const first = evidence?.[0]?.evidenceText;
-  if (!first) return "";
-  const text = firstSentence(stripSpeakerPrefix(first)).replace(/[。.!?！？]$/, "");
-  return text ? `「${text}」` : "";
+function followUpStatusToneClass(tone: FollowUpStatusTone) {
+  switch (tone) {
+    case "partial":
+      return "bg-sky-100 text-sky-900";
+    case "attention":
+      return "bg-amber-100 text-amber-900";
+    case "neutral":
+      return "bg-stone-200 text-stone-700";
+    case "deferred":
+      return "bg-violet-100 text-violet-900";
+    case "unchecked":
+    default:
+      return "bg-rose-100 text-rose-900";
+  }
 }
 
 function themeHasNarrativeText(theme: ThemeForDisplay) {

@@ -1721,64 +1721,6 @@ export function buildFallbackMinutes(
   const acpMinutesInput = buildACPMinutesLLMInput(themes);
   const acpMinutes = buildACPMinutesFromStructuredInput(acpMinutesInput);
   const markdown = renderACPMinutesMarkdown(acpMinutes, generatedAt);
-  const statedThemes = themes.filter((theme) =>
-    theme.aspects.some((aspect) => aspect.evidence.length > 0),
-  );
-  const followUpItems = themes.flatMap((theme) =>
-    theme.aspects
-      .filter((aspect) => aspect.status !== "filled")
-      .slice(0, 3)
-      .map((aspect) => `${theme.title}: ${aspect.label}`),
-  );
-  const lines = [
-    "# ACP・今後の暮らしに関する話し合い 要約",
-    "",
-    `話し合い日: ${formatJapaneseDate(generatedAt)}`,
-    `参加者: ${session?.participant_code || "-"}`,
-    `文書の位置付け: この文書は、話し合い時点における本人の考えを整理したものです。体調、生活状況、家族状況などによって希望は変化する可能性があります。重要な状況変化があった場合は、本人へ再確認してください。`,
-    "",
-    "## 本人の考えの概要",
-    "",
-    buildPersonCenteredOverview(statedThemes),
-    "",
-    "## テーマ別の整理",
-    "",
-  ];
-
-  themes.forEach((theme) => {
-    lines.push(`### ${theme.title}`);
-    lines.push(`- 確認状況: ${formatResponseState(theme.response_state)}`);
-    lines.push(`- 要約: ${theme.summary}`);
-    lines.push("");
-    theme.aspects.forEach((aspect) => {
-      const evidenceText =
-        aspect.evidence.length > 0
-          ? aspect.evidence.map((evidence) => evidence.evidenceText).join(" / ")
-          : "次回確認";
-      lines.push(`- ${aspect.label}: ${formatAspectStatus(aspect.status)}。${evidenceText}`);
-    });
-    lines.push("");
-  });
-
-  lines.push("## 今後確認が必要なこと");
-  lines.push("");
-  if (followUpItems.length > 0) {
-    followUpItems.slice(0, 12).forEach((item) => lines.push(`- ${item}`));
-  } else {
-    lines.push("- 現時点で大きな未確認事項は整理されていません。");
-  }
-  lines.push("");
-
-  lines.push("## 根拠となる代表的な発話");
-  lines.push("");
-  collectRepresentativeEvidence(themes).forEach((evidence) => {
-    lines.push(`- ${evidence}`);
-  });
-  lines.push("");
-  lines.push("## 補足");
-  lines.push("");
-  lines.push("- 具体的な医療処置の希望は、本人が明確に述べた内容と、まだ確認が必要な内容を区別して扱ってください。");
-  lines.push("- 介護者による要約は、本人の同意が確認できた場合のみ本人の考えとして整理しています。");
 
   return {
     markdown,
@@ -2812,56 +2754,6 @@ function buildThemeSummaryFromAspects(
   }
 
   return getResearchThemeSummary(theme, slots) || "現時点では明確な確認ができていません。";
-}
-
-function buildPersonCenteredOverview(themes: ThemeMinutesItem[]) {
-  const evidence = collectRepresentativeEvidence(themes).slice(0, 4);
-
-  if (evidence.length === 0) {
-    return "今回の記録からは、本人の価値観や意思決定方針として確定できる発言はまだ限定的です。次回、本人へ具体的に確認してください。";
-  }
-
-  return evidence.join("\n");
-}
-
-function collectRepresentativeEvidence(themes: ThemeMinutesItem[]) {
-  const values = themes.flatMap((theme) =>
-    theme.aspects.flatMap((aspect) =>
-      aspect.evidence.map((evidence) => `${theme.title} / ${aspect.label}: ${evidence.evidenceText}`),
-    ),
-  );
-
-  return [...new Set(values)].slice(0, 12);
-}
-
-function formatAspectStatus(status: AspectStatus) {
-  switch (status) {
-    case "filled":
-      return "本人が明確に表明";
-    case "partial":
-      return "部分的に確認";
-    default:
-      return "未確認";
-  }
-}
-
-function formatResponseState(state: ResponseState) {
-  switch (state) {
-    case "expressed":
-      return "本人の考えを確認";
-    case "no_preference":
-      return "特に希望なしと確認";
-    case "not_considered":
-      return "現時点では未決定";
-    case "difficulty_verbalizing":
-      return "言語化が難しい";
-    case "declined":
-      return "今は話したくない";
-    case "uncertain":
-      return "部分的に確認";
-    default:
-      return "未確認";
-  }
 }
 
 function formatJapaneseDate(value: string) {
