@@ -6,10 +6,12 @@ import {
   serializeLocalAsrUtterance,
   type LocalAsrTranscript,
 } from "../../../../../lib/remote-mic/local-asr-save";
+import { getActiveFixedRemoteMicSession } from "../../../../../lib/remote-mic/fixed-session";
 import {
   getAiSpeechState,
   isAiSpeechBlockingTranscription,
 } from "../../../../../lib/ai/speech-state";
+import { publishRemoteMicPartialTranscript } from "../../../../../lib/remote-mic/partial-transcripts";
 
 export const runtime = "nodejs";
 
@@ -63,6 +65,18 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
     }
 
+    const runtimeState = getActiveFixedRemoteMicSession();
+    const roleState =
+      runtimeState?.sessionId === sessionId ? runtimeState.roles[role] : null;
+    if (roleState?.muted) {
+      return NextResponse.json({
+        ok: true,
+        transcripts: [],
+        skipped: true,
+        reason: "remote_mic_muted",
+      });
+    }
+
     const aiSpeechState = await getAiSpeechState(sessionId);
     if (isAiSpeechBlockingTranscription(aiSpeechState)) {
       return NextResponse.json({
@@ -106,27 +120,69 @@ export async function POST(request: Request) {
     }
 
     for (const transcript of transcripts) {
+      const utteranceGroupId = requiredString(transcript.utteranceGroupId);
+      if (transcript.status === "partial" && transcript.finalized === false) {
+        const text = requiredString(transcript.text);
+        if (text && utteranceGroupId) {
+          publishRemoteMicPartialTranscript({
+            sessionId,
+            role,
+            streamId,
+            utteranceGroupId,
+            text,
+            audioCapturedAt: requiredString(transcript.audioCapturedAt) || null,
+            speechStartedAt: requiredString(transcript.speechStartedAt) || null,
+            firstPartialAt: requiredString(transcript.firstPartialAt) || null,
+          });
+        }
+        continue;
+      }
+
       if (transcript.status !== "accepted") continue;
       if (!transcript.finalized) continue;
       const text = requiredString(transcript.text);
-      const utteranceGroupId = requiredString(transcript.utteranceGroupId);
       if (!text || !utteranceGroupId) continue;
 
-      saved.push(
-        await appendOrCreateLocalAsrUtterance({
-          sessionId,
-          participantCode: active.participantCode,
-          role,
-          text,
-          sourceGroupId: utteranceGroupId,
-          startMs: toInteger(transcript.startMs),
-          endMs: toInteger(transcript.endMs),
-          startedAt: requiredString(transcript.startedAt) || null,
-          endedAt: requiredString(transcript.endedAt) || null,
-          asrProvider: requiredString(transcript.asrProvider) || "local-asr",
-          asrModel: requiredString(transcript.asrModel) || null,
-        }),
-      );
+      const utterance = await appendOrCreateLocalAsrUtterance({
+        sessionId,
+        participantCode: active.participantCode,
+        role,
+        text,
+        sourceGroupId: utteranceGroupId,
+        startMs: toInteger(transcript.startMs),
+        endMs: toInteger(transcript.endMs),
+        startedAt: requiredString(transcript.startedAt) || null,
+        endedAt: requiredString(transcript.endedAt) || null,
+        asrProvider: requiredString(transcript.asrProvider) || "local-asr",
+        asrModel: requiredString(transcript.asrModel) || null,
+      });
+      const dbSavedAt = new Date().toISOString();
+      saved.push(utterance);
+      publishRemoteMicPartialTranscript({
+        sessionId,
+        role,
+        streamId,
+        utteranceGroupId,
+        clear: true,
+        audioCapturedAt: requiredString(transcript.audioCapturedAt) || null,
+        speechStartedAt: requiredString(transcript.speechStartedAt) || null,
+        firstPartialAt: requiredString(transcript.firstPartialAt) || null,
+        speechEndedDetectedAt: requiredString(transcript.speechEndedDetectedAt) || null,
+        transcribedAt: requiredString(transcript.transcribedAt) || null,
+        dbSavedAt,
+      });
+      console.info("[remote-mic final timing]", {
+        sessionId,
+        role,
+        streamId,
+        utteranceGroupId,
+        audioCapturedAt: transcript.audioCapturedAt ?? null,
+        speechStartedAt: transcript.speechStartedAt ?? null,
+        firstPartialAt: transcript.firstPartialAt ?? null,
+        speechEndedDetectedAt: transcript.speechEndedDetectedAt ?? null,
+        transcribedAt: transcript.transcribedAt ?? null,
+        dbSavedAt,
+      });
     }
     if (saved.length > 0) {
       console.info("[remote-mic local utterance saved]", {

@@ -2,11 +2,13 @@ import base64
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from collections import deque
 
 import numpy as np
 
-from config import END_SILENCE_MS, MIN_SPEECH_MS, SPEECH_THRESHOLD, STREAM_TTL_MS
+from config import END_SILENCE_MS, MIN_SPEECH_MS, PREROLL_MS, SPEECH_THRESHOLD, STREAM_TTL_MS
 from models import FlushRequest, FrameRequest
+from partial_vosk import VoskPartialRecognizer
 
 
 @dataclass
@@ -20,6 +22,10 @@ class SpeechSegment:
     absolute_end_ms: int | None = None
     started_at: str | None = None
     ended_at: str | None = None
+    audio_captured_at: str | None = None
+    speech_started_at: str | None = None
+    first_partial_at: str | None = None
+    speech_ended_detected_at: str | None = None
 
 
 @dataclass
@@ -34,18 +40,23 @@ class StreamState:
     group_id: str = ""
     seen_sequences: set[int] = field(default_factory=set)
     speech_chunks: list[np.ndarray] = field(default_factory=list)
+    preroll_chunks: deque[tuple[np.ndarray, int, int]] = field(default_factory=deque)
+    partial_recognizer: VoskPartialRecognizer = field(default_factory=VoskPartialRecognizer)
+    audio_captured_at: str | None = None
+    speech_started_at: str | None = None
+    first_partial_at: str | None = None
 
 
 class AudioStreamRegistry:
     def __init__(self) -> None:
-        self._streams: dict[tuple[str, str], StreamState] = {}
+        self._streams: dict[tuple[str, str, str], StreamState] = {}
 
-    def push(self, frame: FrameRequest) -> SpeechSegment | None:
+    def push(self, frame: FrameRequest) -> tuple[SpeechSegment | None, str]:
         self.cleanup()
-        key = (frame.sessionId, frame.streamId)
+        key = (frame.sessionId, frame.role, frame.streamId)
         state = self._streams.setdefault(key, StreamState(role=frame.role))
         if frame.sequence in state.seen_sequences:
-            return None
+            return None, ""
         state.seen_sequences.add(frame.sequence)
         pcm = decode_pcm16(frame.pcmBase64)
         level = max(abs(float(frame.peakLevel or 0)), rms_level(pcm))
@@ -57,28 +68,41 @@ class AudioStreamRegistry:
             if state.time_base_ms is None:
                 state.time_base_ms = captured_end_ms - int(frame.durationMs) - frame_start
         state.received_ms = frame_end
+        state.audio_captured_at = frame.capturedAt
 
         if level >= SPEECH_THRESHOLD:
             if not state.speech_started:
                 state.speech_started = True
-                state.speech_start_ms = frame_start
+                state.speech_start_ms = state.preroll_chunks[0][1] if state.preroll_chunks else frame_start
                 state.group_id = f"{frame.sessionId}:{frame.role}:{uuid.uuid4().hex}"
-                state.speech_chunks = []
+                state.speech_chunks = [chunk for chunk, _start, _end in state.preroll_chunks]
+                state.speech_started_at = frame.capturedAt
+                state.first_partial_at = None
+                state.partial_recognizer.reset()
             state.last_speech_ms = frame_end
             state.speech_chunks.append(pcm)
-            return None
+            partial = state.partial_recognizer.accept_pcm16(pcm)
+            if partial and state.first_partial_at is None:
+                state.first_partial_at = utc_now_iso()
+            return None, partial
 
         if state.speech_started:
             state.speech_chunks.append(pcm)
+            partial = state.partial_recognizer.accept_pcm16(pcm)
+            if partial and state.first_partial_at is None:
+                state.first_partial_at = utc_now_iso()
             speech_ms = state.last_speech_ms - state.speech_start_ms
             silence_ms = frame_end - state.last_speech_ms
             if speech_ms >= MIN_SPEECH_MS and silence_ms >= END_SILENCE_MS:
-                return self._finalize_state(state, frame.sequence)
+                return self._finalize_state(state, frame.sequence), ""
 
-        return None
+            return None, partial
+
+        remember_preroll(state, pcm, frame_start, frame_end)
+        return None, ""
 
     def flush(self, request: FlushRequest) -> SpeechSegment | None:
-        key = (request.sessionId, request.streamId)
+        key = (request.sessionId, request.role, request.streamId)
         state = self._streams.pop(key, None)
         if state is None or not state.speech_started:
             return None
@@ -88,6 +112,21 @@ class AudioStreamRegistry:
             return None
 
         return self._build_segment(state, "flush")
+
+    def current_group_id(self, session_id: str, role: str, stream_id: str) -> str:
+        state = self._streams.get((session_id, role, stream_id))
+        return state.group_id if state else ""
+
+    def current_partial_timing(self, session_id: str, role: str, stream_id: str) -> dict:
+        state = self._streams.get((session_id, role, stream_id))
+        if state is None:
+            return {}
+
+        return {
+            "audioCapturedAt": state.audio_captured_at,
+            "speechStartedAt": state.speech_started_at,
+            "firstPartialAt": state.first_partial_at,
+        }
 
     def cleanup(self) -> None:
         if STREAM_TTL_MS <= 0:
@@ -105,6 +144,10 @@ class AudioStreamRegistry:
         segment = self._build_segment(state, str(sequence))
         state.speech_started = False
         state.speech_chunks = []
+        state.preroll_chunks.clear()
+        state.partial_recognizer.reset()
+        state.speech_started_at = None
+        state.first_partial_at = None
         return segment
 
     def _build_segment(self, state: StreamState, suffix: str) -> SpeechSegment:
@@ -128,6 +171,10 @@ class AudioStreamRegistry:
             absolute_end_ms=absolute_end_ms,
             started_at=format_timestamp_ms(absolute_start_ms),
             ended_at=format_timestamp_ms(absolute_end_ms),
+            audio_captured_at=state.audio_captured_at,
+            speech_started_at=state.speech_started_at,
+            first_partial_at=state.first_partial_at,
+            speech_ended_detected_at=utc_now_iso(),
         )
 
 
@@ -154,3 +201,16 @@ def format_timestamp_ms(value: int | None) -> str | None:
     if value is None:
         return None
     return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def remember_preroll(state: StreamState, pcm: np.ndarray, frame_start: int, frame_end: int) -> None:
+    if PREROLL_MS <= 0:
+        return
+
+    state.preroll_chunks.append((pcm, frame_start, frame_end))
+    while len(state.preroll_chunks) > 1 and frame_end - state.preroll_chunks[0][1] > PREROLL_MS:
+        state.preroll_chunks.popleft()
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

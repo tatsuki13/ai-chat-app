@@ -49,8 +49,10 @@ export async function GET(_request: Request, context: RouteContext) {
           startMs: true,
           endMs: true,
           source: true,
+          sourceGroupId: true,
           analysisVersion: true,
           createdAt: true,
+          updatedAt: true,
         },
       }),
     ]);
@@ -67,13 +69,16 @@ export async function GET(_request: Request, context: RouteContext) {
       utterance_count: utteranceCount,
       utterances: utterances.reverse().map((utterance) => ({
         id: utterance.id,
+        session_id: id,
         speaker: normalizeConversationSpeaker(utterance.speaker),
         text: utterance.text,
         start_ms: utterance.startMs,
         end_ms: utterance.endMs,
         source: utterance.source,
+        source_group_id: utterance.sourceGroupId,
         analysis_version: utterance.analysisVersion,
         created_at: utterance.createdAt.toISOString(),
+        updated_at: utterance.updatedAt.toISOString(),
       })),
     });
   } catch (error) {

@@ -6,7 +6,7 @@ import {
 import { UTTERANCE_ANALYSIS_VERSION } from "../server/utterance-metadata";
 
 export type LocalAsrTranscript = {
-  status?: "accepted" | "suppressed_crosstalk" | "suppressed_ai_speech" | "empty" | "error";
+  status?: "accepted" | "partial" | "suppressed_crosstalk" | "suppressed_ai_speech" | "empty" | "error";
   sessionId?: string;
   role?: string;
   streamId?: string;
@@ -21,6 +21,11 @@ export type LocalAsrTranscript = {
   asrProvider?: string;
   asrModel?: string;
   reason?: string;
+  audioCapturedAt?: string;
+  speechStartedAt?: string;
+  firstPartialAt?: string;
+  speechEndedDetectedAt?: string;
+  transcribedAt?: string;
 };
 
 export async function appendOrCreateLocalAsrUtterance(input: {
@@ -111,7 +116,7 @@ export function serializeLocalAsrUtterance(utterance: Awaited<ReturnType<typeof 
     source_group_id: utterance.sourceGroupId,
     asr_provider: utterance.asrProvider,
     asr_model: utterance.asrModel,
-    created_at: utterance.createdAt.toISOString(),
     updated_at: utterance.updatedAt.toISOString(),
+    created_at: utterance.createdAt.toISOString(),
   };
 }

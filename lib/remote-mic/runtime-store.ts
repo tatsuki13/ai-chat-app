@@ -1,6 +1,8 @@
 type RemoteMicRuntimeStore = {
   activeState: unknown | null;
   aiSpeechSubscribers: Set<(event: unknown) => void>;
+  partialTranscriptSubscribers: Set<(event: unknown) => void>;
+  partialTranscriptLastByGroup: Map<string, string>;
 };
 
 const STORE_KEY = "__acpRemoteMicRuntimeStore";
@@ -16,6 +18,8 @@ export function getRemoteMicRuntimeStore() {
     globalStore[STORE_KEY] = {
       activeState: null,
       aiSpeechSubscribers: new Set(),
+      partialTranscriptSubscribers: new Set(),
+      partialTranscriptLastByGroup: new Map(),
     };
   }
 

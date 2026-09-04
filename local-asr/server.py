@@ -4,6 +4,7 @@ from audio_stream import AudioStreamRegistry
 from config import COMPUTE_TYPE, DEVICE, MODEL_NAME
 from crosstalk import remember, should_suppress
 from models import FlushRequest, FrameRequest, TranscriptResult
+from partial_vosk import get_vosk_partial_status
 from transcriber import transcribe_pcm16
 
 app = FastAPI(title="Local ASR Worker")
@@ -18,14 +19,35 @@ def health():
         "model": MODEL_NAME,
         "device": DEVICE,
         "computeType": COMPUTE_TYPE,
+        "voskPartial": get_vosk_partial_status(),
     }
 
 
 @app.post("/frame")
 def frame(request: FrameRequest):
-    segment = streams.push(request)
+    segment, partial = streams.push(request)
     if segment is None:
-        return {"ok": True, "worker": "connected", "transcripts": []}
+        transcripts = []
+        if partial:
+            timing = streams.current_partial_timing(request.sessionId, request.role, request.streamId)
+            transcripts.append(
+                TranscriptResult(
+                    status="partial",
+                    sessionId=request.sessionId,
+                    role=request.role,
+                    streamId=request.streamId,
+                    segmentId=f"{request.sessionId}:{request.role}:{request.streamId}:{request.sequence}:partial",
+                    utteranceGroupId=streams.current_group_id(request.sessionId, request.role, request.streamId),
+                    text=partial,
+                    finalized=False,
+                    asrProvider="vosk",
+                    asrModel="vosk-model-small-ja",
+                    audioCapturedAt=timing.get("audioCapturedAt"),
+                    speechStartedAt=timing.get("speechStartedAt"),
+                    firstPartialAt=timing.get("firstPartialAt"),
+                ).model_dump()
+            )
+        return {"ok": True, "worker": "connected", "transcripts": transcripts}
 
     return process_segment(request.sessionId, request.role, request.streamId, segment)
 
@@ -42,6 +64,7 @@ def flush(request: FlushRequest):
 def process_segment(session_id: str, role: str, stream_id: str, segment):
     try:
         text = transcribe_pcm16(segment.pcm)
+        transcribed_at = utc_now_iso()
     except Exception as error:
         return {
             "ok": True,
@@ -60,6 +83,10 @@ def process_segment(session_id: str, role: str, stream_id: str, segment):
                     endedAt=segment.ended_at,
                     asrModel=MODEL_NAME,
                     reason=str(error),
+                    audioCapturedAt=segment.audio_captured_at,
+                    speechStartedAt=segment.speech_started_at,
+                    firstPartialAt=segment.first_partial_at,
+                    speechEndedDetectedAt=segment.speech_ended_detected_at,
                 ).model_dump()
             ],
         }
@@ -81,6 +108,11 @@ def process_segment(session_id: str, role: str, stream_id: str, segment):
                     startedAt=segment.started_at,
                     endedAt=segment.ended_at,
                     asrModel=MODEL_NAME,
+                    audioCapturedAt=segment.audio_captured_at,
+                    speechStartedAt=segment.speech_started_at,
+                    firstPartialAt=segment.first_partial_at,
+                    speechEndedDetectedAt=segment.speech_ended_detected_at,
+                    transcribedAt=transcribed_at,
                 ).model_dump()
             ],
         }
@@ -111,6 +143,11 @@ def process_segment(session_id: str, role: str, stream_id: str, segment):
                     endedAt=segment.ended_at,
                     asrModel=MODEL_NAME,
                     reason=source_segment_id,
+                    audioCapturedAt=segment.audio_captured_at,
+                    speechStartedAt=segment.speech_started_at,
+                    firstPartialAt=segment.first_partial_at,
+                    speechEndedDetectedAt=segment.speech_ended_detected_at,
+                    transcribedAt=transcribed_at,
                 ).model_dump()
             ],
         }
@@ -140,6 +177,17 @@ def process_segment(session_id: str, role: str, stream_id: str, segment):
                 startedAt=segment.started_at,
                 endedAt=segment.ended_at,
                 asrModel=MODEL_NAME,
+                audioCapturedAt=segment.audio_captured_at,
+                speechStartedAt=segment.speech_started_at,
+                firstPartialAt=segment.first_partial_at,
+                speechEndedDetectedAt=segment.speech_ended_detected_at,
+                transcribedAt=transcribed_at,
             ).model_dump()
         ],
     }
+
+
+def utc_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

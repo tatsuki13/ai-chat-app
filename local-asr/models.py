@@ -36,3 +36,8 @@ class TranscriptResult(BaseModel):
     asrProvider: str = "local-asr"
     asrModel: str | None = None
     reason: str | None = None
+    audioCapturedAt: str | None = None
+    speechStartedAt: str | None = None
+    firstPartialAt: str | None = None
+    speechEndedDetectedAt: str | None = None
+    transcribedAt: str | None = None

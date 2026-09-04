@@ -24,7 +24,9 @@ type WindowWithAudioContext = Window & {
 const CLIENT_VERSION = "remote-mic-client-2026-08-27-local-asr";
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const TARGET_SAMPLE_RATE = 16_000;
-const FRAME_MS = 500;
+const FRAME_MS = 250;
+const FRAME_QUEUE_WARN_LENGTH = 12;
+const FRAME_QUEUE_WARN_AGE_MS = 3000;
 const AI_SPEECH_RELEASE_DELAY_MS = 500;
 const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45_000;
 const WORKLET_SOURCE = `
@@ -398,6 +400,7 @@ export default function RemoteMicClient(props: {
         averageLevel: stats.averageLevel,
         peakLevel: stats.peakLevel,
         pcmBase64: int16ToBase64(framePcm),
+        enqueuedAtMs: Date.now(),
       });
       sequenceRef.current += 1;
     }
@@ -406,6 +409,7 @@ export default function RemoteMicClient(props: {
   function enqueueFrame(frame: LocalPcmFrame) {
     if (!frame.sessionId || !frame.streamId) return;
     pendingFramesRef.current.push(frame);
+    inspectFrameQueue("enqueue");
     void flushFrames();
   }
 
@@ -415,9 +419,23 @@ export default function RemoteMicClient(props: {
 
     try {
       while (pendingFramesRef.current.length > 0 && recordingActiveRef.current) {
+        inspectFrameQueue("before_send");
         const frame = pendingFramesRef.current.shift();
         if (!frame) continue;
+        const queuedMs = Date.now() - frame.enqueuedAtMs;
+        const sentAt = new Date().toISOString();
+        console.info("[remote-mic frame send]", {
+          role: frame.role,
+          streamId: frame.streamId,
+          sequence: frame.sequence,
+          capturedAt: frame.capturedAt,
+          sentAt,
+          queuedMs,
+          queueLength: pendingFramesRef.current.length,
+        });
+        const startedAtMs = Date.now();
         const response = await postFrame(frame);
+        const processedMs = Date.now() - startedAtMs;
         if (!response.ok) {
           if (response.status === 409) {
             await recoverFromActiveSessionMismatch();
@@ -429,7 +447,19 @@ export default function RemoteMicClient(props: {
           saved?: unknown[];
           skipped?: boolean;
           reason?: string;
+          transcripts?: unknown[];
         };
+        if (processedMs > FRAME_MS || queuedMs > FRAME_QUEUE_WARN_AGE_MS) {
+          console.warn("[remote-mic frame latency]", {
+            role: frame.role,
+            streamId: frame.streamId,
+            sequence: frame.sequence,
+            processedMs,
+            queuedMs,
+            queueLength: pendingFramesRef.current.length,
+            transcriptCount: Array.isArray(data.transcripts) ? data.transcripts.length : 0,
+          });
+        }
         if (Array.isArray(data.saved) && data.saved.length > 0) {
           setServerLabel("発話を保存しました");
         } else if (data.skipped && data.reason === "ai_speech_active") {
@@ -450,6 +480,26 @@ export default function RemoteMicClient(props: {
     } finally {
       postingFrameRef.current = false;
     }
+  }
+
+  function inspectFrameQueue(stage: "enqueue" | "before_send") {
+    const oldest = pendingFramesRef.current[0];
+    const oldestQueuedMs = oldest ? Date.now() - oldest.enqueuedAtMs : 0;
+    if (
+      pendingFramesRef.current.length < FRAME_QUEUE_WARN_LENGTH &&
+      oldestQueuedMs < FRAME_QUEUE_WARN_AGE_MS
+    ) {
+      return;
+    }
+
+    console.warn("[remote-mic frame queue backlog]", {
+      stage,
+      queueLength: pendingFramesRef.current.length,
+      oldestQueuedMs,
+      nextSequence: oldest?.sequence ?? null,
+      streamId: oldest?.streamId ?? streamIdRef.current,
+      role: oldest?.role ?? remoteMicRef.current?.role ?? null,
+    });
   }
 
   async function postFrame(frame: LocalPcmFrame) {
@@ -716,6 +766,7 @@ type LocalPcmFrame = {
   averageLevel: number;
   peakLevel: number;
   pcmBase64: string;
+  enqueuedAtMs: number;
 };
 
 async function fetchCurrentSession(role: RemoteMicRole, signal?: AbortSignal) {
