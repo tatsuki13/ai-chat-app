@@ -17,34 +17,20 @@ type AiSpeechEvent = {
   revision?: number;
   releaseAfter?: string | null;
 };
-type WindowWithAudioContext = Window & {
-  webkitAudioContext?: typeof AudioContext;
+type RealtimeEvent = {
+  type?: string;
+  event_id?: string;
+  item_id?: string;
+  item?: { id?: string };
+  delta?: string;
+  transcript?: string;
 };
 
-const CLIENT_VERSION = "remote-mic-client-2026-08-27-local-asr";
+const CLIENT_VERSION = "remote-mic-client-2026-09-04-openai-realtime";
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
-const TARGET_SAMPLE_RATE = 16_000;
-const FRAME_MS = 250;
-const FRAME_QUEUE_WARN_LENGTH = 12;
-const FRAME_QUEUE_WARN_AGE_MS = 3000;
+const HEARTBEAT_MS = 15_000;
 const AI_SPEECH_RELEASE_DELAY_MS = 500;
 const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45_000;
-const WORKLET_SOURCE = `
-class PcmCaptureProcessor extends AudioWorkletProcessor {
-  process(inputs, outputs) {
-    const input = inputs[0]?.[0];
-    const output = outputs[0]?.[0];
-    if (output) output.fill(0);
-    if (input && input.length) {
-      const copy = new Float32Array(input.length);
-      copy.set(input);
-      this.port.postMessage(copy, [copy.buffer]);
-    }
-    return true;
-  }
-}
-registerProcessor("pcm-capture-processor", PcmCaptureProcessor);
-`;
 
 export default function RemoteMicClient(props: {
   initialRole?: RemoteMicRole | null;
@@ -54,7 +40,7 @@ export default function RemoteMicClient(props: {
   const [micState, setMicState] = useState<MicState>("idle");
   const [secureContext, setSecureContext] = useState(false);
   const [mediaSupported, setMediaSupported] = useState(false);
-  const [workletSupported, setWorkletSupported] = useState(false);
+  const [webrtcSupported, setWebrtcSupported] = useState(false);
   const [permissionLabel, setPermissionLabel] = useState("未確認");
   const [serverLabel, setServerLabel] = useState("確認中");
   const [connectionLabel, setConnectionLabel] = useState("未接続");
@@ -67,23 +53,22 @@ export default function RemoteMicClient(props: {
   const [level, setLevel] = useState(0);
 
   const streamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
-  const workletUrlRef = useRef<string | null>(null);
-  const frameSamplesRef = useRef<Int16Array[]>([]);
-  const frameSampleCountRef = useRef(0);
-  const sequenceRef = useRef(0);
-  const streamIdRef = useRef("");
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const levelStopRef = useRef<(() => void) | null>(null);
   const recordingActiveRef = useRef(false);
+  const startInFlightRef = useRef(false);
   const remoteMicRef = useRef<RemoteMicSession | null>(null);
   const fixedRoleRef = useRef<RemoteMicRole | null>(null);
   const micStateRef = useRef<MicState>("idle");
-  const postingFrameRef = useRef(false);
-  const pendingFramesRef = useRef<LocalPcmFrame[]>([]);
-  const reconnectingAfterMismatchRef = useRef(false);
+  const streamIdRef = useRef("");
+  const realtimeModelRef = useRef("");
+  const partialTextByTranscriptRef = useRef<Map<string, string>>(new Map());
+  const speechStartedAtByTranscriptRef = useRef<Map<string, number>>(new Map());
+  const firstDeltaAtByTranscriptRef = useRef<Map<string, number>>(new Map());
   const aiSpeechReleaseTimerRef = useRef<number | null>(null);
   const aiSpeechSafetyTimerRef = useRef<number | null>(null);
+  const resumeAfterAiSpeechRef = useRef(false);
   const aiSpeechStateRef = useRef({
     active: false,
     playbackId: null as string | null,
@@ -103,21 +88,21 @@ export default function RemoteMicClient(props: {
   }, [remoteMic]);
 
   useEffect(() => {
-    micStateRef.current = micState;
-  }, [micState]);
-
-  useEffect(() => {
     fixedRoleRef.current = fixedRole;
   }, [fixedRole]);
 
   useEffect(() => {
+    micStateRef.current = micState;
+  }, [micState]);
+
+  useEffect(() => {
     const nextSecureContext = window.isSecureContext;
     const nextMediaSupported = Boolean(navigator.mediaDevices?.getUserMedia);
-    const nextWorkletSupported = Boolean(getAudioContextClass() && window.AudioWorkletNode);
+    const nextWebrtcSupported = typeof RTCPeerConnection !== "undefined";
 
     setSecureContext(nextSecureContext);
     setMediaSupported(nextMediaSupported);
-    setWorkletSupported(nextWorkletSupported);
+    setWebrtcSupported(nextWebrtcSupported);
     setOpenUrlLabel(`${window.location.protocol}//${window.location.host}`);
     setBrowserLabel(getBrowserLabel(navigator.userAgent));
     console.info("[remote-mic client]", { version: CLIENT_VERSION });
@@ -129,8 +114,10 @@ export default function RemoteMicClient(props: {
       if (maybeHttpsUrl) {
         window.setTimeout(() => window.location.replace(maybeHttpsUrl), 800);
       }
-    } else if (!nextMediaSupported || !nextWorkletSupported) {
-      setHelpText("このブラウザではローカルASR用の音声入力を利用できません。ChromeまたはSafariで固定マイクURLを開いてください。");
+    } else if (!nextMediaSupported || !nextWebrtcSupported) {
+      setHelpText(
+        "このブラウザではRealtime音声入力を利用できません。ChromeまたはSafariで固定マイクURLを開いてください。",
+      );
     }
 
     const role = getFixedRemoteMicRole(props.initialRole ?? null);
@@ -141,6 +128,16 @@ export default function RemoteMicClient(props: {
       void stop(false);
     };
   }, [props.initialRole]);
+
+  useEffect(() => {
+    if (!fixedRole || micState === "streaming") return;
+
+    const timerId = window.setInterval(() => {
+      void loadActiveSession(fixedRole, { quiet: true });
+    }, 3000);
+
+    return () => window.clearInterval(timerId);
+  }, [fixedRole, micState]);
 
   useEffect(() => {
     if (!remoteMic?.sessionId) return;
@@ -162,8 +159,49 @@ export default function RemoteMicClient(props: {
     };
   }, [remoteMic?.sessionId]);
 
+  useEffect(() => {
+    if (!remoteMic || micState !== "streaming") return;
+
+    const timerId = window.setInterval(() => {
+      if (!fixedRole) return;
+
+      void fetchCurrentSession(fixedRole)
+        .then((data) => {
+          if (
+            !data.active ||
+            data.active.sessionId !== remoteMic.sessionId ||
+            data.active.participantCode !== remoteMic.participantCode ||
+            data.active.endedAt
+          ) {
+            void stop(false);
+            setRemoteMic(null);
+            setServerLabel("PC待機中");
+            return;
+          }
+
+          setRemoteMic((current) =>
+            current
+              ? {
+                  ...current,
+                  dialogueStartedAt: data.active?.dialogueStartedAt ?? null,
+                }
+              : current,
+          );
+        })
+        .catch(() => {
+          setServerLabel("通信が不安定です");
+        });
+    }, HEARTBEAT_MS);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [fixedRole, remoteMic, micState]);
+
   function handleAiSpeechEvent(event: AiSpeechEvent) {
-    if (!remoteMic?.sessionId || event.sessionId !== remoteMic.sessionId) return;
+    if (!remoteMicRef.current?.sessionId || event.sessionId !== remoteMicRef.current.sessionId) {
+      return;
+    }
 
     const revision = typeof event.revision === "number" ? event.revision : 0;
     if (revision < aiSpeechStateRef.current.revision) return;
@@ -185,6 +223,7 @@ export default function RemoteMicClient(props: {
   }
 
   function pauseCaptureForAiSpeech(playbackId: string, revision: number) {
+    resumeAfterAiSpeechRef.current = recordingActiveRef.current || startInFlightRef.current;
     aiSpeechStateRef.current = {
       active: true,
       playbackId,
@@ -192,10 +231,8 @@ export default function RemoteMicClient(props: {
       releaseUntil: 0,
     };
     setAiSpeechLabel("AI音声中のため一時停止");
-    streamRef.current?.getAudioTracks().forEach((track) => {
-      track.enabled = false;
-    });
-    clearAudioFrameBuffer();
+    clearTranscriptState();
+    void stopRealtimeConnection();
     void setFixedMicMuted(true).catch(() => undefined);
 
     if (aiSpeechSafetyTimerRef.current !== null) {
@@ -226,15 +263,12 @@ export default function RemoteMicClient(props: {
         revision,
         releaseUntil: 0,
       };
-      streamRef.current?.getAudioTracks().forEach((track) => {
-        track.enabled = true;
-      });
-      if (recordingActiveRef.current) {
-        void setFixedMicMuted(false).catch(() => undefined);
-      } else if (remoteMicRef.current && micStateRef.current === "idle") {
-        void start();
-      }
       setAiSpeechLabel("通常受付");
+
+      if (resumeAfterAiSpeechRef.current) {
+        resumeAfterAiSpeechRef.current = false;
+        void start(remoteMicRef.current);
+      }
     }, delayMs);
   }
 
@@ -243,17 +277,17 @@ export default function RemoteMicClient(props: {
     return state.active || Date.now() <= state.releaseUntil;
   }
 
-  function clearAudioFrameBuffer() {
-    frameSamplesRef.current = [];
-    frameSampleCountRef.current = 0;
-  }
+  function clearTranscriptState(transcriptId?: string) {
+    if (transcriptId) {
+      partialTextByTranscriptRef.current.delete(transcriptId);
+      speechStartedAtByTranscriptRef.current.delete(transcriptId);
+      firstDeltaAtByTranscriptRef.current.delete(transcriptId);
+      return;
+    }
 
-  function takeFrameSamples(sampleCount: number) {
-    return takeFrameSamplesFromBuffers(
-      frameSamplesRef.current,
-      frameSampleCountRef,
-      sampleCount,
-    );
+    partialTextByTranscriptRef.current.clear();
+    speechStartedAtByTranscriptRef.current.clear();
+    firstDeltaAtByTranscriptRef.current.clear();
   }
 
   async function loadActiveSession(
@@ -305,13 +339,22 @@ export default function RemoteMicClient(props: {
   }
 
   async function start(targetRemoteMic = remoteMicRef.current) {
-    if (!targetRemoteMic || micStateRef.current !== "idle") return;
+    if (!targetRemoteMic) return;
+    if (startInFlightRef.current || recordingActiveRef.current || micStateRef.current !== "idle") {
+      return;
+    }
+    if (isAiSpeechBlockingCapture()) {
+      resumeAfterAiSpeechRef.current = true;
+      return;
+    }
 
+    startInFlightRef.current = true;
     setError("");
     setPermissionLabel("確認中");
     setConnectionLabel("接続中");
     setMicState("requesting");
 
+    let unmuted = false;
     try {
       if (!window.isSecureContext) {
         throw new Error("HTTPSで接続してください。Tailscale ServeのHTTPS URLから開いてください。");
@@ -319,16 +362,16 @@ export default function RemoteMicClient(props: {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("このブラウザではマイクを利用できません。");
       }
-      const AudioContextClass = getAudioContextClass();
-      if (!AudioContextClass || !window.AudioWorkletNode) {
-        throw new Error("このブラウザではローカルASR用のAudioWorkletを利用できません。");
+      if (typeof RTCPeerConnection === "undefined") {
+        throw new Error(
+          "このブラウザではRealtime接続を利用できません。ChromeまたはSafariで開いてください。",
+        );
       }
 
-      const health = await fetch("/api/remote-mic/local/health", { cache: "no-store" });
-      if (!health.ok) {
-        throw new Error("ローカル文字起こしサービスに接続できません。Local ASR Workerを起動してください。");
-      }
-
+      await setFixedMicMuted(false, targetRemoteMic);
+      unmuted = true;
+      const realtimeSession = await createRealtimeSession(targetRemoteMic);
+      realtimeModelRef.current = realtimeSession.model;
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -339,33 +382,58 @@ export default function RemoteMicClient(props: {
       });
       streamRef.current = stream;
       streamIdRef.current = `${targetRemoteMic.role}:${Date.now()}:${crypto.randomUUID()}`;
-      sequenceRef.current = 0;
+      try {
+        levelStopRef.current = startLevelMeter(stream, (nextLevel) => {
+          setLevel(nextLevel);
+        });
+      } catch {
+        levelStopRef.current = null;
+        setLevel(0);
+      }
 
-      const audioContext = new AudioContextClass();
-      audioContextRef.current = audioContext;
-      const workletUrl = URL.createObjectURL(
-        new Blob([WORKLET_SOURCE], { type: "application/javascript" }),
-      );
-      workletUrlRef.current = workletUrl;
-      await audioContext.audioWorklet.addModule(workletUrl);
-
-      const source = audioContext.createMediaStreamSource(stream);
-      const node = new AudioWorkletNode(audioContext, "pcm-capture-processor");
-      audioSourceRef.current = source;
-      workletNodeRef.current = node;
-      node.port.onmessage = (event: MessageEvent<Float32Array>) => {
-        if (!recordingActiveRef.current || isAiSpeechBlockingCapture()) return;
-        handleAudioSamples(event.data, audioContext.sampleRate);
+      const peerConnection = new RTCPeerConnection();
+      peerConnectionRef.current = peerConnection;
+      const dataChannel = peerConnection.createDataChannel("oai-events");
+      dataChannelRef.current = dataChannel;
+      dataChannel.onopen = () => {
+        setConnectionLabel("接続済み");
+        setServerLabel("文字起こし中");
       };
-      source.connect(node);
-      node.connect(audioContext.destination);
+      dataChannel.onmessage = (event) => {
+        handleRealtimeEvent(targetRemoteMic, event.data);
+      };
+      dataChannel.onerror = (event) => {
+        console.warn("[remote-mic realtime data channel error]", event);
+        setConnectionLabel("データ接続エラー");
+      };
+      peerConnection.onconnectionstatechange = () => {
+        const state = peerConnection.connectionState;
+        if (state === "failed" || state === "disconnected" || state === "closed") {
+          setConnectionLabel("切断");
+        }
+      };
+
+      for (const track of stream.getAudioTracks()) {
+        track.enabled = !isAiSpeechBlockingCapture();
+        peerConnection.addTrack(track, stream);
+      }
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      if (!offer.sdp) {
+        throw new Error("Realtime接続のofferを作成できませんでした。");
+      }
+
+      const answerSdp = await createRealtimeCall(realtimeSession.clientSecret, offer.sdp);
+      await peerConnection.setRemoteDescription({
+        type: "answer",
+        sdp: answerSdp,
+      });
 
       recordingActiveRef.current = true;
       setPermissionLabel("許可済み");
       setMicState("streaming");
-      setConnectionLabel("送信中");
-      setServerLabel("ローカル文字起こし中");
-      await setFixedMicMuted(false, targetRemoteMic);
+      setServerLabel("文字起こし中");
     } catch (startError) {
       if (isPermissionError(startError)) {
         setPermissionLabel("拒否");
@@ -375,172 +443,122 @@ export default function RemoteMicClient(props: {
           ? startError.message
           : "マイクを開始できませんでした。",
       );
-      await stop(false);
-    }
-  }
-
-  function handleAudioSamples(samples: Float32Array, sampleRate: number) {
-    const pcm = convertFloat32ToPcm16(downsample(samples, sampleRate, TARGET_SAMPLE_RATE));
-    frameSamplesRef.current.push(pcm);
-    frameSampleCountRef.current += pcm.length;
-
-    const frameSampleTarget = Math.round((TARGET_SAMPLE_RATE * FRAME_MS) / 1000);
-    while (frameSampleCountRef.current >= frameSampleTarget) {
-      const framePcm = takeFrameSamples(frameSampleTarget);
-      const stats = getPcmStats(framePcm);
-      setLevel(stats.peakLevel);
-      enqueueFrame({
-        sessionId: remoteMicRef.current?.sessionId ?? "",
-        role: remoteMicRef.current?.role ?? "elder",
-        streamId: streamIdRef.current,
-        sequence: sequenceRef.current,
-        capturedAt: new Date().toISOString(),
-        durationMs: FRAME_MS,
-        sampleRate: TARGET_SAMPLE_RATE,
-        averageLevel: stats.averageLevel,
-        peakLevel: stats.peakLevel,
-        pcmBase64: int16ToBase64(framePcm),
-        enqueuedAtMs: Date.now(),
-      });
-      sequenceRef.current += 1;
-    }
-  }
-
-  function enqueueFrame(frame: LocalPcmFrame) {
-    if (!frame.sessionId || !frame.streamId) return;
-    pendingFramesRef.current.push(frame);
-    inspectFrameQueue("enqueue");
-    void flushFrames();
-  }
-
-  async function flushFrames() {
-    if (postingFrameRef.current) return;
-    postingFrameRef.current = true;
-
-    try {
-      while (pendingFramesRef.current.length > 0 && recordingActiveRef.current) {
-        inspectFrameQueue("before_send");
-        const frame = pendingFramesRef.current.shift();
-        if (!frame) continue;
-        const queuedMs = Date.now() - frame.enqueuedAtMs;
-        const sentAt = new Date().toISOString();
-        console.info("[remote-mic frame send]", {
-          role: frame.role,
-          streamId: frame.streamId,
-          sequence: frame.sequence,
-          capturedAt: frame.capturedAt,
-          sentAt,
-          queuedMs,
-          queueLength: pendingFramesRef.current.length,
-        });
-        const startedAtMs = Date.now();
-        const response = await postFrame(frame);
-        const processedMs = Date.now() - startedAtMs;
-        if (!response.ok) {
-          if (response.status === 409) {
-            await recoverFromActiveSessionMismatch();
-            return;
-          }
-          throw new Error(`Local ASR frame failed: ${response.status}`);
-        }
-        const data = (await response.json()) as {
-          saved?: unknown[];
-          skipped?: boolean;
-          reason?: string;
-          transcripts?: unknown[];
-        };
-        if (processedMs > FRAME_MS || queuedMs > FRAME_QUEUE_WARN_AGE_MS) {
-          console.warn("[remote-mic frame latency]", {
-            role: frame.role,
-            streamId: frame.streamId,
-            sequence: frame.sequence,
-            processedMs,
-            queuedMs,
-            queueLength: pendingFramesRef.current.length,
-            transcriptCount: Array.isArray(data.transcripts) ? data.transcripts.length : 0,
-          });
-        }
-        if (Array.isArray(data.saved) && data.saved.length > 0) {
-          setServerLabel("発話を保存しました");
-        } else if (data.skipped && data.reason === "ai_speech_active") {
-          setServerLabel("AI音声中のため一時停止");
-        } else {
-          setServerLabel("ローカル文字起こし中");
-        }
+      await stopRealtimeConnection();
+      if (unmuted) {
+        await setFixedMicMuted(true, targetRemoteMic).catch(() => undefined);
       }
-    } catch (frameError) {
-      console.warn("[remote-mic local frame failed]", frameError);
-      setConnectionLabel("送信エラー");
-      setError(
-        frameError instanceof Error
-          ? frameError.message
-          : "ローカル文字起こしサービスへの送信に失敗しました。",
-      );
-      await stop(false);
+      setMicState("idle");
+      setConnectionLabel("未接続");
     } finally {
-      postingFrameRef.current = false;
+      startInFlightRef.current = false;
     }
   }
 
-  function inspectFrameQueue(stage: "enqueue" | "before_send") {
-    const oldest = pendingFramesRef.current[0];
-    const oldestQueuedMs = oldest ? Date.now() - oldest.enqueuedAtMs : 0;
-    if (
-      pendingFramesRef.current.length < FRAME_QUEUE_WARN_LENGTH &&
-      oldestQueuedMs < FRAME_QUEUE_WARN_AGE_MS
-    ) {
+  function handleRealtimeEvent(session: RemoteMicSession, rawData: unknown) {
+    if (typeof rawData !== "string") return;
+
+    let event: RealtimeEvent;
+    try {
+      event = JSON.parse(rawData) as RealtimeEvent;
+    } catch {
       return;
     }
 
-    console.warn("[remote-mic frame queue backlog]", {
-      stage,
-      queueLength: pendingFramesRef.current.length,
-      oldestQueuedMs,
-      nextSequence: oldest?.sequence ?? null,
-      streamId: oldest?.streamId ?? streamIdRef.current,
-      role: oldest?.role ?? remoteMicRef.current?.role ?? null,
-    });
-  }
+    const type = event.type ?? "";
+    if (type === "input_audio_buffer.speech_started") {
+      if (isAiSpeechBlockingCapture()) return;
+      const transcriptId = getTranscriptId(event);
+      speechStartedAtByTranscriptRef.current.set(transcriptId, Date.now());
+      return;
+    }
 
-  async function postFrame(frame: LocalPcmFrame) {
-    let lastError: unknown = null;
+    if (type === "conversation.item.input_audio_transcription.delta") {
+      if (isAiSpeechBlockingCapture()) return;
+      const transcriptId = getTranscriptId(event);
+      const delta = event.delta ?? "";
+      if (!delta) return;
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const response = await fetch("/api/remote-mic/local/frame", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(frame),
+      const previous = partialTextByTranscriptRef.current.get(transcriptId) ?? "";
+      const text = `${previous}${delta}`;
+      partialTextByTranscriptRef.current.set(transcriptId, text);
+      const firstPartialAt = logFirstDeltaLatency(transcriptId, session);
+      void postTranscript({
+        transcriptId,
+        text,
+        status: "partial",
+        startedAt: getTranscriptStartedAt(transcriptId),
+        firstPartialAt,
+      });
+      return;
+    }
+
+    if (type === "conversation.item.input_audio_transcription.completed") {
+      const transcriptId = getTranscriptId(event);
+      const text =
+        event.transcript ?? partialTextByTranscriptRef.current.get(transcriptId) ?? "";
+      const startedAt = getTranscriptStartedAt(transcriptId);
+      const firstPartialAt = getFirstPartialAt(transcriptId);
+      const endedAt = new Date().toISOString();
+      clearTranscriptState(transcriptId);
+
+      if (isAiSpeechBlockingCapture()) {
+        console.info("[remote-mic final transcript skipped during ai speech]", {
+          sessionId: session.sessionId,
+          role: session.role,
+          transcriptId,
         });
-        if (response.status !== 500 && response.status !== 502 && response.status !== 503) {
-          return response;
-        }
-        lastError = new Error(`Local ASR frame failed: ${response.status}`);
-      } catch (error) {
-        lastError = error;
+        return;
       }
 
-      await wait(300);
+      console.info("[remote-mic final transcript latency]", {
+        sessionId: session.sessionId,
+        role: session.role,
+        transcriptId,
+        latencyMs: startedAt ? Date.now() - new Date(startedAt).getTime() : null,
+      });
+      void postTranscript({
+        transcriptId,
+        text,
+        status: "final",
+        eventId: event.event_id,
+        startedAt,
+        firstPartialAt,
+        endedAt,
+        finalizedAt: endedAt,
+      });
+      return;
     }
 
-    throw lastError instanceof Error ? lastError : new Error("Local ASR frame failed");
+    if (type === "error") {
+      console.warn("[remote-mic realtime error]", event);
+      setConnectionLabel("Realtimeエラー");
+    }
   }
 
-  async function recoverFromActiveSessionMismatch() {
-    if (reconnectingAfterMismatchRef.current) return;
-    reconnectingAfterMismatchRef.current = true;
+  function logFirstDeltaLatency(transcriptId: string, session: RemoteMicSession) {
+    const existing = firstDeltaAtByTranscriptRef.current.get(transcriptId);
+    if (existing) return new Date(existing).toISOString();
 
-    try {
-      setConnectionLabel("蜀肴磁邯壻ｸｭ");
-      setServerLabel("PC蛛ｴ縺ｮ譁ｰsession繧堤｢ｺ隱堺ｸｭ");
-      await stop(false);
-      const nextRemoteMic = await loadActiveSession(fixedRoleRef.current, { quiet: true });
-      if (nextRemoteMic) {
-        await start(nextRemoteMic);
-      }
-    } finally {
-      reconnectingAfterMismatchRef.current = false;
-    }
+    const firstDeltaAt = Date.now();
+    firstDeltaAtByTranscriptRef.current.set(transcriptId, firstDeltaAt);
+    const speechStartedAt = speechStartedAtByTranscriptRef.current.get(transcriptId);
+    console.info("[remote-mic first transcript delta latency]", {
+      sessionId: session.sessionId,
+      role: session.role,
+      transcriptId,
+      latencyMs: speechStartedAt ? firstDeltaAt - speechStartedAt : null,
+    });
+    return new Date(firstDeltaAt).toISOString();
+  }
+
+  function getTranscriptStartedAt(transcriptId: string) {
+    const startedAt = speechStartedAtByTranscriptRef.current.get(transcriptId);
+    return startedAt ? new Date(startedAt).toISOString() : undefined;
+  }
+
+  function getFirstPartialAt(transcriptId: string) {
+    const firstPartialAt = firstDeltaAtByTranscriptRef.current.get(transcriptId);
+    return firstPartialAt ? new Date(firstPartialAt).toISOString() : undefined;
   }
 
   async function muteMicrophone() {
@@ -548,40 +566,8 @@ export default function RemoteMicClient(props: {
   }
 
   async function stop(notifyServer = true) {
-    const shouldFlush = Boolean(
-      notifyServer &&
-        recordingActiveRef.current &&
-        remoteMicRef.current &&
-        streamIdRef.current,
-    );
-    recordingActiveRef.current = false;
-    pendingFramesRef.current = [];
-    clearAudioFrameBuffer();
-    if (shouldFlush) {
-      await flushCurrentStream().catch((flushError) => {
-        console.warn("[remote-mic local flush failed]", flushError);
-      });
-    }
-    workletNodeRef.current?.disconnect();
-    workletNodeRef.current = null;
-    audioSourceRef.current?.disconnect();
-    audioSourceRef.current = null;
-    await audioContextRef.current?.close().catch(() => undefined);
-    audioContextRef.current = null;
-    if (workletUrlRef.current) {
-      URL.revokeObjectURL(workletUrlRef.current);
-      workletUrlRef.current = null;
-    }
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-    if (aiSpeechReleaseTimerRef.current !== null) {
-      window.clearTimeout(aiSpeechReleaseTimerRef.current);
-      aiSpeechReleaseTimerRef.current = null;
-    }
-    if (aiSpeechSafetyTimerRef.current !== null) {
-      window.clearTimeout(aiSpeechSafetyTimerRef.current);
-      aiSpeechSafetyTimerRef.current = null;
-    }
+    resumeAfterAiSpeechRef.current = false;
+    await stopRealtimeConnection();
     setConnectionLabel("未接続");
     setLevel(0);
     setMicState("idle");
@@ -592,27 +578,27 @@ export default function RemoteMicClient(props: {
     }
   }
 
-  async function flushCurrentStream() {
-    const current = remoteMicRef.current;
-    const streamId = streamIdRef.current;
-    if (!current || !streamId) return;
+  async function stopRealtimeConnection() {
+    recordingActiveRef.current = false;
+    dataChannelRef.current?.close();
+    dataChannelRef.current = null;
+    peerConnectionRef.current?.close();
+    peerConnectionRef.current = null;
+    clearTranscriptState();
 
-    const response = await fetch("/api/remote-mic/local/flush", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: current.sessionId,
-        role: current.role,
-        streamId,
-      }),
+    levelStopRef.current?.();
+    levelStopRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => {
+      track.enabled = false;
+      track.stop();
     });
-
-    if (!response.ok && response.status !== 409) {
-      throw new Error(`Local ASR flush failed: ${response.status}`);
-    }
+    streamRef.current = null;
   }
 
-  async function setFixedMicMuted(muted: boolean, targetRemoteMic = remoteMicRef.current) {
+  async function setFixedMicMuted(
+    muted: boolean,
+    targetRemoteMic = remoteMicRef.current,
+  ) {
     if (!targetRemoteMic) return;
 
     const response = await fetch("/api/remote-mic/fixed/mute", {
@@ -653,7 +639,7 @@ export default function RemoteMicClient(props: {
             </div>
             <h1 className="mt-1 text-[20px] font-black">{roleLabel}</h1>
             <p className="mt-1 text-[12px] font-bold text-stone-600">
-              ローカルASRへ音声を送信します。
+              OpenAI Realtimeへ音声を送信します。
             </p>
           </div>
           <div
@@ -663,7 +649,7 @@ export default function RemoteMicClient(props: {
                 : "bg-stone-100 text-stone-600"
             }`}
           >
-            {micState === "streaming" ? "送信中" : micState === "requesting" ? "確認中" : "停止中"}
+            {micState === "streaming" ? "接続中" : micState === "requesting" ? "確認中" : "停止中"}
           </div>
         </div>
 
@@ -675,8 +661,8 @@ export default function RemoteMicClient(props: {
           <StatusRow label="ブラウザ" value={browserLabel} />
           <StatusRow label="HTTPS" value={secureContext ? "OK" : "NG"} />
           <StatusRow label="マイクAPI" value={mediaSupported ? "利用可能" : "利用不可"} />
-          <StatusRow label="AudioWorklet" value={workletSupported ? "利用可能" : "利用不可"} />
-          <StatusRow label="文字起こし方式" value="Local ASR Worker" />
+          <StatusRow label="WebRTC" value={webrtcSupported ? "利用可能" : "利用不可"} />
+          <StatusRow label="文字起こし方式" value="OpenAI Realtime" />
           <StatusRow label="マイク許可" value={permissionLabel} />
           <StatusRow label="接続状態" value={connectionLabel} />
           <StatusRow label="サーバー" value={serverLabel} />
@@ -753,21 +739,46 @@ export default function RemoteMicClient(props: {
       </section>
     </main>
   );
-}
 
-type LocalPcmFrame = {
-  sessionId: string;
-  role: RemoteMicRole;
-  streamId: string;
-  sequence: number;
-  capturedAt: string;
-  durationMs: number;
-  sampleRate: number;
-  averageLevel: number;
-  peakLevel: number;
-  pcmBase64: string;
-  enqueuedAtMs: number;
-};
+  async function postTranscript(input: {
+    transcriptId: string;
+    text: string;
+    status: "partial" | "final";
+    eventId?: string;
+    startedAt?: string;
+    firstPartialAt?: string;
+    endedAt?: string;
+    finalizedAt?: string;
+  }) {
+    const current = remoteMicRef.current;
+    const text = input.text.trim();
+    if (!current || !text) return;
+
+    const response = await fetch("/api/remote-mic/realtime/transcript", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: current.sessionId,
+        role: current.role,
+        streamId: streamIdRef.current,
+        transcriptId: input.transcriptId,
+        text,
+        status: input.status,
+        eventId: input.eventId,
+        startedAt: input.startedAt,
+        firstPartialAt: input.firstPartialAt,
+        endedAt: input.endedAt,
+        finalizedAt: input.finalizedAt,
+        model: realtimeModelRef.current,
+        aiPlaybackIdAtCapture: aiSpeechStateRef.current.playbackId,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Transcript relay failed: ${response.status}`);
+    }
+  }
+}
 
 async function fetchCurrentSession(role: RemoteMicRole, signal?: AbortSignal) {
   const response = await fetch(`/api/remote-mic/fixed/current?role=${role}`, {
@@ -790,86 +801,53 @@ async function fetchCurrentSession(role: RemoteMicRole, signal?: AbortSignal) {
   }>;
 }
 
-function downsample(input: Float32Array, inputRate: number, outputRate: number) {
-  if (inputRate === outputRate) return input;
-  if (inputRate < outputRate) return input;
+async function createRealtimeSession(remoteMic: RemoteMicSession) {
+  const response = await fetch("/api/remote-mic/realtime/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: remoteMic.sessionId,
+      role: remoteMic.role,
+    }),
+  });
 
-  const ratio = inputRate / outputRate;
-  const outputLength = Math.floor(input.length / ratio);
-  const output = new Float32Array(outputLength);
-
-  for (let outputIndex = 0; outputIndex < outputLength; outputIndex += 1) {
-    const start = Math.floor(outputIndex * ratio);
-    const end = Math.min(input.length, Math.floor((outputIndex + 1) * ratio));
-    let sum = 0;
-    for (let inputIndex = start; inputIndex < end; inputIndex += 1) {
-      sum += input[inputIndex] ?? 0;
-    }
-    output[outputIndex] = sum / Math.max(1, end - start);
+  if (!response.ok) {
+    throw new Error(`Realtime session failed: ${response.status}`);
   }
 
-  return output;
+  return response.json() as Promise<{
+    clientSecret: string;
+    expiresAt: number | null;
+    model: string;
+  }>;
 }
 
-function convertFloat32ToPcm16(input: Float32Array) {
-  const output = new Int16Array(input.length);
-  for (let index = 0; index < input.length; index += 1) {
-    const sample = Math.max(-1, Math.min(1, input[index] ?? 0));
-    output[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+async function createRealtimeCall(clientSecret: string, sdp: string) {
+  const formData = new FormData();
+  formData.append("sdp", sdp);
+
+  const response = await fetch("https://api.openai.com/v1/realtime/calls", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${clientSecret}`,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    console.warn("[remote-mic realtime call failed]", {
+      status: response.status,
+      errorText,
+    });
+    throw new Error(`Realtime call failed: ${response.status}`);
   }
-  return output;
+
+  return response.text();
 }
 
-function getPcmStats(pcm: Int16Array) {
-  if (pcm.length === 0) return { averageLevel: 0, peakLevel: 0 };
-
-  let sum = 0;
-  let peak = 0;
-  for (const sample of pcm) {
-    const normalized = Math.abs(sample) / 32768;
-    sum += normalized;
-    peak = Math.max(peak, normalized);
-  }
-
-  return {
-    averageLevel: sum / pcm.length,
-    peakLevel: peak,
-  };
-}
-
-function takeFrameSamplesFromBuffers(
-  buffers: Int16Array[],
-  sampleCountRef: { current: number },
-  sampleCount: number,
-) {
-  const output = new Int16Array(sampleCount);
-  let offset = 0;
-
-  while (offset < sampleCount && buffers.length > 0) {
-    const current = buffers[0];
-    const remaining = sampleCount - offset;
-    if (current.length <= remaining) {
-      output.set(current, offset);
-      offset += current.length;
-      buffers.shift();
-    } else {
-      output.set(current.subarray(0, remaining), offset);
-      buffers[0] = current.subarray(remaining);
-      offset += remaining;
-    }
-  }
-
-  sampleCountRef.current = Math.max(0, sampleCountRef.current - sampleCount);
-  return output;
-}
-
-function int16ToBase64(pcm: Int16Array) {
-  const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
+function getTranscriptId(event: RealtimeEvent) {
+  return event.item_id ?? event.item?.id ?? event.event_id ?? crypto.randomUUID();
 }
 
 function StatusRow(props: { label: string; value: string }) {
@@ -893,10 +871,6 @@ function LevelBar(props: { value: number }) {
   );
 }
 
-function getAudioContextClass() {
-  return window.AudioContext ?? (window as WindowWithAudioContext).webkitAudioContext ?? null;
-}
-
 function getHttpsUrl(value: string) {
   try {
     const url = new URL(value);
@@ -914,9 +888,22 @@ function getInsecureContextHelp() {
 }
 
 function getBrowserLabel(userAgent: string) {
-  if (/CriOS|Chrome/i.test(userAgent)) return "Chrome";
+  if (/SamsungBrowser/i.test(userAgent)) return "Samsung Internet / Android";
+  if (/EdgA|EdgiOS|Edg\//i.test(userAgent)) {
+    return /Android/i.test(userAgent) ? "Edge / Android" : "Edge";
+  }
+  if (/CriOS/i.test(userAgent)) return "Chrome / iOS";
+  if (/Chrome|Chromium/i.test(userAgent)) {
+    return /Android/i.test(userAgent) ? "Chrome / Android" : "Chrome";
+  }
+  if (/FxiOS/i.test(userAgent)) return "Firefox / iOS";
+  if (/Firefox/i.test(userAgent)) {
+    return /Android/i.test(userAgent) ? "Firefox / Android" : "Firefox";
+  }
+  if (/Safari/i.test(userAgent) && /Mobile/i.test(userAgent)) return "Safari / iOS";
   if (/Safari/i.test(userAgent)) return "Safari";
-  return "Browser";
+
+  return "その他のブラウザ";
 }
 
 function getFixedRemoteMicRole(explicitRole: RemoteMicRole | null): RemoteMicRole | null {
@@ -925,7 +912,7 @@ function getFixedRemoteMicRole(explicitRole: RemoteMicRole | null): RemoteMicRol
     return explicitRole;
   }
 
-  const path = window.location.pathname;
+  const path = window.location.pathname.toLowerCase();
   if (path.includes("/mic/elder")) {
     window.localStorage.setItem("fixed-remote-mic-role", "elder");
     return "elder";
@@ -943,12 +930,66 @@ function getRemoteMicRoleLabel(role: RemoteMicRole) {
   return role === "elder" ? "本人用" : "介護者用";
 }
 
-function isPermissionError(error: unknown) {
-  if (!(error instanceof DOMException)) return false;
+function startLevelMeter(stream: MediaStream, onLevel: (level: number) => void) {
+  const AudioContextClass =
+    window.AudioContext ??
+    (window as Window & { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext;
 
-  return error.name === "NotAllowedError" || error.name === "PermissionDeniedError";
+  if (!AudioContextClass) {
+    throw new Error("Web Audio API is not available in this browser");
+  }
+
+  const context = new AudioContextClass();
+  const source = context.createMediaStreamSource(stream);
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 1024;
+  const buffer = new Float32Array(analyser.fftSize);
+  let frameId = 0;
+  let stopped = false;
+
+  source.connect(analyser);
+
+  const tick = () => {
+    if (stopped) return;
+
+    analyser.getFloatTimeDomainData(buffer);
+    onLevel(calculateLevel(buffer));
+    frameId = window.requestAnimationFrame(tick);
+  };
+
+  frameId = window.requestAnimationFrame(tick);
+
+  return () => {
+    stopped = true;
+    window.cancelAnimationFrame(frameId);
+    try {
+      source.disconnect();
+    } catch {}
+    void context.close().catch(() => {});
+  };
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+function calculateLevel(samples: Float32Array) {
+  let sumSquares = 0;
+  let peak = 0;
+
+  for (const sample of samples) {
+    const absolute = Math.abs(sample);
+    sumSquares += sample * sample;
+    if (absolute > peak) peak = absolute;
+  }
+
+  const rms = Math.sqrt(sumSquares / samples.length);
+
+  return Math.min(1, Math.max(rms * 8, peak));
+}
+
+function isPermissionError(error: unknown) {
+  return (
+    error instanceof DOMException &&
+    (error.name === "NotAllowedError" ||
+      error.name === "SecurityError" ||
+      error.name === "PermissionDeniedError")
+  );
 }

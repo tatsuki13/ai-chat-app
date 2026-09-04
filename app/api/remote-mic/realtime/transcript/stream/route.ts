@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import {
-  getRemoteMicPartialTranscriptTtlMs,
-  subscribeRemoteMicPartialTranscripts,
-  type RemoteMicPartialTranscriptEvent,
-} from "../../../../../../lib/remote-mic/partial-transcripts";
+  getRemoteMicTranscriptEventTtlMs,
+  subscribeRemoteMicTranscriptEvents,
+  type RemoteMicTranscriptEvent,
+} from "../../../../../../lib/remote-mic/transcript-events";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,17 +22,17 @@ export async function GET(request: Request) {
 
   const stream = new ReadableStream({
     start(controller) {
-      const send = (event: RemoteMicPartialTranscriptEvent) => {
+      const send = (event: RemoteMicTranscriptEvent) => {
         if (event.sessionId !== sessionId) return;
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
       };
-      const unsubscribe = subscribeRemoteMicPartialTranscripts(send);
+      const unsubscribe = subscribeRemoteMicTranscriptEvents(send);
       const heartbeat = setInterval(() => {
         controller.enqueue(
           encoder.encode(
             `event: heartbeat\ndata: ${JSON.stringify({
               ok: true,
-              ttlMs: getRemoteMicPartialTranscriptTtlMs(),
+              ttlMs: getRemoteMicTranscriptEventTtlMs(),
               at: new Date().toISOString(),
             })}\n\n`,
           ),
