@@ -13,7 +13,6 @@ import {
   getAiSpeechState,
   isAiSpeechBlockingTranscription,
 } from "../../../../../lib/ai/speech-state";
-import { publishRemoteMicTranscriptEvent } from "../../../../../lib/remote-mic/transcript-events";
 
 export const runtime = "nodejs";
 
@@ -49,6 +48,12 @@ export async function POST(request: Request) {
   if (!sessionId || !role || !streamId || !transcriptId || !status) {
     return NextResponse.json(
       { error: "sessionId, role, streamId, transcriptId, and status are required" },
+      { status: 400 },
+    );
+  }
+  if (status !== "final") {
+    return NextResponse.json(
+      { error: "Realtime transcript API accepts final transcripts only" },
       { status: 400 },
     );
   }
@@ -91,21 +96,6 @@ export async function POST(request: Request) {
           ? "overlaps_ai_speech"
           : "ai_speech_active",
     });
-  }
-
-  if (status === "partial") {
-    publishRemoteMicTranscriptEvent({
-      type: "partial",
-      sessionId,
-      role,
-      streamId,
-      utteranceGroupId: transcriptId,
-      sourceGroupId: transcriptId,
-      text,
-      speechStartedAt: startedAt || null,
-      firstPartialAt: requiredString(body?.firstPartialAt) || null,
-    });
-    return NextResponse.json({ ok: true, published: Boolean(text) });
   }
 
   if (!text) {
@@ -181,24 +171,7 @@ export async function POST(request: Request) {
     timing,
     asrModel: model,
   }));
-  const dbSavedAt = new Date().toISOString();
   const serialized = serializeUtterance(utterance);
-
-  publishRemoteMicTranscriptEvent({
-    type: "final",
-    sessionId,
-    role,
-    streamId,
-    utteranceGroupId: transcriptId,
-    sourceGroupId: transcriptId,
-    text: utterance.text,
-    utterance: serialized,
-    speechStartedAt: startedAt || null,
-    firstPartialAt: requiredString(body?.firstPartialAt) || null,
-    speechEndedDetectedAt: endedAt || null,
-    transcribedAt: finalizedAt || null,
-    dbSavedAt,
-  });
 
   console.info("[remote-mic realtime transcript saved]", {
     sessionId,

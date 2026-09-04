@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "remote-mic:ws": "node scripts/remote-mic-ws-relay.mjs",
     "postinstall": "prisma generate",
     "start": "next start",
     "lint": "tsc --noEmit --incremental false",

@@ -25,12 +25,26 @@ type RealtimeEvent = {
   delta?: string;
   transcript?: string;
 };
+type RemoteMicWsTranscriptEvent = {
+  type: "partial" | "final" | "speech_started" | "error";
+  sessionId: string;
+  role: RemoteMicRole;
+  transcriptId: string;
+  revision: number;
+  text: string;
+  startedAt?: string;
+  endedAt?: string;
+};
+type RemoteMicWsClientType = "producer" | "subscriber";
 
 const CLIENT_VERSION = "remote-mic-client-2026-09-04-openai-realtime";
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const HEARTBEAT_MS = 15_000;
 const AI_SPEECH_RELEASE_DELAY_MS = 500;
 const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45_000;
+const REMOTE_MIC_WS_RECONNECT_MS = 1000;
+const FINAL_SAVE_RETRY_MS = 2000;
+const MAX_FINAL_SAVE_RETRY_COUNT = 5;
 
 export default function RemoteMicClient(props: {
   initialRole?: RemoteMicRole | null;
@@ -63,9 +77,25 @@ export default function RemoteMicClient(props: {
   const micStateRef = useRef<MicState>("idle");
   const streamIdRef = useRef("");
   const realtimeModelRef = useRef("");
+  const relayWebSocketRef = useRef<WebSocket | null>(null);
+  const relayReconnectTimerRef = useRef<number | null>(null);
+  const relayConnectedSessionRef = useRef<RemoteMicSession | null>(null);
   const partialTextByTranscriptRef = useRef<Map<string, string>>(new Map());
   const speechStartedAtByTranscriptRef = useRef<Map<string, number>>(new Map());
   const firstDeltaAtByTranscriptRef = useRef<Map<string, number>>(new Map());
+  const revisionByTranscriptRef = useRef<Map<string, number>>(new Map());
+  const latestPartialByTranscriptRef = useRef<
+    Map<string, RemoteMicWsTranscriptEvent>
+  >(new Map());
+  const pendingFinalByTranscriptRef = useRef<
+    Map<
+      string,
+      RemoteMicWsTranscriptEvent & {
+        firstPartialAt?: string;
+        saveAttempts: number;
+      }
+    >
+  >(new Map());
   const aiSpeechReleaseTimerRef = useRef<number | null>(null);
   const aiSpeechSafetyTimerRef = useRef<number | null>(null);
   const resumeAfterAiSpeechRef = useRef(false);
@@ -109,7 +139,7 @@ export default function RemoteMicClient(props: {
 
     const maybeHttpsUrl = getHttpsUrl(window.location.href);
     setHttpsUrl(maybeHttpsUrl);
-    if (!nextSecureContext) {
+    if (!isHttpsTsNetUrl(window.location.href)) {
       setHelpText(getInsecureContextHelp());
       if (maybeHttpsUrl) {
         window.setTimeout(() => window.location.replace(maybeHttpsUrl), 800);
@@ -288,6 +318,8 @@ export default function RemoteMicClient(props: {
     partialTextByTranscriptRef.current.clear();
     speechStartedAtByTranscriptRef.current.clear();
     firstDeltaAtByTranscriptRef.current.clear();
+    revisionByTranscriptRef.current.clear();
+    latestPartialByTranscriptRef.current.clear();
   }
 
   async function loadActiveSession(
@@ -356,8 +388,10 @@ export default function RemoteMicClient(props: {
 
     let unmuted = false;
     try {
-      if (!window.isSecureContext) {
-        throw new Error("HTTPSで接続してください。Tailscale ServeのHTTPS URLから開いてください。");
+      if (!isHttpsTsNetUrl(window.location.href)) {
+        throw new Error(
+          "スマホマイクは https:// で始まる .ts.net のTailscale Serve URLから開いてください。",
+        );
       }
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("このブラウザではマイクを利用できません。");
@@ -370,6 +404,7 @@ export default function RemoteMicClient(props: {
 
       await setFixedMicMuted(false, targetRemoteMic);
       unmuted = true;
+      connectRelayWebSocket(targetRemoteMic);
       const realtimeSession = await createRealtimeSession(targetRemoteMic);
       realtimeModelRef.current = realtimeSession.model;
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -469,6 +504,15 @@ export default function RemoteMicClient(props: {
       if (isAiSpeechBlockingCapture()) return;
       const transcriptId = getTranscriptId(event);
       speechStartedAtByTranscriptRef.current.set(transcriptId, Date.now());
+      sendRelayEvent({
+        type: "speech_started",
+        sessionId: session.sessionId,
+        role: session.role,
+        transcriptId,
+        revision: nextTranscriptRevision(transcriptId),
+        text: "",
+        startedAt: getTranscriptStartedAt(transcriptId),
+      });
       return;
     }
 
@@ -482,12 +526,14 @@ export default function RemoteMicClient(props: {
       const text = `${previous}${delta}`;
       partialTextByTranscriptRef.current.set(transcriptId, text);
       const firstPartialAt = logFirstDeltaLatency(transcriptId, session);
-      void postTranscript({
+      sendRelayEvent({
+        type: "partial",
+        sessionId: session.sessionId,
+        role: session.role,
         transcriptId,
+        revision: nextTranscriptRevision(transcriptId),
         text,
-        status: "partial",
         startedAt: getTranscriptStartedAt(transcriptId),
-        firstPartialAt,
       });
       return;
     }
@@ -516,14 +562,25 @@ export default function RemoteMicClient(props: {
         transcriptId,
         latencyMs: startedAt ? Date.now() - new Date(startedAt).getTime() : null,
       });
-      void postTranscript({
+      const finalEvent = {
+        type: "final" as const,
+        sessionId: session.sessionId,
+        role: session.role,
         transcriptId,
+        revision: nextTranscriptRevision(transcriptId),
         text,
-        status: "final",
-        eventId: event.event_id,
         startedAt,
-        firstPartialAt,
         endedAt,
+      };
+      pendingFinalByTranscriptRef.current.set(transcriptId, {
+        ...finalEvent,
+        firstPartialAt,
+        saveAttempts: 0,
+      });
+      sendRelayEvent(finalEvent);
+      void saveFinalTranscriptWithRetry(transcriptId, {
+        eventId: event.event_id,
+        firstPartialAt,
         finalizedAt: endedAt,
       });
       return;
@@ -561,6 +618,128 @@ export default function RemoteMicClient(props: {
     return firstPartialAt ? new Date(firstPartialAt).toISOString() : undefined;
   }
 
+  function nextTranscriptRevision(transcriptId: string) {
+    const nextRevision = (revisionByTranscriptRef.current.get(transcriptId) ?? 0) + 1;
+    revisionByTranscriptRef.current.set(transcriptId, nextRevision);
+    return nextRevision;
+  }
+
+  function connectRelayWebSocket(session: RemoteMicSession) {
+    if (
+      relayWebSocketRef.current &&
+      relayWebSocketRef.current.readyState <= WebSocket.OPEN &&
+      relayConnectedSessionRef.current?.sessionId === session.sessionId &&
+      relayConnectedSessionRef.current.role === session.role
+    ) {
+      return;
+    }
+
+    closeRelayWebSocket(false);
+    relayConnectedSessionRef.current = session;
+    const socket = new WebSocket(
+      buildRemoteMicRelayUrl({
+        sessionId: session.sessionId,
+        role: session.role,
+        clientType: "producer",
+      }),
+    );
+    relayWebSocketRef.current = socket;
+
+    socket.onopen = () => {
+      setConnectionLabel("接続済み");
+      flushRelayEvents();
+    };
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(String(event.data)) as RemoteMicWsTranscriptEvent;
+        if (message.type === "error") {
+          console.warn("[remote-mic ws relay error]", message);
+        }
+      } catch {}
+    };
+    socket.onerror = (event) => {
+      console.warn("[remote-mic ws relay socket error]", event);
+    };
+    socket.onclose = () => {
+      if (relayWebSocketRef.current === socket) {
+        relayWebSocketRef.current = null;
+      }
+      if (recordingActiveRef.current || startInFlightRef.current) {
+        scheduleRelayReconnect();
+      }
+    };
+  }
+
+  function scheduleRelayReconnect() {
+    if (relayReconnectTimerRef.current !== null) return;
+    relayReconnectTimerRef.current = window.setTimeout(() => {
+      relayReconnectTimerRef.current = null;
+      const session = relayConnectedSessionRef.current ?? remoteMicRef.current;
+      if (!session || (!recordingActiveRef.current && !startInFlightRef.current)) {
+        return;
+      }
+      connectRelayWebSocket(session);
+    }, REMOTE_MIC_WS_RECONNECT_MS);
+  }
+
+  function sendRelayEvent(event: RemoteMicWsTranscriptEvent) {
+    if (event.type === "partial") {
+      latestPartialByTranscriptRef.current.set(event.transcriptId, event);
+    }
+    if (event.type === "final") {
+      latestPartialByTranscriptRef.current.delete(event.transcriptId);
+    }
+
+    const socket = relayWebSocketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(event));
+      return;
+    }
+
+    scheduleRelayReconnect();
+  }
+
+  function flushRelayEvents() {
+    for (const event of latestPartialByTranscriptRef.current.values()) {
+      relayWebSocketRef.current?.send(JSON.stringify(event));
+    }
+    for (const event of pendingFinalByTranscriptRef.current.values()) {
+      relayWebSocketRef.current?.send(JSON.stringify(toRelayFinalEvent(event)));
+    }
+  }
+
+  function closeRelayWebSocket(clearPending: boolean) {
+    if (relayReconnectTimerRef.current !== null) {
+      window.clearTimeout(relayReconnectTimerRef.current);
+      relayReconnectTimerRef.current = null;
+    }
+    relayWebSocketRef.current?.close();
+    relayWebSocketRef.current = null;
+    relayConnectedSessionRef.current = null;
+    if (clearPending) {
+      latestPartialByTranscriptRef.current.clear();
+      pendingFinalByTranscriptRef.current.clear();
+    }
+  }
+
+  function toRelayFinalEvent(
+    event: RemoteMicWsTranscriptEvent & {
+      firstPartialAt?: string;
+      saveAttempts: number;
+    },
+  ): RemoteMicWsTranscriptEvent {
+    return {
+      type: "final",
+      sessionId: event.sessionId,
+      role: event.role,
+      transcriptId: event.transcriptId,
+      revision: event.revision,
+      text: event.text,
+      startedAt: event.startedAt,
+      endedAt: event.endedAt,
+    };
+  }
+
   async function muteMicrophone() {
     await stop();
   }
@@ -580,6 +759,7 @@ export default function RemoteMicClient(props: {
 
   async function stopRealtimeConnection() {
     recordingActiveRef.current = false;
+    closeRelayWebSocket(false);
     dataChannelRef.current?.close();
     dataChannelRef.current = null;
     peerConnectionRef.current?.close();
@@ -740,18 +920,19 @@ export default function RemoteMicClient(props: {
     </main>
   );
 
-  async function postTranscript(input: {
-    transcriptId: string;
-    text: string;
-    status: "partial" | "final";
-    eventId?: string;
-    startedAt?: string;
-    firstPartialAt?: string;
-    endedAt?: string;
-    finalizedAt?: string;
-  }) {
+  async function saveFinalTranscriptWithRetry(
+    transcriptId: string,
+    input: {
+      eventId?: string;
+      firstPartialAt?: string;
+      finalizedAt?: string;
+    },
+  ) {
+    const pending = pendingFinalByTranscriptRef.current.get(transcriptId);
+    if (!pending) return;
+    pending.saveAttempts += 1;
     const current = remoteMicRef.current;
-    const text = input.text.trim();
+    const text = pending.text.trim();
     if (!current || !text) return;
 
     const response = await fetch("/api/remote-mic/realtime/transcript", {
@@ -761,13 +942,13 @@ export default function RemoteMicClient(props: {
         sessionId: current.sessionId,
         role: current.role,
         streamId: streamIdRef.current,
-        transcriptId: input.transcriptId,
+        transcriptId,
         text,
-        status: input.status,
+        status: "final",
         eventId: input.eventId,
-        startedAt: input.startedAt,
+        startedAt: pending.startedAt,
         firstPartialAt: input.firstPartialAt,
-        endedAt: input.endedAt,
+        endedAt: pending.endedAt,
         finalizedAt: input.finalizedAt,
         model: realtimeModelRef.current,
         aiPlaybackIdAtCapture: aiSpeechStateRef.current.playbackId,
@@ -775,8 +956,20 @@ export default function RemoteMicClient(props: {
     });
 
     if (!response.ok) {
-      throw new Error(`Transcript relay failed: ${response.status}`);
+      console.warn("[remote-mic final transcript save failed]", {
+        transcriptId,
+        status: response.status,
+        attempts: pending.saveAttempts,
+      });
+      if (pending.saveAttempts < MAX_FINAL_SAVE_RETRY_COUNT) {
+        window.setTimeout(() => {
+          void saveFinalTranscriptWithRetry(transcriptId, input);
+        }, FINAL_SAVE_RETRY_MS);
+      }
+      return;
     }
+
+    pendingFinalByTranscriptRef.current.delete(transcriptId);
   }
 }
 
@@ -883,8 +1076,40 @@ function getHttpsUrl(value: string) {
   }
 }
 
+function buildRemoteMicRelayUrl(input: {
+  sessionId: string;
+  role?: RemoteMicRole;
+  clientType: RemoteMicWsClientType;
+}) {
+  const configuredUrl = process.env.NEXT_PUBLIC_REMOTE_MIC_WS_URL?.trim();
+  const baseUrl = configuredUrl || getDefaultRemoteMicRelayUrl(window.location);
+  const url = new URL(baseUrl);
+  url.searchParams.set("sessionId", input.sessionId);
+  url.searchParams.set("clientType", input.clientType);
+  if (input.role) {
+    url.searchParams.set("role", input.role);
+  }
+  return url.toString();
+}
+
+function getDefaultRemoteMicRelayUrl(location: Location) {
+  if (location.protocol === "https:" && location.hostname.endsWith(".ts.net")) {
+    return `wss://${location.host}/remote-mic-ws`;
+  }
+  return `ws://${location.hostname || "localhost"}:3010/remote-mic-ws`;
+}
+
+function isHttpsTsNetUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname.endsWith(".ts.net");
+  } catch {
+    return false;
+  }
+}
+
 function getInsecureContextHelp() {
-  return "スマートフォンのマイクはHTTPSでのみ利用できます。Tailscale ServeなどのHTTPS URLで開いてください。";
+  return "スマホマイクは https:// で始まる .ts.net のTailscale Serve URLで開いてください。";
 }
 
 function getBrowserLabel(userAgent: string) {

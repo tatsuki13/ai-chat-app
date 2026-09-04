@@ -91,25 +91,19 @@ type Utterance = {
   persisted?: boolean;
 };
 
-type RemoteMicPartialTranscript = {
-  type: "partial" | "final" | "clear";
+type RemoteMicWsTranscriptEvent = {
+  type: "partial" | "final" | "speech_started" | "error";
   sessionId: string;
   role: Speaker;
-  streamId: string;
-  utteranceGroupId: string;
-  sourceGroupId: string;
+  transcriptId: string;
+  revision: number;
   text: string;
-  updatedAt: string;
-  expiresAt: string;
-  utterance?: Utterance;
-  audioCapturedAt?: string | null;
-  speechStartedAt?: string | null;
-  firstPartialAt?: string | null;
-  speechEndedDetectedAt?: string | null;
-  transcribedAt?: string | null;
-  dbSavedAt?: string | null;
-  pcPublishedAt?: string | null;
+  startedAt?: string;
+  endedAt?: string;
+  receivedAt?: string;
+  finalized?: boolean;
 };
+type RemoteMicWsClientType = "producer" | "subscriber";
 
 type SlotState = {
   slot_name: string;
@@ -311,8 +305,8 @@ function SessionPageClient() {
   const requestedSessionId = searchParams.get("sessionId")?.trim() ?? "";
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [utterances, setUtterances] = useState<Utterance[]>([]);
-  const [partialTranscripts, setPartialTranscripts] = useState<
-    RemoteMicPartialTranscript[]
+  const [remoteMicTranscripts, setRemoteMicTranscripts] = useState<
+    RemoteMicWsTranscriptEvent[]
   >([]);
   const [utteranceTotal, setUtteranceTotal] = useState(0);
   const [speaker, setSpeaker] = useState<Speaker>("elder");
@@ -394,8 +388,11 @@ function SessionPageClient() {
   const backgroundPreparePromiseRef = useRef<Promise<PrepareQuestionResponse | null> | null>(null);
   const latestPrepareKeyRef = useRef("");
   const aiSpeechPlaybackRef = useRef<{ sessionId: string; playbackId: string } | null>(null);
-  const finalTimingByGroupRef = useRef(new Map<string, RemoteMicPartialTranscript>());
+  const finalTimingByGroupRef = useRef(new Map<string, RemoteMicWsTranscriptEvent>());
   const finalDisplayedLoggedGroupIdsRef = useRef(new Set<string>());
+  const remoteMicWebSocketRef = useRef<WebSocket | null>(null);
+  const remoteMicReconnectTimerRef = useRef<number | null>(null);
+  const remoteMicRevisionByTranscriptRef = useRef(new Map<string, number>());
 
   const participantCode = session?.participant_code || "未設定";
   const hasParticipantCode = Boolean(session?.participant_code?.trim());
@@ -403,17 +400,17 @@ function SessionPageClient() {
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
   const nextTopic = DISCUSSION_TOPICS[currentTopicIndex + 1] ?? null;
   const visibleUtterances = limitUtteranceState(utterances);
-  const visiblePartialTranscripts = partialTranscripts
-    .filter((partial) => new Date(partial.expiresAt).getTime() > Date.now())
-    .sort(comparePartialTranscriptsByTime);
+  const visibleRemoteMicTranscripts = remoteMicTranscripts
+    .filter((transcript) => transcript.type === "partial" && transcript.text.trim())
+    .sort(compareRemoteMicTranscriptsByTime);
   const visibleConversationEntries = createConversationEntries(
     visibleUtterances,
-    visiblePartialTranscripts,
+    visibleRemoteMicTranscripts,
   );
   const latestVisibleUtteranceId = visibleUtterances.at(-1)?.id ?? "";
   const latestPartialUpdateKey =
-    visiblePartialTranscripts
-      .map((partial) => `${partial.utteranceGroupId}:${partial.updatedAt}`)
+    visibleRemoteMicTranscripts
+      .map((transcript) => `${transcript.transcriptId}:${transcript.revision}`)
       .join("|");
   const pendingUtteranceCount = utterances.filter(isUnpersistedUtterance).length;
   const displayedUtteranceTotal = utteranceTotal + pendingUtteranceCount;
@@ -631,34 +628,52 @@ function SessionPageClient() {
 
   useEffect(() => {
     if (!session?.id || session.ended_at) {
-      setPartialTranscripts([]);
+      setRemoteMicTranscripts([]);
       return;
     }
 
-    const source = new EventSource(
-      `/api/remote-mic/realtime/transcript/stream?sessionId=${encodeURIComponent(session.id)}`,
-    );
-    source.onmessage = (event) => {
-      try {
-        applyPartialTranscriptEvent(JSON.parse(event.data));
-      } catch {}
-    };
+    let closedByEffect = false;
+    connectRemoteMicWebSocket(session.id);
 
     return () => {
-      source.close();
+      closedByEffect = true;
+      if (remoteMicReconnectTimerRef.current !== null) {
+        window.clearTimeout(remoteMicReconnectTimerRef.current);
+        remoteMicReconnectTimerRef.current = null;
+      }
+      remoteMicWebSocketRef.current?.close();
+      remoteMicWebSocketRef.current = null;
     };
-  }, [session?.id, session?.ended_at]);
 
-  useEffect(() => {
-    const timerId = window.setInterval(() => {
-      const now = Date.now();
-      setPartialTranscripts((current) =>
-        current.filter((partial) => new Date(partial.expiresAt).getTime() > now),
+    function connectRemoteMicWebSocket(sessionId: string) {
+      const socket = new WebSocket(
+        buildRemoteMicRelayUrl({ sessionId, clientType: "subscriber" }),
       );
-    }, 1000);
+      remoteMicWebSocketRef.current = socket;
 
-    return () => window.clearInterval(timerId);
-  }, []);
+      socket.onmessage = (event) => {
+        try {
+          applyRemoteMicWsTranscriptEvent(JSON.parse(String(event.data)));
+        } catch {}
+      };
+      socket.onerror = (event) => {
+        console.warn("[remote-mic ws subscriber error]", event);
+      };
+      socket.onclose = () => {
+        if (remoteMicWebSocketRef.current === socket) {
+          remoteMicWebSocketRef.current = null;
+        }
+        if (closedByEffect) return;
+        if (remoteMicReconnectTimerRef.current !== null) return;
+        remoteMicReconnectTimerRef.current = window.setTimeout(() => {
+          remoteMicReconnectTimerRef.current = null;
+          if (sessionRef.current?.id === sessionId && !sessionRef.current.ended_at) {
+            connectRemoteMicWebSocket(sessionId);
+          }
+        }, 1000);
+      };
+    }
+  }, [session?.id, session?.ended_at]);
 
   useEffect(() => {
     promptPanelRef.current = promptPanel;
@@ -1102,14 +1117,26 @@ function SessionPageClient() {
     return "保存済み";
   }
 
-  function applyPartialTranscriptEvent(event: unknown) {
-    if (!isRemoteMicPartialTranscriptEvent(event)) return;
+  function applyRemoteMicWsTranscriptEvent(event: unknown) {
+    if (!isRemoteMicWsTranscriptEvent(event)) return;
     if (event.sessionId !== sessionRef.current?.id) return;
+    const latestRevision =
+      remoteMicRevisionByTranscriptRef.current.get(event.transcriptId) ?? 0;
+    if (event.revision <= latestRevision) return;
+    remoteMicRevisionByTranscriptRef.current.set(event.transcriptId, event.revision);
 
     const displayedAt = new Date().toISOString();
-    if (event.type === "final" && event.utterance) {
-      finalTimingByGroupRef.current.set(event.sourceGroupId, event);
-      const utterance = { ...event.utterance, persisted: true };
+    const receivedEvent = { ...event, receivedAt: displayedAt };
+    if (event.type === "speech_started") {
+      return;
+    }
+    if (event.type === "error") {
+      console.warn("[remote-mic ws transcript error]", event);
+      return;
+    }
+    if (event.type === "final") {
+      finalTimingByGroupRef.current.set(event.transcriptId, receivedEvent);
+      const utterance = createRealtimeUtteranceFromWsEvent(receivedEvent);
       const alreadyDisplayed = utterancesRef.current.some(
         (currentUtterance) =>
           currentUtterance.id === utterance.id ||
@@ -1124,52 +1151,42 @@ function SessionPageClient() {
       if (!alreadyDisplayed) {
         setUtteranceTotal((count) => count + 1);
       }
-      setPartialTranscripts((current) =>
-        current.filter((partial) => partial.sourceGroupId !== event.sourceGroupId),
+      setRemoteMicTranscripts((current) =>
+        current.filter((transcript) => transcript.transcriptId !== event.transcriptId),
       );
       logRemoteMicFinalDisplayed(
         utterance,
-        event,
+        receivedEvent,
         displayedAt,
         finalDisplayedLoggedGroupIdsRef.current,
       );
       return;
     }
 
-    setPartialTranscripts((current) => {
-      if (event.type === "clear") {
-        finalTimingByGroupRef.current.set(event.sourceGroupId, event);
-        return current.filter(
-          (partial) => partial.sourceGroupId !== event.sourceGroupId,
-        );
-      }
-
+    setRemoteMicTranscripts((current) => {
       const isFirstPartial = !current.some(
-        (partial) => partial.utteranceGroupId === event.utteranceGroupId,
+        (transcript) => transcript.transcriptId === event.transcriptId,
       );
       if (isFirstPartial) {
         console.info("[remote-mic first partial displayed]", {
           sessionId: event.sessionId,
           role: event.role,
-          streamId: event.streamId,
-          utteranceGroupId: event.utteranceGroupId,
-          audioCapturedAt: event.audioCapturedAt ?? null,
-          speechStartedAt: event.speechStartedAt ?? null,
-          firstPartialAt: event.firstPartialAt ?? null,
-          pcPublishedAt: event.pcPublishedAt ?? null,
+          transcriptId: event.transcriptId,
+          revision: event.revision,
+          speechStartedAt: event.startedAt ?? null,
           pcPartialDisplayedAt: displayedAt,
           speechStartToFirstPartialDisplayMs: diffMs(
-            event.speechStartedAt,
+            event.startedAt,
             displayedAt,
           ),
         });
       }
 
       const withoutCurrent = current.filter(
-        (partial) => partial.sourceGroupId !== event.sourceGroupId,
+        (transcript) => transcript.transcriptId !== event.transcriptId,
       );
 
-      return [...withoutCurrent, event].sort(comparePartialTranscriptsByTime);
+      return [...withoutCurrent, receivedEvent].sort(compareRemoteMicTranscriptsByTime);
     });
   }
 
@@ -1197,8 +1214,8 @@ function SessionPageClient() {
       finalTimingByGroupRef.current.delete(sourceGroupId);
     }
 
-    setPartialTranscripts((current) =>
-      current.filter((partial) => !sourceGroupIds.has(partial.utteranceGroupId)),
+    setRemoteMicTranscripts((current) =>
+      current.filter((transcript) => !sourceGroupIds.has(transcript.transcriptId)),
     );
   }
 
@@ -2461,9 +2478,9 @@ function SessionPageClient() {
                 ref={logScrollRef}
                 className="mt-2 h-[640px] overflow-y-auto rounded-md border border-dashed border-stone-300 bg-white px-3 py-3 lg:h-[720px]"
               >
-                {busyAction === "start" && utterances.length === 0 && visiblePartialTranscripts.length === 0 ? (
+                {busyAction === "start" && utterances.length === 0 && visibleRemoteMicTranscripts.length === 0 ? (
                   <EmptyState text="セッションを準備しています" />
-                ) : utterances.length === 0 && visiblePartialTranscripts.length === 0 ? (
+                ) : utterances.length === 0 && visibleRemoteMicTranscripts.length === 0 ? (
                   <EmptyState text="発話を入力するとここに表示されます" />
                 ) : (
                   <div className="space-y-2">
@@ -3644,7 +3661,7 @@ type RemoteMicConversationEntry =
       kind: "partial";
       key: string;
       createdAt: string;
-      partial: RemoteMicPartialTranscript;
+      partial: RemoteMicWsTranscriptEvent;
     };
 
 function RemoteMicConversationBubble(props: {
@@ -3653,7 +3670,7 @@ function RemoteMicConversationBubble(props: {
   onDelete: (utteranceId: string) => Promise<void>;
 }) {
   if (props.entry.kind === "partial") {
-    return <PartialSpeechBubble partial={props.entry.partial} />;
+    return <RemoteMicDraftSpeechBubble partial={props.entry.partial} />;
   }
 
   return (
@@ -3665,8 +3682,8 @@ function RemoteMicConversationBubble(props: {
   );
 }
 
-function PartialSpeechBubble(props: {
-  partial: RemoteMicPartialTranscript;
+function RemoteMicDraftSpeechBubble(props: {
+  partial: RemoteMicWsTranscriptEvent;
 }) {
   const isSpeakerB = props.partial.role === "caregiver";
 
@@ -3705,7 +3722,7 @@ function PartialSpeechBubble(props: {
             isSpeakerB ? "text-sky-500" : "text-emerald-600"
           }`}
         >
-          {formatDateTime(props.partial.updatedAt)}
+          {formatDateTime(props.partial.receivedAt ?? props.partial.startedAt)}
         </time>
       </article>
     </div>
@@ -4380,16 +4397,19 @@ function markPersistedUtterances(utterances: Utterance[]) {
   return utterances.map((utterance) => ({ ...utterance, persisted: true }));
 }
 
-function comparePartialTranscriptsByTime(
-  left: RemoteMicPartialTranscript,
-  right: RemoteMicPartialTranscript,
+function compareRemoteMicTranscriptsByTime(
+  left: RemoteMicWsTranscriptEvent,
+  right: RemoteMicWsTranscriptEvent,
 ) {
-  return new Date(left.updatedAt).getTime() - new Date(right.updatedAt).getTime();
+  return (
+    new Date(left.startedAt ?? left.receivedAt ?? "").getTime() -
+    new Date(right.startedAt ?? right.receivedAt ?? "").getTime()
+  );
 }
 
 function createConversationEntries(
   utterances: Utterance[],
-  partials: RemoteMicPartialTranscript[],
+  partials: RemoteMicWsTranscriptEvent[],
 ): RemoteMicConversationEntry[] {
   const finalSourceGroupIds = new Set(
     utterances
@@ -4404,11 +4424,11 @@ function createConversationEntries(
       utterance,
     })),
     ...partials
-      .filter((partial) => !finalSourceGroupIds.has(partial.sourceGroupId))
+      .filter((partial) => !finalSourceGroupIds.has(partial.transcriptId))
       .map((partial) => ({
         kind: "partial" as const,
-        key: partial.sourceGroupId || partial.utteranceGroupId,
-        createdAt: partial.speechStartedAt ?? partial.updatedAt,
+        key: partial.transcriptId,
+        createdAt: partial.startedAt ?? partial.receivedAt ?? new Date().toISOString(),
         partial,
       })),
   ];
@@ -4419,32 +4439,75 @@ function createConversationEntries(
   );
 }
 
-function isRemoteMicPartialTranscriptEvent(
+function isRemoteMicWsTranscriptEvent(
   value: unknown,
-): value is RemoteMicPartialTranscript {
+): value is RemoteMicWsTranscriptEvent {
   if (!value || typeof value !== "object") return false;
 
-  const event = value as Partial<RemoteMicPartialTranscript>;
+  const event = value as Partial<RemoteMicWsTranscriptEvent>;
   return (
-    (event.type === "partial" || event.type === "final" || event.type === "clear") &&
+    (event.type === "partial" ||
+      event.type === "final" ||
+      event.type === "speech_started" ||
+      event.type === "error") &&
     typeof event.sessionId === "string" &&
     (event.role === "elder" || event.role === "caregiver") &&
-    typeof event.streamId === "string" &&
-    typeof event.utteranceGroupId === "string" &&
-    typeof event.sourceGroupId === "string" &&
+    typeof event.transcriptId === "string" &&
+    typeof event.revision === "number" &&
     typeof event.text === "string" &&
-    typeof event.updatedAt === "string" &&
-    typeof event.expiresAt === "string"
+    (event.startedAt === undefined || typeof event.startedAt === "string") &&
+    (event.endedAt === undefined || typeof event.endedAt === "string")
   );
+}
+
+function buildRemoteMicRelayUrl(input: {
+  sessionId: string;
+  role?: Speaker;
+  clientType: RemoteMicWsClientType;
+}) {
+  const configuredUrl = process.env.NEXT_PUBLIC_REMOTE_MIC_WS_URL?.trim();
+  const baseUrl = configuredUrl || getDefaultRemoteMicRelayUrl(window.location);
+  const url = new URL(baseUrl);
+  url.searchParams.set("sessionId", input.sessionId);
+  url.searchParams.set("clientType", input.clientType);
+  if (input.role) {
+    url.searchParams.set("role", input.role);
+  }
+  return url.toString();
+}
+
+function getDefaultRemoteMicRelayUrl(location: Location) {
+  if (location.protocol === "https:" && location.hostname.endsWith(".ts.net")) {
+    return `wss://${location.host}/remote-mic-ws`;
+  }
+  return `ws://${location.hostname || "localhost"}:3010/remote-mic-ws`;
+}
+
+function createRealtimeUtteranceFromWsEvent(
+  event: RemoteMicWsTranscriptEvent,
+): Utterance {
+  const timestamp = event.endedAt ?? event.receivedAt ?? new Date().toISOString();
+  return {
+    id: `remote-realtime:${event.transcriptId}`,
+    session_id: event.sessionId,
+    speaker: event.role,
+    text: event.text,
+    source: `remote_realtime:${event.transcriptId}`,
+    source_group_id: event.transcriptId,
+    asr_provider: "openai-realtime",
+    created_at: timestamp,
+    updated_at: timestamp,
+    persisted: true,
+  };
 }
 
 function logRemoteMicFinalDisplayed(
   utterance: Utterance,
-  timing: RemoteMicPartialTranscript | undefined,
+  timing: RemoteMicWsTranscriptEvent | undefined,
   pcFinalDisplayedAt: string,
   loggedSourceGroupIds: Set<string>,
 ) {
-  const sourceGroupId = utterance.source_group_id?.trim() || timing?.sourceGroupId;
+  const sourceGroupId = utterance.source_group_id?.trim() || timing?.transcriptId;
   if (!sourceGroupId) return;
   if (loggedSourceGroupIds.has(sourceGroupId)) return;
 
@@ -4454,22 +4517,22 @@ function logRemoteMicFinalDisplayed(
     role: utterance.speaker,
     utteranceId: utterance.id,
     utteranceGroupId: sourceGroupId,
-    speechStartedAt: timing?.speechStartedAt ?? null,
-    firstPartialAt: timing?.firstPartialAt ?? null,
-    speechEndedDetectedAt: timing?.speechEndedDetectedAt ?? null,
-    transcribedAt: timing?.transcribedAt ?? null,
-    dbSavedAt: timing?.dbSavedAt ?? utterance.updated_at ?? utterance.created_at,
+    speechStartedAt: timing?.startedAt ?? null,
+    firstPartialAt: null,
+    speechEndedDetectedAt: timing?.endedAt ?? null,
+    transcribedAt: timing?.endedAt ?? null,
+    dbSavedAt: utterance.updated_at ?? utterance.created_at,
     pcFinalDisplayedAt,
     speechEndToWhisperFinalMs: diffMs(
-      timing?.speechEndedDetectedAt,
-      timing?.transcribedAt,
+      timing?.endedAt,
+      timing?.endedAt,
     ),
     dbSaveToPcFinalDisplayMs: diffMs(
-      timing?.dbSavedAt ?? utterance.updated_at ?? utterance.created_at,
+      utterance.updated_at ?? utterance.created_at,
       pcFinalDisplayedAt,
     ),
     speechEndToPcFinalDisplayMs: diffMs(
-      timing?.speechEndedDetectedAt,
+      timing?.endedAt,
       pcFinalDisplayedAt,
     ),
   });
@@ -4495,12 +4558,21 @@ function isUnpersistedUtteranceId(utteranceId: string) {
 
 function mergeUtterances(current: Utterance[], incoming: Utterance[]) {
   const byId = new Map<string, Utterance>();
+  const sourceGroupToId = new Map<string, string>();
 
   for (const utterance of current) {
     byId.set(utterance.id, utterance);
+    const sourceGroupId = utterance.source_group_id?.trim();
+    if (sourceGroupId) sourceGroupToId.set(sourceGroupId, utterance.id);
   }
   for (const utterance of incoming) {
+    const sourceGroupId = utterance.source_group_id?.trim();
+    const existingId = sourceGroupId ? sourceGroupToId.get(sourceGroupId) : null;
+    if (existingId) {
+      byId.delete(existingId);
+    }
     byId.set(utterance.id, utterance);
+    if (sourceGroupId) sourceGroupToId.set(sourceGroupId, utterance.id);
   }
 
   return Array.from(byId.values()).sort(compareUtterancesByTime);
