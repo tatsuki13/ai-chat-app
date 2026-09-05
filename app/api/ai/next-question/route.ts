@@ -174,6 +174,50 @@ async function displayPreparedQuestion(input: {
   }
 
   const displayedAt = new Date();
+  const [latestUtterance, activeState] = await Promise.all([
+    prisma.sessionUtterance.findFirst({
+      where: { sessionId: input.sessionId },
+      orderBy: { createdAt: "desc" },
+      select: { id: true },
+    }),
+    prisma.aIProcessingState.findUnique({
+      where: { sessionId: input.sessionId },
+      select: { slotRevision: true },
+    }),
+  ]);
+  const currentConversationRevision = latestUtterance?.id ?? null;
+  if (
+    prepared.basedOnUtteranceId !== currentConversationRevision ||
+    (activeState && prepared.slotRevision !== activeState.slotRevision)
+  ) {
+    await prisma.preparedQuestion.updateMany({
+      where: {
+        id: prepared.id,
+        sessionId: input.sessionId,
+        status: "prepared",
+      },
+      data: {
+        status: "invalidated",
+        invalidatedAt: displayedAt,
+        invalidationReason: "conversation_revision_changed",
+      },
+    });
+    console.info("[ai prepared question display rejected]", {
+      sessionId: input.sessionId,
+      preparedQuestionId: prepared.id,
+      preparedQuestionInvalidationReason: "conversation_revision_changed",
+      conversationRevision: currentConversationRevision,
+      basedOnUtteranceId: prepared.basedOnUtteranceId,
+      slotRevision: prepared.slotRevision,
+      activeSlotRevision: activeState?.slotRevision ?? null,
+    });
+
+    return NextResponse.json(
+      { error: "Prepared question is stale" },
+      { status: 409 },
+    );
+  }
+
   const updated = await prisma.preparedQuestion.updateMany({
     where: {
       id: prepared.id,

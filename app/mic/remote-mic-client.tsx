@@ -1,20 +1,45 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type {
+  RemoteMicControlEvent,
+  RemoteMicRealtimeEvent,
+} from "../../lib/remote-mic/control-events";
 
 type RemoteMicRole = "elder" | "caregiver";
 type MicState = "idle" | "requesting" | "streaming";
+type MicPhase =
+  | "disconnected"
+  | "connecting"
+  | "listening"
+  | "suppressing"
+  | "suppressed"
+  | "resuming"
+  | "reconnecting"
+  | "error"
+  | "stopped";
+type ReconnectReason =
+  | "peer_failed"
+  | "peer_closed"
+  | "peer_disconnected_timeout"
+  | "data_channel_closed"
+  | "data_channel_error"
+  | "track_ended"
+  | "ai_speech_restore_failed";
 type RemoteMicSession = {
   sessionId: string;
   role: RemoteMicRole;
   participantCode: string | null;
   dialogueStartedAt: string | null;
 };
-type AiSpeechEvent = {
-  type?: string;
+type AiSpeechEvent = RemoteMicControlEvent | {
+  type?: "ai_speech_snapshot";
   sessionId?: string;
   playbackId?: string | null;
+  activePlaybackId?: string | null;
   revision?: number;
+  active?: boolean;
+  sessionEnded?: boolean;
   releaseAfter?: string | null;
 };
 type RealtimeEvent = {
@@ -25,26 +50,31 @@ type RealtimeEvent = {
   delta?: string;
   transcript?: string;
 };
-type RemoteMicWsTranscriptEvent = {
-  type: "partial" | "final" | "speech_started" | "error";
-  sessionId: string;
-  role: RemoteMicRole;
+type PendingFinalTranscript = {
+  streamId: string;
   transcriptId: string;
-  revision: number;
+  captureEpoch: number;
   text: string;
   startedAt?: string;
   endedAt?: string;
+  finalizedAt?: string;
+  firstPartialAt?: string;
+  blockedAtCapture: boolean;
+  aiPlaybackIdAtCapture?: string | null;
+  saveAttempts: number;
 };
-type RemoteMicWsClientType = "producer" | "subscriber";
 
 const CLIENT_VERSION = "remote-mic-client-2026-09-04-openai-realtime";
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const HEARTBEAT_MS = 15_000;
 const AI_SPEECH_RELEASE_DELAY_MS = 500;
 const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45_000;
-const REMOTE_MIC_WS_RECONNECT_MS = 1000;
+const PARTIAL_BROADCAST_INTERVAL_MS = 75;
 const FINAL_SAVE_RETRY_MS = 2000;
+const FINAL_SAVE_TIMEOUT_MS = 5_000;
 const MAX_FINAL_SAVE_RETRY_COUNT = 5;
+const PEER_DISCONNECTED_GRACE_MS = 3_000;
+const RECONNECT_BACKOFF_MS = [500, 1000, 2000, 4000, 8000] as const;
 
 export default function RemoteMicClient(props: {
   initialRole?: RemoteMicRole | null;
@@ -58,6 +88,7 @@ export default function RemoteMicClient(props: {
   const [permissionLabel, setPermissionLabel] = useState("未確認");
   const [serverLabel, setServerLabel] = useState("確認中");
   const [connectionLabel, setConnectionLabel] = useState("未接続");
+  const [micPhase, setMicPhase] = useState<MicPhase>("disconnected");
   const [aiSpeechLabel, setAiSpeechLabel] = useState("通常受付");
   const [openUrlLabel, setOpenUrlLabel] = useState("確認中");
   const [browserLabel, setBrowserLabel] = useState("確認中");
@@ -76,29 +107,41 @@ export default function RemoteMicClient(props: {
   const fixedRoleRef = useRef<RemoteMicRole | null>(null);
   const micStateRef = useRef<MicState>("idle");
   const streamIdRef = useRef("");
+  const captureEpochRef = useRef(0);
   const realtimeModelRef = useRef("");
-  const relayWebSocketRef = useRef<WebSocket | null>(null);
-  const relayReconnectTimerRef = useRef<number | null>(null);
-  const relayConnectedSessionRef = useRef<RemoteMicSession | null>(null);
   const partialTextByTranscriptRef = useRef<Map<string, string>>(new Map());
   const speechStartedAtByTranscriptRef = useRef<Map<string, number>>(new Map());
   const firstDeltaAtByTranscriptRef = useRef<Map<string, number>>(new Map());
+  const lastTranscriptActivityAtByTranscriptRef = useRef<Map<string, number>>(
+    new Map(),
+  );
+  const streamIdByTranscriptRef = useRef<Map<string, string>>(new Map());
+  const captureEpochByTranscriptRef = useRef<Map<string, number>>(new Map());
+  const blockedAtCaptureByTranscriptRef = useRef<Map<string, boolean>>(new Map());
+  const aiPlaybackIdAtCaptureByTranscriptRef = useRef<
+    Map<string, string | null>
+  >(new Map());
   const revisionByTranscriptRef = useRef<Map<string, number>>(new Map());
-  const latestPartialByTranscriptRef = useRef<
-    Map<string, RemoteMicWsTranscriptEvent>
+  const lastBroadcastByTranscriptRef = useRef<
+    Map<string, { revision: number; text: string }>
   >(new Map());
-  const pendingFinalByTranscriptRef = useRef<
-    Map<
-      string,
-      RemoteMicWsTranscriptEvent & {
-        firstPartialAt?: string;
-        saveAttempts: number;
-      }
-    >
-  >(new Map());
+  const partialBroadcastTimersRef = useRef<Map<string, number>>(new Map());
+  const pendingFinalByTranscriptRef = useRef<Map<string, PendingFinalTranscript>>(
+    new Map(),
+  );
   const aiSpeechReleaseTimerRef = useRef<number | null>(null);
   const aiSpeechSafetyTimerRef = useRef<number | null>(null);
   const resumeAfterAiSpeechRef = useRef(false);
+  const captureBlockedRef = useRef(false);
+  const manuallyStoppedRef = useRef(false);
+  const fullyStoppedRef = useRef(false);
+  const sessionEndedRef = useRef(false);
+  const reconnectInFlightRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const peerDisconnectedTimerRef = useRef<number | null>(null);
+  const connectionGenerationRef = useRef(0);
+  const micPhaseRef = useRef<MicPhase>("disconnected");
   const aiSpeechStateRef = useRef({
     active: false,
     playbackId: null as string | null,
@@ -124,6 +167,10 @@ export default function RemoteMicClient(props: {
   useEffect(() => {
     micStateRef.current = micState;
   }, [micState]);
+
+  useEffect(() => {
+    micPhaseRef.current = micPhase;
+  }, [micPhase]);
 
   useEffect(() => {
     const nextSecureContext = window.isSecureContext;
@@ -182,6 +229,7 @@ export default function RemoteMicClient(props: {
     };
     source.onerror = () => {
       setAiSpeechLabel("AI音声状態を再接続中");
+      setServerLabel("制御通信再接続中");
     };
 
     return () => {
@@ -203,6 +251,8 @@ export default function RemoteMicClient(props: {
             data.active.participantCode !== remoteMic.participantCode ||
             data.active.endedAt
           ) {
+            sessionEndedRef.current = true;
+            fullyStoppedRef.current = true;
             void stop(false);
             setRemoteMic(null);
             setServerLabel("PC待機中");
@@ -233,16 +283,29 @@ export default function RemoteMicClient(props: {
       return;
     }
 
-    const revision = typeof event.revision === "number" ? event.revision : 0;
+    const revision =
+      "revision" in event && typeof event.revision === "number"
+        ? event.revision
+        : 0;
     if (revision < aiSpeechStateRef.current.revision) return;
 
-    if (event.type === "ai_speech_start" && event.playbackId) {
+    if (event.type === "ai_speech_snapshot") {
+      applyAiSpeechSnapshot(event, revision);
+      return;
+    }
+
+    if (event.type === "transcript.flush_request") {
+      void flushPendingFinalTranscriptsForRequest(event.requestId);
+      return;
+    }
+
+    if (event.type === "speech.prepare" && event.playbackId) {
       pauseCaptureForAiSpeech(event.playbackId, revision);
       return;
     }
 
     if (
-      (event.type === "ai_speech_end" || event.type === "ai_speech_cancel") &&
+      (event.type === "speech.ended" || event.type === "speech.cancelled") &&
       event.playbackId === aiSpeechStateRef.current.playbackId
     ) {
       const releaseUntil = event.releaseAfter
@@ -252,18 +315,80 @@ export default function RemoteMicClient(props: {
     }
   }
 
+  function applyAiSpeechSnapshot(
+    event: Extract<AiSpeechEvent, { type?: "ai_speech_snapshot" }>,
+    revision: number,
+  ) {
+    sessionEndedRef.current = Boolean(event.sessionEnded);
+    if (event.sessionEnded) {
+      fullyStoppedRef.current = true;
+      void stop(false);
+      return;
+    }
+
+    const releaseUntil = event.releaseAfter
+      ? new Date(event.releaseAfter).getTime()
+      : 0;
+    const shouldSuppress =
+      event.active === true ||
+      (Number.isFinite(releaseUntil) && Date.now() <= releaseUntil);
+
+    aiSpeechStateRef.current = {
+      active: Boolean(event.active),
+      playbackId: event.playbackId ?? event.activePlaybackId ?? null,
+      revision,
+      releaseUntil: releaseUntil || 0,
+    };
+
+    if (shouldSuppress) {
+      captureBlockedRef.current = true;
+      muteLocalAudioTracks();
+      setMicPhaseValue("suppressed");
+      setAiSpeechLabel("AI音声中のため一時ミュート");
+    }
+  }
+
+  function setMicPhaseValue(nextPhase: MicPhase) {
+    micPhaseRef.current = nextPhase;
+    setMicPhase(nextPhase);
+  }
+
+  function clearReconnectTimers() {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (peerDisconnectedTimerRef.current !== null) {
+      window.clearTimeout(peerDisconnectedTimerRef.current);
+      peerDisconnectedTimerRef.current = null;
+    }
+  }
+
   function pauseCaptureForAiSpeech(playbackId: string, revision: number) {
+    if (
+      aiSpeechStateRef.current.active &&
+      aiSpeechStateRef.current.playbackId &&
+      aiSpeechStateRef.current.playbackId !== playbackId &&
+      revision <= aiSpeechStateRef.current.revision
+    ) {
+      return;
+    }
+
     resumeAfterAiSpeechRef.current = recordingActiveRef.current || startInFlightRef.current;
+    captureEpochRef.current += 1;
+    captureBlockedRef.current = true;
+    setMicPhaseValue("suppressing");
     aiSpeechStateRef.current = {
       active: true,
       playbackId,
       revision,
       releaseUntil: 0,
     };
-    setAiSpeechLabel("AI音声中のため一時停止");
-    clearTranscriptState();
-    void stopRealtimeConnection();
+    setAiSpeechLabel("AI音声中のため一時ミュート");
+    muteLocalAudioTracks();
+    void publishMicControlAck("mic.suppressed", playbackId, revision, areAudioTracksSuppressed());
     void setFixedMicMuted(true).catch(() => undefined);
+    setMicPhaseValue("suppressed");
 
     if (aiSpeechSafetyTimerRef.current !== null) {
       window.clearTimeout(aiSpeechSafetyTimerRef.current);
@@ -277,6 +402,10 @@ export default function RemoteMicClient(props: {
     if (aiSpeechReleaseTimerRef.current !== null) {
       window.clearTimeout(aiSpeechReleaseTimerRef.current);
     }
+    if (aiSpeechSafetyTimerRef.current !== null) {
+      window.clearTimeout(aiSpeechSafetyTimerRef.current);
+      aiSpeechSafetyTimerRef.current = null;
+    }
 
     const delayMs = Math.max(0, releaseUntil - Date.now());
     aiSpeechStateRef.current = {
@@ -287,6 +416,7 @@ export default function RemoteMicClient(props: {
     };
     aiSpeechReleaseTimerRef.current = window.setTimeout(() => {
       aiSpeechReleaseTimerRef.current = null;
+      const playbackId = aiSpeechStateRef.current.playbackId;
       aiSpeechStateRef.current = {
         active: false,
         playbackId: null,
@@ -294,32 +424,366 @@ export default function RemoteMicClient(props: {
         releaseUntil: 0,
       };
       setAiSpeechLabel("通常受付");
+      setMicPhaseValue("resuming");
 
-      if (resumeAfterAiSpeechRef.current) {
-        resumeAfterAiSpeechRef.current = false;
-        void start(remoteMicRef.current);
+      const shouldResume =
+        resumeAfterAiSpeechRef.current &&
+        !manuallyStoppedRef.current &&
+        Boolean(remoteMicRef.current);
+      resumeAfterAiSpeechRef.current = false;
+
+      if (!shouldResume) {
+        captureBlockedRef.current = false;
+        setMicPhaseValue(fullyStoppedRef.current ? "stopped" : "disconnected");
+        return;
       }
+
+      if (restoreLocalAudioCapture()) {
+        captureEpochRef.current += 1;
+        captureBlockedRef.current = false;
+        setMicPhaseValue("listening");
+        setServerLabel("文字起こし中");
+        if (playbackId) {
+          void publishMicControlAck("mic.resumed", playbackId, revision, true);
+        }
+        void setFixedMicMuted(false).catch(() => undefined);
+        return;
+      }
+
+      captureBlockedRef.current = false;
+      if (playbackId) {
+        void publishMicControlAck("mic.resumed", playbackId, revision, false);
+      }
+      void reconnectRealtime("ai_speech_restore_failed");
     }, delayMs);
   }
 
   function isAiSpeechBlockingCapture() {
     const state = aiSpeechStateRef.current;
-    return state.active || Date.now() <= state.releaseUntil;
+    return captureBlockedRef.current || state.active || Date.now() <= state.releaseUntil;
+  }
+
+  function muteLocalAudioTracks() {
+    for (const track of streamRef.current?.getAudioTracks() ?? []) {
+      track.enabled = false;
+    }
+  }
+
+  function areAudioTracksSuppressed() {
+    const audioTracks = streamRef.current?.getAudioTracks() ?? [];
+
+    return (
+      audioTracks.length > 0 &&
+      audioTracks.every(
+        (track) => track.readyState === "live" && track.enabled === false,
+      )
+    );
+  }
+
+  function restoreLocalAudioCapture() {
+    const stream = streamRef.current;
+    const audioTracks = stream?.getAudioTracks() ?? [];
+    const peerConnection = peerConnectionRef.current;
+    const dataChannel = dataChannelRef.current;
+
+    if (!stream || audioTracks.length === 0) return false;
+    if (audioTracks.some((track) => track.readyState !== "live")) return false;
+    if (
+      !peerConnection ||
+      peerConnection.connectionState === "failed" ||
+      peerConnection.connectionState === "closed"
+    ) {
+      return false;
+    }
+    if (!dataChannel || dataChannel.readyState === "closed") return false;
+
+    for (const track of audioTracks) {
+      track.enabled = true;
+    }
+
+    return true;
+  }
+
+  async function reconnectRealtime(reason: ReconnectReason) {
+    if (!shouldAttemptReconnect()) return;
+    if (reconnectInFlightRef.current) return;
+
+    const targetRemoteMic = remoteMicRef.current;
+    if (!targetRemoteMic) return;
+
+    reconnectInFlightRef.current = true;
+    const attempt = reconnectAttemptRef.current + 1;
+    reconnectAttemptRef.current = attempt;
+    const previousStreamId = streamIdRef.current;
+
+    if (attempt > RECONNECT_BACKOFF_MS.length) {
+      reconnectInFlightRef.current = false;
+      setMicPhaseValue("error");
+      setConnectionLabel("手動確認が必要です");
+      setError("Realtime接続を復旧できませんでした。スマートフォンの通信状態を確認してください。");
+      void publishRemoteMicRealtimeEvent({
+        type: "mic.reconnect_failed",
+        sessionId: targetRemoteMic.sessionId,
+        role: targetRemoteMic.role,
+        attempts: attempt - 1,
+        reason,
+      }).catch(() => undefined);
+      return;
+    }
+
+    setMicPhaseValue("reconnecting");
+    setConnectionLabel(`再接続中 (${attempt}/5)`);
+    void publishRemoteMicRealtimeEvent({
+      type: "mic.reconnecting",
+      sessionId: targetRemoteMic.sessionId,
+      role: targetRemoteMic.role,
+      previousStreamId,
+      attempt,
+      reason,
+    }).catch(() => undefined);
+    discardLiveTranscripts("connection_lost");
+    clearTranscriptState();
+
+    const delayMs = getReconnectDelayMs(attempt);
+    reconnectTimerRef.current = window.setTimeout(() => {
+      reconnectTimerRef.current = null;
+      void runReconnect(targetRemoteMic, reason);
+    }, delayMs);
+  }
+
+  async function runReconnect(targetRemoteMic: RemoteMicSession, reason: ReconnectReason) {
+    try {
+      connectionGenerationRef.current += 1;
+      closeRealtimeTransport(false);
+      await openRealtimeConnection(targetRemoteMic, {
+        reconnecting: true,
+        reuseLiveStream: true,
+      });
+      const phase = await applyLatestAiSpeechSnapshotAfterReconnect();
+      recordingActiveRef.current = true;
+      reconnectAttemptRef.current = 0;
+      setMicState("streaming");
+      setConnectionLabel("接続済み");
+      setServerLabel(phase === "suppressed" ? "AI音声中のため一時ミュート" : "文字起こし中");
+      void publishRemoteMicRealtimeEvent({
+        type: "mic.reconnected",
+        sessionId: targetRemoteMic.sessionId,
+        role: targetRemoteMic.role,
+        streamId: streamIdRef.current,
+        micPhase: phase,
+      }).catch(() => undefined);
+    } catch (error) {
+      console.warn("[remote-mic reconnect failed]", {
+        sessionId: targetRemoteMic.sessionId,
+        role: targetRemoteMic.role,
+        reason,
+        attempt: reconnectAttemptRef.current,
+        error,
+      });
+      reconnectInFlightRef.current = false;
+      if (isPermissionError(error)) {
+        setPermissionLabel("拒否");
+        setMicPhaseValue("error");
+        setConnectionLabel("権限確認が必要です");
+        setError(error instanceof Error ? error.message : "マイク権限を確認してください。");
+        void publishRemoteMicRealtimeEvent({
+          type: "mic.reconnect_failed",
+          sessionId: targetRemoteMic.sessionId,
+          role: targetRemoteMic.role,
+          attempts: reconnectAttemptRef.current,
+          reason,
+        }).catch(() => undefined);
+        return;
+      }
+      void reconnectRealtime(reason);
+      return;
+    }
+
+    reconnectInFlightRef.current = false;
+  }
+
+  function handlePeerConnectionStateChange(state: RTCPeerConnectionState) {
+    if (state === "connected") {
+      if (peerDisconnectedTimerRef.current !== null) {
+        window.clearTimeout(peerDisconnectedTimerRef.current);
+        peerDisconnectedTimerRef.current = null;
+      }
+      setConnectionLabel("接続済み");
+      return;
+    }
+
+    if (state === "failed") {
+      void reconnectRealtime("peer_failed");
+      return;
+    }
+
+    if (state === "closed") {
+      if (!fullyStoppedRef.current && !sessionEndedRef.current) {
+        void reconnectRealtime("peer_closed");
+      }
+      return;
+    }
+
+    if (state === "disconnected") {
+      setConnectionLabel("通信確認中");
+      if (peerDisconnectedTimerRef.current !== null) return;
+      peerDisconnectedTimerRef.current = window.setTimeout(() => {
+        peerDisconnectedTimerRef.current = null;
+        const peerConnection = peerConnectionRef.current;
+        if (
+          peerConnection?.connectionState === "disconnected" ||
+          peerConnection?.connectionState === "failed"
+        ) {
+          void reconnectRealtime("peer_disconnected_timeout");
+        }
+      }, PEER_DISCONNECTED_GRACE_MS);
+    }
+  }
+
+  function shouldAttemptReconnect() {
+    return Boolean(
+      remoteMicRef.current &&
+        !fullyStoppedRef.current &&
+        !manuallyStoppedRef.current &&
+        !sessionEndedRef.current &&
+        (recordingActiveRef.current || micPhaseRef.current === "reconnecting"),
+    );
+  }
+
+  function isCurrentConnection(generation: number, streamId: string) {
+    return (
+      connectionGenerationRef.current === generation &&
+      streamIdRef.current === streamId &&
+      !fullyStoppedRef.current
+    );
+  }
+
+  function getReconnectDelayMs(attempt: number) {
+    const baseDelay = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
+    return Math.round(baseDelay * (0.8 + Math.random() * 0.4));
+  }
+
+  async function applyLatestAiSpeechSnapshotAfterReconnect(): Promise<"listening" | "suppressed"> {
+    const current = remoteMicRef.current;
+    if (!current) {
+      captureBlockedRef.current = true;
+      setMicPhaseValue("suppressed");
+      muteLocalAudioTracks();
+      return "suppressed";
+    }
+
+    try {
+      const response = await fetch(
+        `/api/ai/speech-state?sessionId=${encodeURIComponent(current.sessionId)}`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) throw new Error(`speech state failed: ${response.status}`);
+      const data = (await response.json()) as {
+        state?: {
+          active?: boolean;
+          playbackId?: string | null;
+          revision?: number | null;
+          releaseAfter?: string | null;
+        } | null;
+      };
+      const state = data.state ?? null;
+      const releaseAfterMs = state?.releaseAfter
+        ? new Date(state.releaseAfter).getTime()
+        : 0;
+      const shouldSuppress =
+        state?.active === true ||
+        (Number.isFinite(releaseAfterMs) && Date.now() <= releaseAfterMs);
+
+      if (state?.playbackId) {
+        aiSpeechStateRef.current = {
+          active: Boolean(state.active),
+          playbackId: state.playbackId,
+          revision: state.revision ?? aiSpeechStateRef.current.revision,
+          releaseUntil: releaseAfterMs || 0,
+        };
+      }
+
+      if (shouldSuppress) {
+        captureBlockedRef.current = true;
+        muteLocalAudioTracks();
+        setMicPhaseValue("suppressed");
+        return "suppressed";
+      }
+
+      captureBlockedRef.current = false;
+      restoreAudioTracksWithoutConnectionCheck();
+      setMicPhaseValue("listening");
+      return "listening";
+    } catch (error) {
+      console.warn("[remote-mic speech state snapshot failed]", error);
+      captureBlockedRef.current = true;
+      muteLocalAudioTracks();
+      setMicPhaseValue("suppressed");
+      return "suppressed";
+    }
+  }
+
+  function restoreAudioTracksWithoutConnectionCheck() {
+    for (const track of streamRef.current?.getAudioTracks() ?? []) {
+      if (track.readyState === "live") {
+        track.enabled = true;
+      }
+    }
+  }
+
+  function closeRealtimeTransport(stopTracks: boolean) {
+    if (peerDisconnectedTimerRef.current !== null) {
+      window.clearTimeout(peerDisconnectedTimerRef.current);
+      peerDisconnectedTimerRef.current = null;
+    }
+
+    dataChannelRef.current?.close();
+    dataChannelRef.current = null;
+    peerConnectionRef.current?.close();
+    peerConnectionRef.current = null;
+
+    if (!stopTracks) return;
+
+    levelStopRef.current?.();
+    levelStopRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => {
+      track.onended = null;
+      track.enabled = false;
+      track.stop();
+    });
+    streamRef.current = null;
   }
 
   function clearTranscriptState(transcriptId?: string) {
     if (transcriptId) {
+      clearPartialBroadcastTimer(transcriptId);
       partialTextByTranscriptRef.current.delete(transcriptId);
       speechStartedAtByTranscriptRef.current.delete(transcriptId);
       firstDeltaAtByTranscriptRef.current.delete(transcriptId);
+      lastTranscriptActivityAtByTranscriptRef.current.delete(transcriptId);
+      streamIdByTranscriptRef.current.delete(transcriptId);
+      captureEpochByTranscriptRef.current.delete(transcriptId);
+      blockedAtCaptureByTranscriptRef.current.delete(transcriptId);
+      aiPlaybackIdAtCaptureByTranscriptRef.current.delete(transcriptId);
+      revisionByTranscriptRef.current.delete(transcriptId);
+      lastBroadcastByTranscriptRef.current.delete(transcriptId);
       return;
     }
 
+    for (const timerId of partialBroadcastTimersRef.current.values()) {
+      window.clearTimeout(timerId);
+    }
+    partialBroadcastTimersRef.current.clear();
     partialTextByTranscriptRef.current.clear();
     speechStartedAtByTranscriptRef.current.clear();
     firstDeltaAtByTranscriptRef.current.clear();
+    lastTranscriptActivityAtByTranscriptRef.current.clear();
+    streamIdByTranscriptRef.current.clear();
+    captureEpochByTranscriptRef.current.clear();
+    blockedAtCaptureByTranscriptRef.current.clear();
+    aiPlaybackIdAtCaptureByTranscriptRef.current.clear();
     revisionByTranscriptRef.current.clear();
-    latestPartialByTranscriptRef.current.clear();
+    lastBroadcastByTranscriptRef.current.clear();
   }
 
   async function loadActiveSession(
@@ -370,6 +834,123 @@ export default function RemoteMicClient(props: {
     }
   }
 
+  async function openRealtimeConnection(
+    targetRemoteMic: RemoteMicSession,
+    options: { reconnecting: boolean; reuseLiveStream: boolean },
+  ) {
+    const realtimeSession = await createRealtimeSession(targetRemoteMic);
+    realtimeModelRef.current = realtimeSession.model;
+    const stream = await getOrCreateMediaStream(options.reuseLiveStream);
+    const connectionStreamId = `${targetRemoteMic.role}:${Date.now()}:${crypto.randomUUID()}`;
+    const connectionGeneration = connectionGenerationRef.current + 1;
+    connectionGenerationRef.current = connectionGeneration;
+    streamIdRef.current = connectionStreamId;
+    captureEpochRef.current += 1;
+    const connectionCaptureEpoch = captureEpochRef.current;
+
+    if (!levelStopRef.current) {
+      try {
+        levelStopRef.current = startLevelMeter(stream, (nextLevel) => {
+          setLevel(nextLevel);
+        });
+      } catch {
+        levelStopRef.current = null;
+        setLevel(0);
+      }
+    }
+
+    const peerConnection = new RTCPeerConnection();
+    peerConnectionRef.current = peerConnection;
+    const dataChannel = peerConnection.createDataChannel("oai-events");
+    dataChannelRef.current = dataChannel;
+    dataChannel.onopen = () => {
+      if (!isCurrentConnection(connectionGeneration, connectionStreamId)) return;
+      setConnectionLabel("接続済み");
+      setServerLabel(captureBlockedRef.current ? "AI音声中のため一時ミュート" : "文字起こし中");
+    };
+    dataChannel.onmessage = (event) => {
+      handleRealtimeEvent({
+        session: targetRemoteMic,
+        streamId: connectionStreamId,
+        captureEpoch: connectionCaptureEpoch,
+        generation: connectionGeneration,
+        data: event.data,
+      });
+    };
+    dataChannel.onerror = (event) => {
+      if (!isCurrentConnection(connectionGeneration, connectionStreamId)) return;
+      console.warn("[remote-mic realtime data channel error]", event);
+      setConnectionLabel("データ接続エラー");
+      void reconnectRealtime("data_channel_error");
+    };
+    dataChannel.onclose = () => {
+      if (!isCurrentConnection(connectionGeneration, connectionStreamId)) return;
+      if (!fullyStoppedRef.current && !sessionEndedRef.current) {
+        void reconnectRealtime("data_channel_closed");
+      }
+    };
+    peerConnection.onconnectionstatechange = () => {
+      if (!isCurrentConnection(connectionGeneration, connectionStreamId)) return;
+      handlePeerConnectionStateChange(peerConnection.connectionState);
+    };
+
+    for (const track of stream.getAudioTracks()) {
+      track.enabled = options.reconnecting ? false : !captureBlockedRef.current;
+      track.onended = () => {
+        if (!isCurrentConnection(connectionGeneration, connectionStreamId)) return;
+        void reconnectRealtime("track_ended");
+      };
+      peerConnection.addTrack(track, stream);
+    }
+
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    if (!offer.sdp) {
+      throw new Error("Realtime接続のofferを作成できませんでした。");
+    }
+
+    const answerSdp = await createRealtimeCall(realtimeSession.clientSecret, offer.sdp);
+    await peerConnection.setRemoteDescription({
+      type: "answer",
+      sdp: answerSdp,
+    });
+
+    if (!options.reconnecting) {
+      captureBlockedRef.current = isAiSpeechBlockingCapture();
+    }
+  }
+
+  async function getOrCreateMediaStream(reuseLiveStream: boolean) {
+    const existing = streamRef.current;
+    const existingTracks = existing?.getAudioTracks() ?? [];
+    if (
+      reuseLiveStream &&
+      existing &&
+      existingTracks.length > 0 &&
+      existingTracks.every((track) => track.readyState === "live")
+    ) {
+      return existing;
+    }
+
+    levelStopRef.current?.();
+    levelStopRef.current = null;
+    existing?.getTracks().forEach((track) => {
+      track.onended = null;
+      track.stop();
+    });
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+    streamRef.current = stream;
+    return stream;
+  }
+
   async function start(targetRemoteMic = remoteMicRef.current) {
     if (!targetRemoteMic) return;
     if (startInFlightRef.current || recordingActiveRef.current || micStateRef.current !== "idle") {
@@ -380,11 +961,15 @@ export default function RemoteMicClient(props: {
       return;
     }
 
+    manuallyStoppedRef.current = false;
+    fullyStoppedRef.current = false;
+    sessionEndedRef.current = false;
     startInFlightRef.current = true;
     setError("");
     setPermissionLabel("確認中");
     setConnectionLabel("接続中");
     setMicState("requesting");
+    setMicPhaseValue("connecting");
 
     let unmuted = false;
     try {
@@ -404,71 +989,17 @@ export default function RemoteMicClient(props: {
 
       await setFixedMicMuted(false, targetRemoteMic);
       unmuted = true;
-      connectRelayWebSocket(targetRemoteMic);
-      const realtimeSession = await createRealtimeSession(targetRemoteMic);
-      realtimeModelRef.current = realtimeSession.model;
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-        video: false,
-      });
-      streamRef.current = stream;
-      streamIdRef.current = `${targetRemoteMic.role}:${Date.now()}:${crypto.randomUUID()}`;
-      try {
-        levelStopRef.current = startLevelMeter(stream, (nextLevel) => {
-          setLevel(nextLevel);
-        });
-      } catch {
-        levelStopRef.current = null;
-        setLevel(0);
-      }
-
-      const peerConnection = new RTCPeerConnection();
-      peerConnectionRef.current = peerConnection;
-      const dataChannel = peerConnection.createDataChannel("oai-events");
-      dataChannelRef.current = dataChannel;
-      dataChannel.onopen = () => {
-        setConnectionLabel("接続済み");
-        setServerLabel("文字起こし中");
-      };
-      dataChannel.onmessage = (event) => {
-        handleRealtimeEvent(targetRemoteMic, event.data);
-      };
-      dataChannel.onerror = (event) => {
-        console.warn("[remote-mic realtime data channel error]", event);
-        setConnectionLabel("データ接続エラー");
-      };
-      peerConnection.onconnectionstatechange = () => {
-        const state = peerConnection.connectionState;
-        if (state === "failed" || state === "disconnected" || state === "closed") {
-          setConnectionLabel("切断");
-        }
-      };
-
-      for (const track of stream.getAudioTracks()) {
-        track.enabled = !isAiSpeechBlockingCapture();
-        peerConnection.addTrack(track, stream);
-      }
-
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-      if (!offer.sdp) {
-        throw new Error("Realtime接続のofferを作成できませんでした。");
-      }
-
-      const answerSdp = await createRealtimeCall(realtimeSession.clientSecret, offer.sdp);
-      await peerConnection.setRemoteDescription({
-        type: "answer",
-        sdp: answerSdp,
+      await openRealtimeConnection(targetRemoteMic, {
+        reconnecting: false,
+        reuseLiveStream: false,
       });
 
       recordingActiveRef.current = true;
+      reconnectAttemptRef.current = 0;
       setPermissionLabel("許可済み");
       setMicState("streaming");
       setServerLabel("文字起こし中");
+      setMicPhaseValue(captureBlockedRef.current ? "suppressed" : "listening");
     } catch (startError) {
       if (isPermissionError(startError)) {
         setPermissionLabel("拒否");
@@ -483,78 +1014,125 @@ export default function RemoteMicClient(props: {
         await setFixedMicMuted(true, targetRemoteMic).catch(() => undefined);
       }
       setMicState("idle");
+      setMicPhaseValue(isPermissionError(startError) ? "error" : "disconnected");
       setConnectionLabel("未接続");
     } finally {
       startInFlightRef.current = false;
     }
   }
 
-  function handleRealtimeEvent(session: RemoteMicSession, rawData: unknown) {
-    if (typeof rawData !== "string") return;
+  function handleRealtimeEvent(input: {
+    session: RemoteMicSession;
+    streamId: string;
+    captureEpoch: number;
+    generation: number;
+    data: unknown;
+  }) {
+    if (typeof input.data !== "string") return;
 
     let event: RealtimeEvent;
     try {
-      event = JSON.parse(rawData) as RealtimeEvent;
+      event = JSON.parse(input.data) as RealtimeEvent;
     } catch {
       return;
     }
 
+    const {
+      session,
+      streamId,
+      captureEpoch: connectionCaptureEpoch,
+      generation,
+    } = input;
+    const isCurrent = isCurrentConnection(generation, streamId);
     const type = event.type ?? "";
     if (type === "input_audio_buffer.speech_started") {
+      if (!isCurrent) return;
       if (isAiSpeechBlockingCapture()) return;
       const transcriptId = getTranscriptId(event);
-      speechStartedAtByTranscriptRef.current.set(transcriptId, Date.now());
-      sendRelayEvent({
-        type: "speech_started",
+      ensureTranscriptCaptureMetadata(transcriptId, streamId, connectionCaptureEpoch);
+      const speechStartedAt = Date.now();
+      speechStartedAtByTranscriptRef.current.set(transcriptId, speechStartedAt);
+      lastTranscriptActivityAtByTranscriptRef.current.set(
+        transcriptId,
+        speechStartedAt,
+      );
+      void publishRemoteMicRealtimeEvent({
+        type: "mic.speech_started",
         sessionId: session.sessionId,
         role: session.role,
+        streamId,
         transcriptId,
-        revision: nextTranscriptRevision(transcriptId),
-        text: "",
-        startedAt: getTranscriptStartedAt(transcriptId),
-      });
+        captureEpoch: connectionCaptureEpoch,
+        timestamp: new Date().toISOString(),
+      }).catch(() => undefined);
       return;
     }
 
     if (type === "conversation.item.input_audio_transcription.delta") {
+      if (!isCurrent) return;
       if (isAiSpeechBlockingCapture()) return;
       const transcriptId = getTranscriptId(event);
+      ensureTranscriptCaptureMetadata(transcriptId, streamId, connectionCaptureEpoch);
       const delta = event.delta ?? "";
       if (!delta) return;
 
       const previous = partialTextByTranscriptRef.current.get(transcriptId) ?? "";
       const text = `${previous}${delta}`;
       partialTextByTranscriptRef.current.set(transcriptId, text);
+      lastTranscriptActivityAtByTranscriptRef.current.set(transcriptId, Date.now());
       const firstPartialAt = logFirstDeltaLatency(transcriptId, session);
-      sendRelayEvent({
-        type: "partial",
-        sessionId: session.sessionId,
-        role: session.role,
-        transcriptId,
-        revision: nextTranscriptRevision(transcriptId),
-        text,
-        startedAt: getTranscriptStartedAt(transcriptId),
-      });
+      schedulePartialBroadcast(session, transcriptId, text, firstPartialAt);
       return;
     }
 
     if (type === "conversation.item.input_audio_transcription.completed") {
       const transcriptId = getTranscriptId(event);
+      ensureTranscriptCaptureMetadata(transcriptId, streamId, connectionCaptureEpoch);
       const text =
         event.transcript ?? partialTextByTranscriptRef.current.get(transcriptId) ?? "";
+      const eventStreamId = streamIdByTranscriptRef.current.get(transcriptId) ?? streamId;
+      const captureEpoch =
+        captureEpochByTranscriptRef.current.get(transcriptId) ?? input.captureEpoch;
+      const blockedAtCapture =
+        blockedAtCaptureByTranscriptRef.current.get(transcriptId) ??
+        isAiSpeechBlockingCapture();
+      const aiPlaybackIdAtCapture =
+        aiPlaybackIdAtCaptureByTranscriptRef.current.get(transcriptId) ?? null;
       const startedAt = getTranscriptStartedAt(transcriptId);
       const firstPartialAt = getFirstPartialAt(transcriptId);
-      const endedAt = new Date().toISOString();
-      clearTranscriptState(transcriptId);
+      const finalizedAt = new Date().toISOString();
+      const endedAt = getTranscriptEndedAt(transcriptId) ?? finalizedAt;
 
-      if (isAiSpeechBlockingCapture()) {
+      if (blockedAtCapture) {
         console.info("[remote-mic final transcript skipped during ai speech]", {
           sessionId: session.sessionId,
           role: session.role,
           transcriptId,
+          streamId: eventStreamId,
+          captureEpoch,
+          aiPlaybackIdAtCapture,
         });
-        return;
+      } else {
+        broadcastFinalTranscript(session, transcriptId, {
+          streamId: eventStreamId,
+          captureEpoch,
+          text,
+          startedAt,
+          firstPartialAt,
+          finalizedAt,
+          eventId: event.event_id,
+        });
+        void publishRemoteMicRealtimeEvent({
+          type: "mic.speech_finalized",
+          sessionId: session.sessionId,
+          role: session.role,
+          streamId: eventStreamId,
+          transcriptId,
+          captureEpoch,
+          timestamp: finalizedAt,
+        }).catch(() => undefined);
       }
+      clearTranscriptState(transcriptId);
 
       console.info("[remote-mic final transcript latency]", {
         sessionId: session.sessionId,
@@ -562,33 +1140,33 @@ export default function RemoteMicClient(props: {
         transcriptId,
         latencyMs: startedAt ? Date.now() - new Date(startedAt).getTime() : null,
       });
-      const finalEvent = {
-        type: "final" as const,
-        sessionId: session.sessionId,
-        role: session.role,
+      const finalQueueKey = createPendingFinalKey(eventStreamId, transcriptId);
+      pendingFinalByTranscriptRef.current.set(finalQueueKey, {
+        streamId: eventStreamId,
         transcriptId,
-        revision: nextTranscriptRevision(transcriptId),
+        captureEpoch,
         text,
         startedAt,
         endedAt,
-      };
-      pendingFinalByTranscriptRef.current.set(transcriptId, {
-        ...finalEvent,
+        finalizedAt,
         firstPartialAt,
+        blockedAtCapture,
+        aiPlaybackIdAtCapture,
         saveAttempts: 0,
       });
-      sendRelayEvent(finalEvent);
-      void saveFinalTranscriptWithRetry(transcriptId, {
+      void saveFinalTranscriptWithRetry(finalQueueKey, {
         eventId: event.event_id,
         firstPartialAt,
-        finalizedAt: endedAt,
+        finalizedAt,
       });
       return;
     }
 
     if (type === "error") {
+      if (!isCurrent) return;
       console.warn("[remote-mic realtime error]", event);
       setConnectionLabel("Realtimeエラー");
+      void reconnectRealtime("data_channel_error");
     }
   }
 
@@ -608,6 +1186,177 @@ export default function RemoteMicClient(props: {
     return new Date(firstDeltaAt).toISOString();
   }
 
+  function schedulePartialBroadcast(
+    session: RemoteMicSession,
+    transcriptId: string,
+    text: string,
+    firstPartialAt: string,
+  ) {
+    if (!text.trim() || !isLiveTranscriptBroadcastAllowed(session)) return;
+    if (partialBroadcastTimersRef.current.has(transcriptId)) return;
+
+    const timerId = window.setTimeout(() => {
+      partialBroadcastTimersRef.current.delete(transcriptId);
+      const latestText = partialTextByTranscriptRef.current.get(transcriptId) ?? "";
+      if (!latestText.trim() || !isLiveTranscriptBroadcastAllowed(session)) return;
+
+      broadcastPartialTranscript(session, transcriptId, latestText, firstPartialAt);
+    }, PARTIAL_BROADCAST_INTERVAL_MS);
+    partialBroadcastTimersRef.current.set(transcriptId, timerId);
+  }
+
+  function broadcastPartialTranscript(
+    session: RemoteMicSession,
+    transcriptId: string,
+    text: string,
+    firstPartialAt: string,
+  ) {
+    const revision = nextTranscriptRevision(transcriptId);
+    const previous = lastBroadcastByTranscriptRef.current.get(transcriptId);
+    if (previous?.revision === revision && previous.text === text) return;
+
+    lastBroadcastByTranscriptRef.current.set(transcriptId, { revision, text });
+    void publishRemoteMicRealtimeEvent({
+      type: "transcript.partial",
+      sessionId: session.sessionId,
+      role: session.role,
+      streamId: streamIdByTranscriptRef.current.get(transcriptId) ?? streamIdRef.current,
+      transcriptId,
+      revision,
+      captureEpoch:
+        captureEpochByTranscriptRef.current.get(transcriptId) ?? captureEpochRef.current,
+      text,
+      startedAt: getTranscriptStartedAt(transcriptId),
+      firstPartialAt,
+      model: realtimeModelRef.current || undefined,
+    }).catch((error) => {
+      console.warn("[remote-mic live partial publish failed]", {
+        sessionId: session.sessionId,
+        role: session.role,
+        transcriptId,
+        error,
+      });
+    });
+  }
+
+  function broadcastFinalTranscript(
+    session: RemoteMicSession,
+    transcriptId: string,
+    input: {
+      streamId: string;
+      captureEpoch: number;
+      text: string;
+      startedAt?: string;
+      firstPartialAt?: string;
+      finalizedAt: string;
+      eventId?: string;
+    },
+  ) {
+    clearPartialBroadcastTimer(transcriptId);
+    if (!input.text.trim() || !isRemoteMicSessionCurrent(session)) return;
+
+    const revision = nextTranscriptRevision(transcriptId);
+    lastBroadcastByTranscriptRef.current.set(transcriptId, {
+      revision,
+      text: input.text,
+    });
+    void publishRemoteMicRealtimeEvent({
+      type: "transcript.final",
+      sessionId: session.sessionId,
+      role: session.role,
+      streamId: input.streamId,
+      transcriptId,
+      revision,
+      captureEpoch: input.captureEpoch,
+      text: input.text,
+      startedAt: input.startedAt,
+      firstPartialAt: input.firstPartialAt,
+      finalizedAt: input.finalizedAt,
+      eventId: input.eventId,
+      model: realtimeModelRef.current || undefined,
+    }).catch((error) => {
+      console.warn("[remote-mic live final publish failed]", {
+        sessionId: session.sessionId,
+        role: session.role,
+        transcriptId,
+        error,
+      });
+    });
+  }
+
+  function clearPartialBroadcastTimer(transcriptId: string) {
+    const timerId = partialBroadcastTimersRef.current.get(transcriptId);
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId);
+      partialBroadcastTimersRef.current.delete(transcriptId);
+    }
+  }
+
+  function nextTranscriptRevision(transcriptId: string) {
+    const nextRevision = (revisionByTranscriptRef.current.get(transcriptId) ?? 0) + 1;
+    revisionByTranscriptRef.current.set(transcriptId, nextRevision);
+    return nextRevision;
+  }
+
+  function createPendingFinalKey(streamId: string, transcriptId: string) {
+    return `${streamId}:${transcriptId}`;
+  }
+
+  function ensureTranscriptCaptureMetadata(
+    transcriptId: string,
+    streamId = streamIdRef.current,
+    captureEpoch = captureEpochRef.current,
+  ) {
+    if (!streamIdByTranscriptRef.current.has(transcriptId)) {
+      streamIdByTranscriptRef.current.set(transcriptId, streamId);
+    }
+    if (!captureEpochByTranscriptRef.current.has(transcriptId)) {
+      captureEpochByTranscriptRef.current.set(transcriptId, captureEpoch);
+    }
+    if (!blockedAtCaptureByTranscriptRef.current.has(transcriptId)) {
+      blockedAtCaptureByTranscriptRef.current.set(
+        transcriptId,
+        isAiSpeechBlockingCapture(),
+      );
+    }
+    if (!aiPlaybackIdAtCaptureByTranscriptRef.current.has(transcriptId)) {
+      aiPlaybackIdAtCaptureByTranscriptRef.current.set(
+        transcriptId,
+        aiSpeechStateRef.current.playbackId,
+      );
+    }
+  }
+
+  function isLiveTranscriptBroadcastAllowed(session: RemoteMicSession) {
+    return !isAiSpeechBlockingCapture() && isRemoteMicSessionCurrent(session);
+  }
+
+  function isRemoteMicSessionCurrent(session: RemoteMicSession) {
+    const current = remoteMicRef.current;
+    return (
+      !manuallyStoppedRef.current &&
+      micStateRef.current === "streaming" &&
+      current?.sessionId === session.sessionId &&
+      current.role === session.role
+    );
+  }
+
+  function discardLiveTranscripts(reason: string) {
+    const current = remoteMicRef.current;
+    if (!current || !streamIdRef.current) return;
+
+    for (const transcriptId of partialTextByTranscriptRef.current.keys()) {
+      void publishRemoteMicRealtimeEvent({
+        type: "transcript.discarded",
+        sessionId: current.sessionId,
+        role: current.role,
+        streamId: streamIdRef.current,
+        transcriptId,
+        reason,
+      }).catch(() => undefined);
+    }
+  }
+
   function getTranscriptStartedAt(transcriptId: string) {
     const startedAt = speechStartedAtByTranscriptRef.current.get(transcriptId);
     return startedAt ? new Date(startedAt).toISOString() : undefined;
@@ -618,126 +1367,9 @@ export default function RemoteMicClient(props: {
     return firstPartialAt ? new Date(firstPartialAt).toISOString() : undefined;
   }
 
-  function nextTranscriptRevision(transcriptId: string) {
-    const nextRevision = (revisionByTranscriptRef.current.get(transcriptId) ?? 0) + 1;
-    revisionByTranscriptRef.current.set(transcriptId, nextRevision);
-    return nextRevision;
-  }
-
-  function connectRelayWebSocket(session: RemoteMicSession) {
-    if (
-      relayWebSocketRef.current &&
-      relayWebSocketRef.current.readyState <= WebSocket.OPEN &&
-      relayConnectedSessionRef.current?.sessionId === session.sessionId &&
-      relayConnectedSessionRef.current.role === session.role
-    ) {
-      return;
-    }
-
-    closeRelayWebSocket(false);
-    relayConnectedSessionRef.current = session;
-    const socket = new WebSocket(
-      buildRemoteMicRelayUrl({
-        sessionId: session.sessionId,
-        role: session.role,
-        clientType: "producer",
-      }),
-    );
-    relayWebSocketRef.current = socket;
-
-    socket.onopen = () => {
-      setConnectionLabel("接続済み");
-      flushRelayEvents();
-    };
-    socket.onmessage = (event) => {
-      try {
-        const message = JSON.parse(String(event.data)) as RemoteMicWsTranscriptEvent;
-        if (message.type === "error") {
-          console.warn("[remote-mic ws relay error]", message);
-        }
-      } catch {}
-    };
-    socket.onerror = (event) => {
-      console.warn("[remote-mic ws relay socket error]", event);
-    };
-    socket.onclose = () => {
-      if (relayWebSocketRef.current === socket) {
-        relayWebSocketRef.current = null;
-      }
-      if (recordingActiveRef.current || startInFlightRef.current) {
-        scheduleRelayReconnect();
-      }
-    };
-  }
-
-  function scheduleRelayReconnect() {
-    if (relayReconnectTimerRef.current !== null) return;
-    relayReconnectTimerRef.current = window.setTimeout(() => {
-      relayReconnectTimerRef.current = null;
-      const session = relayConnectedSessionRef.current ?? remoteMicRef.current;
-      if (!session || (!recordingActiveRef.current && !startInFlightRef.current)) {
-        return;
-      }
-      connectRelayWebSocket(session);
-    }, REMOTE_MIC_WS_RECONNECT_MS);
-  }
-
-  function sendRelayEvent(event: RemoteMicWsTranscriptEvent) {
-    if (event.type === "partial") {
-      latestPartialByTranscriptRef.current.set(event.transcriptId, event);
-    }
-    if (event.type === "final") {
-      latestPartialByTranscriptRef.current.delete(event.transcriptId);
-    }
-
-    const socket = relayWebSocketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(event));
-      return;
-    }
-
-    scheduleRelayReconnect();
-  }
-
-  function flushRelayEvents() {
-    for (const event of latestPartialByTranscriptRef.current.values()) {
-      relayWebSocketRef.current?.send(JSON.stringify(event));
-    }
-    for (const event of pendingFinalByTranscriptRef.current.values()) {
-      relayWebSocketRef.current?.send(JSON.stringify(toRelayFinalEvent(event)));
-    }
-  }
-
-  function closeRelayWebSocket(clearPending: boolean) {
-    if (relayReconnectTimerRef.current !== null) {
-      window.clearTimeout(relayReconnectTimerRef.current);
-      relayReconnectTimerRef.current = null;
-    }
-    relayWebSocketRef.current?.close();
-    relayWebSocketRef.current = null;
-    relayConnectedSessionRef.current = null;
-    if (clearPending) {
-      latestPartialByTranscriptRef.current.clear();
-      pendingFinalByTranscriptRef.current.clear();
-    }
-  }
-
-  function toRelayFinalEvent(
-    event: RemoteMicWsTranscriptEvent & {
-      firstPartialAt?: string;
-      saveAttempts: number;
-    },
-  ): RemoteMicWsTranscriptEvent {
-    return {
-      type: "final",
-      sessionId: event.sessionId,
-      role: event.role,
-      transcriptId: event.transcriptId,
-      revision: event.revision,
-      text: event.text,
-      startedAt: event.startedAt,
-      endedAt: event.endedAt,
-    };
+  function getTranscriptEndedAt(transcriptId: string) {
+    const endedAt = lastTranscriptActivityAtByTranscriptRef.current.get(transcriptId);
+    return endedAt ? new Date(endedAt).toISOString() : undefined;
   }
 
   async function muteMicrophone() {
@@ -745,11 +1377,15 @@ export default function RemoteMicClient(props: {
   }
 
   async function stop(notifyServer = true) {
+    manuallyStoppedRef.current = true;
+    fullyStoppedRef.current = true;
     resumeAfterAiSpeechRef.current = false;
+    captureBlockedRef.current = false;
     await stopRealtimeConnection();
     setConnectionLabel("未接続");
     setLevel(0);
     setMicState("idle");
+    setMicPhaseValue("stopped");
 
     if (notifyServer) {
       await setFixedMicMuted(true).catch(() => undefined);
@@ -759,20 +1395,13 @@ export default function RemoteMicClient(props: {
 
   async function stopRealtimeConnection() {
     recordingActiveRef.current = false;
-    closeRelayWebSocket(false);
-    dataChannelRef.current?.close();
-    dataChannelRef.current = null;
-    peerConnectionRef.current?.close();
-    peerConnectionRef.current = null;
+    reconnectInFlightRef.current = false;
+    clearReconnectTimers();
+    connectionGenerationRef.current += 1;
+    discardLiveTranscripts("connection_stopped");
+    flushPendingFinalTranscripts();
     clearTranscriptState();
-
-    levelStopRef.current?.();
-    levelStopRef.current = null;
-    streamRef.current?.getTracks().forEach((track) => {
-      track.enabled = false;
-      track.stop();
-    });
-    streamRef.current = null;
+    closeRealtimeTransport(true);
   }
 
   async function setFixedMicMuted(
@@ -807,6 +1436,44 @@ export default function RemoteMicClient(props: {
           }
         : current,
     );
+  }
+
+  async function publishMicControlAck(
+    type: "mic.suppressed" | "mic.resumed",
+    playbackId: string,
+    revision: number,
+    trackLive: boolean,
+  ) {
+    const targetRemoteMic = remoteMicRef.current;
+    if (!targetRemoteMic) return;
+
+    await publishRemoteMicRealtimeEvent({
+      type,
+      sessionId: targetRemoteMic.sessionId,
+      playbackId,
+      role: targetRemoteMic.role,
+      trackLive,
+      revision,
+      timestamp: new Date().toISOString(),
+    }).catch((error) => {
+      console.warn("[remote-mic control ack failed]", {
+        type,
+        sessionId: targetRemoteMic.sessionId,
+        role: targetRemoteMic.role,
+        playbackId,
+        revision,
+        trackLive,
+        error,
+      });
+    });
+  }
+
+  async function publishRemoteMicRealtimeEvent(event: RemoteMicRealtimeEvent) {
+    await fetch("/api/ai/speech-state/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(event),
+    });
   }
 
   return (
@@ -845,6 +1512,7 @@ export default function RemoteMicClient(props: {
           <StatusRow label="文字起こし方式" value="OpenAI Realtime" />
           <StatusRow label="マイク許可" value={permissionLabel} />
           <StatusRow label="接続状態" value={connectionLabel} />
+          <StatusRow label="マイク状態" value={getMicPhaseLabel(micPhase)} />
           <StatusRow label="サーバー" value={serverLabel} />
           <StatusRow label="AI音声" value={aiSpeechLabel} />
         </div>
@@ -921,55 +1589,170 @@ export default function RemoteMicClient(props: {
   );
 
   async function saveFinalTranscriptWithRetry(
-    transcriptId: string,
+    finalQueueKey: string,
     input: {
       eventId?: string;
       firstPartialAt?: string;
       finalizedAt?: string;
     },
   ) {
-    const pending = pendingFinalByTranscriptRef.current.get(transcriptId);
+    const pending = pendingFinalByTranscriptRef.current.get(finalQueueKey);
     if (!pending) return;
     pending.saveAttempts += 1;
     const current = remoteMicRef.current;
     const text = pending.text.trim();
-    if (!current || !text) return;
+    if (!text) {
+      pendingFinalByTranscriptRef.current.delete(finalQueueKey);
+      return;
+    }
+    if (!current) return;
 
-    const response = await fetch("/api/remote-mic/realtime/transcript", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: current.sessionId,
-        role: current.role,
-        streamId: streamIdRef.current,
-        transcriptId,
-        text,
-        status: "final",
-        eventId: input.eventId,
-        startedAt: pending.startedAt,
-        firstPartialAt: input.firstPartialAt,
-        endedAt: pending.endedAt,
-        finalizedAt: input.finalizedAt,
-        model: realtimeModelRef.current,
-        aiPlaybackIdAtCapture: aiSpeechStateRef.current.playbackId,
-      }),
-    });
-
-    if (!response.ok) {
+    let response: Response;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), FINAL_SAVE_TIMEOUT_MS);
+    try {
+      response = await fetch("/api/remote-mic/realtime/transcript", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          sessionId: current.sessionId,
+          role: current.role,
+          streamId: pending.streamId,
+          transcriptId: pending.transcriptId,
+          captureEpoch: pending.captureEpoch,
+          text,
+          eventId: input.eventId,
+          startedAt: pending.startedAt,
+          firstPartialAt: pending.firstPartialAt ?? input.firstPartialAt,
+          endedAt: pending.endedAt,
+          finalizedAt: pending.finalizedAt ?? input.finalizedAt,
+          model: realtimeModelRef.current,
+          blockedAtCapture: pending.blockedAtCapture,
+          aiPlaybackIdAtCapture: pending.aiPlaybackIdAtCapture,
+        }),
+      });
+    } catch (error) {
       console.warn("[remote-mic final transcript save failed]", {
-        transcriptId,
-        status: response.status,
+        transcriptId: pending.transcriptId,
+        status: "network_error",
         attempts: pending.saveAttempts,
+        error,
       });
       if (pending.saveAttempts < MAX_FINAL_SAVE_RETRY_COUNT) {
         window.setTimeout(() => {
-          void saveFinalTranscriptWithRetry(transcriptId, input);
+          void saveFinalTranscriptWithRetry(finalQueueKey, input);
+        }, FINAL_SAVE_RETRY_MS);
+      } else {
+        setError("確定発話を保存できませんでした。通信状態を確認してください。");
+      }
+      return;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      console.warn("[remote-mic final transcript save rejected]", {
+        transcriptId: pending.transcriptId,
+        status: response.status,
+        attempts: pending.saveAttempts,
+      });
+      if (response.status >= 500 && pending.saveAttempts < MAX_FINAL_SAVE_RETRY_COUNT) {
+        window.setTimeout(() => {
+          void saveFinalTranscriptWithRetry(finalQueueKey, input);
+        }, FINAL_SAVE_RETRY_MS);
+        return;
+      }
+      pendingFinalByTranscriptRef.current.delete(finalQueueKey);
+      return;
+    }
+
+    const data = (await response.json().catch(() => null)) as {
+      ok?: boolean;
+      outcome?: "created" | "existing" | "skipped";
+      reason?: string;
+    } | null;
+    if (data?.outcome === "skipped") {
+      console.info("[remote-mic final transcript save skipped]", {
+        transcriptId: pending.transcriptId,
+        reason: data.reason ?? null,
+      });
+    }
+    if (
+      data?.outcome !== "created" &&
+      data?.outcome !== "existing" &&
+      data?.outcome !== "skipped"
+    ) {
+      console.warn("[remote-mic final transcript save invalid response]", {
+        transcriptId: pending.transcriptId,
+        attempts: pending.saveAttempts,
+        data,
+      });
+      if (pending.saveAttempts < MAX_FINAL_SAVE_RETRY_COUNT) {
+        window.setTimeout(() => {
+          void saveFinalTranscriptWithRetry(finalQueueKey, input);
         }, FINAL_SAVE_RETRY_MS);
       }
       return;
     }
+    pendingFinalByTranscriptRef.current.delete(finalQueueKey);
+  }
 
-    pendingFinalByTranscriptRef.current.delete(transcriptId);
+  function flushPendingFinalTranscripts() {
+    for (const [finalQueueKey, pending] of pendingFinalByTranscriptRef.current.entries()) {
+      if (pending.saveAttempts >= MAX_FINAL_SAVE_RETRY_COUNT) continue;
+      void saveFinalTranscriptWithRetry(finalQueueKey, {
+        eventId: undefined,
+        firstPartialAt: pending.firstPartialAt,
+        finalizedAt: pending.finalizedAt,
+      });
+    }
+  }
+
+  async function flushPendingFinalTranscriptsForRequest(requestId: string) {
+    const targetRemoteMic = remoteMicRef.current;
+    if (!targetRemoteMic) return;
+
+    const failedTranscriptKeys: string[] = [];
+    const pendingEntries = Array.from(pendingFinalByTranscriptRef.current.entries());
+
+    for (const [finalQueueKey, pending] of pendingEntries) {
+      if (!pendingFinalByTranscriptRef.current.has(finalQueueKey)) continue;
+      const beforeAttempts = pending.saveAttempts;
+      await saveFinalTranscriptWithRetry(finalQueueKey, {
+        eventId: undefined,
+        firstPartialAt: pending.firstPartialAt,
+        finalizedAt: pending.finalizedAt,
+      });
+      if (pendingFinalByTranscriptRef.current.has(finalQueueKey)) {
+        failedTranscriptKeys.push(finalQueueKey);
+        const currentPending = pendingFinalByTranscriptRef.current.get(finalQueueKey);
+        if (currentPending && currentPending.saveAttempts === beforeAttempts) {
+          currentPending.saveAttempts += 1;
+        }
+      }
+    }
+
+    const pendingCount = pendingFinalByTranscriptRef.current.size;
+    await publishRemoteMicRealtimeEvent({
+      type: "transcript.flush_ack",
+      sessionId: targetRemoteMic.sessionId,
+      requestId,
+      role: targetRemoteMic.role,
+      outcome: pendingCount === 0 ? "complete" : "failed",
+      pendingCount,
+      failedTranscriptKeys,
+      timestamp: new Date().toISOString(),
+    }).catch((error) => {
+      console.warn("[remote-mic transcript flush ack failed]", {
+        sessionId: targetRemoteMic.sessionId,
+        role: targetRemoteMic.role,
+        requestId,
+        pendingCount,
+        failedTranscriptKeys,
+        error,
+      });
+    });
   }
 }
 
@@ -1076,29 +1859,6 @@ function getHttpsUrl(value: string) {
   }
 }
 
-function buildRemoteMicRelayUrl(input: {
-  sessionId: string;
-  role?: RemoteMicRole;
-  clientType: RemoteMicWsClientType;
-}) {
-  const configuredUrl = process.env.NEXT_PUBLIC_REMOTE_MIC_WS_URL?.trim();
-  const baseUrl = configuredUrl || getDefaultRemoteMicRelayUrl(window.location);
-  const url = new URL(baseUrl);
-  url.searchParams.set("sessionId", input.sessionId);
-  url.searchParams.set("clientType", input.clientType);
-  if (input.role) {
-    url.searchParams.set("role", input.role);
-  }
-  return url.toString();
-}
-
-function getDefaultRemoteMicRelayUrl(location: Location) {
-  if (location.protocol === "https:" && location.hostname.endsWith(".ts.net")) {
-    return `wss://${location.host}/remote-mic-ws`;
-  }
-  return `ws://${location.hostname || "localhost"}:3010/remote-mic-ws`;
-}
-
 function isHttpsTsNetUrl(value: string) {
   try {
     const url = new URL(value);
@@ -1153,6 +1913,30 @@ function getFixedRemoteMicRole(explicitRole: RemoteMicRole | null): RemoteMicRol
 
 function getRemoteMicRoleLabel(role: RemoteMicRole) {
   return role === "elder" ? "本人用" : "介護者用";
+}
+
+function getMicPhaseLabel(phase: MicPhase) {
+  switch (phase) {
+    case "connecting":
+      return "接続中";
+    case "listening":
+      return "受付中";
+    case "suppressing":
+      return "ミュート準備中";
+    case "suppressed":
+      return "AI音声中ミュート";
+    case "resuming":
+      return "復帰中";
+    case "reconnecting":
+      return "再接続中";
+    case "error":
+      return "手動確認が必要";
+    case "stopped":
+      return "完全停止";
+    case "disconnected":
+    default:
+      return "未接続";
+  }
 }
 
 function startLevelMeter(stream: MediaStream, onLevel: (level: number) => void) {

@@ -31,17 +31,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
   }
 
-  if (!muted) {
-    await prisma.session.updateMany({
-      where: {
-        id: sessionId,
-        dialogueStartedAt: null,
-        endedAt: null,
-      },
-      data: { dialogueStartedAt: new Date() },
-    });
-  }
-
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
     select: {

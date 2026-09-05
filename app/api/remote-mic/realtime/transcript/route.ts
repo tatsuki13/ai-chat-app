@@ -1,268 +1,312 @@
+import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
-import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
-import {
-  getActiveFixedRemoteMicSession,
-} from "../../../../../lib/remote-mic/fixed-session";
+import { getAiSpeechState } from "../../../../../lib/ai/speech-state";
 import { prisma } from "../../../../../lib/prisma";
+import { getFixedRemoteMicActiveSession } from "../../../../../lib/remote-mic/active-session-db";
+import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
+import { setActiveFixedRemoteMicSession } from "../../../../../lib/remote-mic/fixed-session";
+import { UTTERANCE_ANALYSIS_VERSION } from "../../../../../lib/server/utterance-metadata";
 import {
   createUtteranceTiming,
   pickUtteranceTimingBase,
 } from "../../../../../lib/server/utterance-timing";
-import { UTTERANCE_ANALYSIS_VERSION } from "../../../../../lib/server/utterance-metadata";
-import {
-  getAiSpeechState,
-  isAiSpeechBlockingTranscription,
-} from "../../../../../lib/ai/speech-state";
 
 export const runtime = "nodejs";
 
 const CROSSTALK_SUPPRESSION_WINDOW_MS = 4_000;
 const CROSSTALK_MIN_NORMALIZED_LENGTH = 8;
-const SAME_SPEAKER_MERGE_WINDOW_MS = 30_000;
-const SAME_SPEAKER_MERGE_MAX_TEXT_LENGTH = 900;
+const MAX_TRANSCRIPT_TEXT_LENGTH = 10_000;
+// Client and server clocks can differ slightly; keep this narrow to avoid dropping valid speech.
+const AI_SPEECH_CLOCK_SKEW_TOLERANCE_MS = 250;
+
+type FinalSkipReason =
+  | "blocked_at_capture"
+  | "captured_during_ai_speech"
+  | "overlaps_ai_speech"
+  | "echo_guard"
+  | "empty_text"
+  | "crosstalk_duplicate";
+
+type FinalTranscriptRequest = {
+  sessionId: string;
+  role: "elder" | "caregiver";
+  streamId: string;
+  transcriptId: string;
+  captureEpoch: number;
+  text: string;
+  startedAt?: string;
+  endedAt?: string;
+  firstPartialAt?: string;
+  finalizedAt?: string;
+  eventId?: string;
+  model?: string | null;
+  blockedAtCapture: boolean;
+  aiPlaybackIdAtCapture?: string | null;
+};
 
 export async function POST(request: Request) {
-  const body = (await request.json().catch(() => null)) as {
-    sessionId?: unknown;
-    role?: unknown;
-    streamId?: unknown;
-    transcriptId?: unknown;
-    text?: unknown;
-    status?: unknown;
-    startedAt?: unknown;
-    endedAt?: unknown;
-    finalizedAt?: unknown;
-    firstPartialAt?: unknown;
-    eventId?: unknown;
-    model?: unknown;
-    aiPlaybackIdAtCapture?: unknown;
-  } | null;
+  let parsedRequest: FinalTranscriptRequest | null = null;
+
+  try {
+    const body = (await request.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
+    const parsed = parseFinalTranscriptRequest(body);
+    if (parsed.ok === false) {
+      console.warn("[remote-mic realtime transcript invalid request]", {
+        reason: parsed.reason,
+      });
+      return NextResponse.json({ error: parsed.reason }, { status: 400 });
+    }
+
+    const input = parsed.request;
+    parsedRequest = input;
+    const active = await getFixedRemoteMicActiveSession();
+    if (!active || active.sessionId !== input.sessionId || active.endedAt) {
+      return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
+    }
+    setActiveFixedRemoteMicSession(active);
+
+    const existing = await findExistingRealtimeUtterance(input);
+    if (existing) {
+      if (existing.text !== input.text) {
+        console.warn("[remote-mic realtime duplicate text mismatch]", {
+          sessionId: input.sessionId,
+          role: input.role,
+          streamId: input.streamId,
+          transcriptId: input.transcriptId,
+          existingUtteranceId: existing.id,
+        });
+      }
+
+      return NextResponse.json({
+        ok: true,
+        outcome: "existing",
+        utterance: serializeUtterance(existing),
+      });
+    }
+
+    const skip = await evaluateFinalTranscript(input);
+    if (skip) {
+      console.info("[remote-mic realtime transcript skipped]", {
+        sessionId: input.sessionId,
+        role: input.role,
+        streamId: input.streamId,
+        transcriptId: input.transcriptId,
+        reason: skip.reason,
+        sourceUtteranceId: skip.sourceUtteranceId,
+        timeDiffMs: skip.timeDiffMs,
+      });
+      return NextResponse.json({ ok: true, outcome: "skipped", ...skip });
+    }
+
+    const session = await prisma.session.findUnique({
+      where: { id: input.sessionId },
+      select: {
+        startedAt: true,
+        dialogueStartedAt: true,
+      },
+    });
+
+    if (!session) {
+      return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    }
+
+    const timing = createUtteranceTiming({
+      baseAt: pickUtteranceTimingBase(session),
+      startedAt: input.startedAt ?? input.finalizedAt ?? input.endedAt ?? "",
+      endedAt: input.endedAt ?? input.finalizedAt ?? input.startedAt ?? "",
+    });
+
+    const utterance = await createRealtimeUtterance(input, {
+      participantCode: active.participantCode,
+      timing,
+    });
+
+    console.info("[remote-mic realtime transcript saved]", {
+      sessionId: input.sessionId,
+      role: input.role,
+      streamId: input.streamId,
+      transcriptId: input.transcriptId,
+      outcome: "created",
+      textLength: input.text.length,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      outcome: "created",
+      utterance: serializeUtterance(utterance),
+    });
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      if (parsedRequest) {
+        const existing = await findExistingRealtimeUtterance(parsedRequest);
+        if (existing) {
+          return NextResponse.json({
+            ok: true,
+            outcome: "existing",
+            utterance: serializeUtterance(existing),
+          });
+        }
+      }
+    }
+
+    console.error("[remote-mic realtime transcript failed]", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return NextResponse.json(
+      { error: "Failed to save realtime transcript" },
+      { status: 500 },
+    );
+  }
+}
+
+function parseFinalTranscriptRequest(body: Record<string, unknown> | null):
+  | { ok: true; request: FinalTranscriptRequest }
+  | { ok: false; reason: string } {
   const sessionId = requiredString(body?.sessionId);
   const role = parseRemoteMicRole(requiredString(body?.role));
   const streamId = requiredString(body?.streamId);
   const transcriptId = requiredString(body?.transcriptId);
   const text = requiredString(body?.text);
-  const status = parseTranscriptStatus(requiredString(body?.status));
-  const model = requiredString(body?.model) || null;
+  const captureEpoch =
+    typeof body?.captureEpoch === "number" && Number.isFinite(body.captureEpoch)
+      ? body.captureEpoch
+      : null;
 
-  if (!sessionId || !role || !streamId || !transcriptId || !status) {
-    return NextResponse.json(
-      { error: "sessionId, role, streamId, transcriptId, and status are required" },
-      { status: 400 },
-    );
+  if (!sessionId || !role || !streamId || !transcriptId) {
+    return {
+      ok: false,
+      reason: "sessionId, role, streamId, and transcriptId are required",
+    };
   }
-  if (status !== "final") {
-    return NextResponse.json(
-      { error: "Realtime transcript API accepts final transcripts only" },
-      { status: 400 },
-    );
+  if (captureEpoch === null) return { ok: false, reason: "captureEpoch is required" };
+  if (typeof body?.blockedAtCapture !== "boolean") {
+    return { ok: false, reason: "blockedAtCapture is required" };
   }
-
-  const active = getActiveFixedRemoteMicSession();
-  if (!active || active.sessionId !== sessionId || active.endedAt) {
-    return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
-  }
-
-  const roleState = active.roles[role];
-  if (roleState?.muted) {
-    return NextResponse.json({
-      ok: true,
-      skipped: true,
-      reason: "remote_mic_muted",
-    });
+  if (!text) return { ok: false, reason: "text is required" };
+  if (text.length > MAX_TRANSCRIPT_TEXT_LENGTH) {
+    return { ok: false, reason: "text is too long" };
   }
 
-  const startedAt = requiredString(body?.startedAt);
-  const endedAt = requiredString(body?.endedAt);
-  const finalizedAt = requiredString(body?.finalizedAt) || endedAt;
-  const aiSpeechState = await getAiSpeechState(sessionId);
-  const aiPlaybackIdAtCapture = requiredString(body?.aiPlaybackIdAtCapture);
-  const overlapsAiSpeech = doesTranscriptOverlapAiSpeech({
-    state: aiSpeechState,
-    startedAt: parseDate(startedAt),
-    finalizedAt: parseDate(finalizedAt),
-  });
-  if (
-    aiPlaybackIdAtCapture ||
-    isAiSpeechBlockingTranscription(aiSpeechState) ||
-    overlapsAiSpeech
-  ) {
-    return NextResponse.json({
-      ok: true,
-      skipped: true,
-      reason: aiPlaybackIdAtCapture
-        ? "captured_during_ai_speech"
-        : overlapsAiSpeech
-          ? "overlaps_ai_speech"
-          : "ai_speech_active",
-    });
+  const startedAt = optionalString(body?.startedAt);
+  const endedAt = optionalString(body?.endedAt);
+  const finalizedAt = optionalString(body?.finalizedAt) ?? endedAt;
+  if (!endedAt && !finalizedAt) {
+    return { ok: false, reason: "endedAt or finalizedAt is required" };
   }
-
-  if (!text) {
-    return NextResponse.json({ ok: true, skipped: true });
-  }
-
-  const session = await prisma.session.findUnique({
-    where: { id: sessionId },
-    select: {
-      startedAt: true,
-      dialogueStartedAt: true,
-    },
-  });
-
-  if (!session) {
-    return NextResponse.json({ error: "Session not found" }, { status: 404 });
-  }
-
-  const timing = createUtteranceTiming({
-    baseAt: pickUtteranceTimingBase(session),
-    startedAt,
-    endedAt,
-  });
-
-  const source = `remote_realtime:${transcriptId}`;
-  const existing = await prisma.sessionUtterance.findFirst({
-    where: {
-      sessionId,
-      OR: [
-        { sourceGroupId: transcriptId },
-        { source },
-        {
-          source: {
-            contains: transcriptId,
-          },
-        },
-      ],
-    },
-  });
-
-  if (!existing) {
-    const crosstalkSource = await findRecentCrosstalkUtterance({
-      sessionId,
-      role,
-      text,
-    });
-
-    if (crosstalkSource) {
-      console.info("[remote-mic realtime transcript skipped as crosstalk]", {
-        sessionId,
-        role,
-        transcriptId,
-        sourceUtteranceId: crosstalkSource.id,
-      });
-
-      return NextResponse.json({
-        ok: true,
-        skipped: true,
-        reason: "crosstalk_duplicate",
-        sourceUtteranceId: crosstalkSource.id,
-      });
+  const dateFields = { startedAt, endedAt, firstPartialAt: optionalString(body?.firstPartialAt), finalizedAt };
+  for (const [field, value] of Object.entries(dateFields)) {
+    if (value && !parseDate(value)) {
+      return { ok: false, reason: `${field} is invalid` };
     }
   }
 
-  const utterance = existing ?? (await appendOrCreateRemoteUtterance({
-    sessionId,
-    participantCode: active.participantCode,
-    role,
-    text,
-    source,
-    sourceGroupId: transcriptId,
-    transcriptId,
-    timing,
-    asrModel: model,
-  }));
-  const serialized = serializeUtterance(utterance);
-
-  console.info("[remote-mic realtime transcript saved]", {
-    sessionId,
-    role,
-    transcriptId,
-    textLength: text.length,
-    duplicate: Boolean(existing),
-    merged: utterance.source !== source,
-  });
-
-  return NextResponse.json({
+  return {
     ok: true,
-    utterance: serialized,
-  });
+    request: {
+      sessionId,
+      role,
+      streamId,
+      transcriptId,
+      captureEpoch,
+      text,
+      startedAt,
+      endedAt,
+      firstPartialAt: dateFields.firstPartialAt,
+      finalizedAt,
+      eventId: optionalString(body?.eventId),
+      model: optionalString(body?.model) ?? null,
+      blockedAtCapture: body.blockedAtCapture,
+      aiPlaybackIdAtCapture: optionalString(body?.aiPlaybackIdAtCapture) ?? null,
+    },
+  };
 }
 
-async function appendOrCreateRemoteUtterance(input: {
-  sessionId: string;
-  participantCode: string | null;
-  role: "elder" | "caregiver";
-  text: string;
-  source: string;
-  sourceGroupId: string;
-  transcriptId: string;
-  timing: UtteranceTiming;
-  asrModel: string | null;
-}) {
-  const latestUtterance = await prisma.sessionUtterance.findFirst({
-    where: {
-      sessionId: input.sessionId,
-    },
-    orderBy: { createdAt: "desc" },
-    select: {
-      id: true,
-      speaker: true,
-      text: true,
-      source: true,
-      sourceGroupId: true,
-      startMs: true,
-      endMs: true,
-      createdAt: true,
-    },
+async function evaluateFinalTranscript(input: FinalTranscriptRequest): Promise<{
+  reason: FinalSkipReason;
+  sourceUtteranceId?: string;
+  timeDiffMs?: number;
+} | null> {
+  if (!input.text.trim()) return { reason: "empty_text" };
+  if (input.blockedAtCapture) return { reason: "blocked_at_capture" };
+  if (input.aiPlaybackIdAtCapture) return { reason: "captured_during_ai_speech" };
+
+  const aiSpeechState = await getAiSpeechState(input.sessionId);
+  const overlapReason = getAiSpeechOverlapReason({
+    state: aiSpeechState,
+    transcriptStartedAt: parseDate(input.startedAt),
+    transcriptEndedAt: parseDate(input.endedAt ?? input.finalizedAt),
   });
+  if (overlapReason) return { reason: overlapReason };
 
-  if (canMergeWithLatestRemoteUtterance(latestUtterance, input.role, input.text)) {
-    const nextSource = appendTranscriptIdToSource(
-      latestUtterance.source,
-      input.transcriptId,
-    );
+  const crosstalkSource = await findRecentCrosstalkUtterance(input);
+  if (crosstalkSource) {
+    return {
+      reason: "crosstalk_duplicate",
+      sourceUtteranceId: crosstalkSource.id,
+      timeDiffMs: crosstalkSource.timeDiffMs,
+    };
+  }
 
-    return prisma.sessionUtterance.update({
-      where: {
-        id: latestUtterance.id,
-      },
+  return null;
+}
+
+async function createRealtimeUtterance(
+  input: FinalTranscriptRequest,
+  context: {
+    participantCode: string | null;
+    timing: { startMs: number; endMs: number };
+  },
+) {
+  try {
+    return await prisma.sessionUtterance.create({
       data: {
-        text: joinTranscriptText(latestUtterance.text, input.text),
-        source: nextSource,
-        sourceGroupId: input.sourceGroupId,
-        startMs: latestUtterance.startMs ?? input.timing.startMs,
-        endMs: input.timing.endMs ?? latestUtterance.endMs,
+        sessionId: input.sessionId,
+        participantCode: context.participantCode,
+        speaker: input.role,
+        text: input.text,
+        source: `remote_realtime:${input.streamId}:${input.transcriptId}`,
+        sourceGroupId: input.transcriptId,
         asrProvider: "openai-realtime",
-        asrModel: input.asrModel,
+        asrModel: input.model,
+        remoteStreamId: input.streamId,
+        remoteTranscriptId: input.transcriptId,
+        captureEpoch: input.captureEpoch,
+        capturedDuringAiSpeech:
+          input.blockedAtCapture || Boolean(input.aiPlaybackIdAtCapture),
+        aiPlaybackIdAtCapture: input.aiPlaybackIdAtCapture,
+        firstPartialAt: parseDate(input.firstPartialAt),
+        finalizedAt: parseDate(input.finalizedAt),
+        startMs: context.timing.startMs,
+        endMs: context.timing.endMs,
         analysisVersion: UTTERANCE_ANALYSIS_VERSION,
       },
     });
-  }
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      const existing = await findExistingRealtimeUtterance(input);
+      if (existing) return existing;
+    }
 
-  return prisma.sessionUtterance.create({
-    data: {
+    throw error;
+  }
+}
+
+async function findExistingRealtimeUtterance(input: FinalTranscriptRequest) {
+  return prisma.sessionUtterance.findFirst({
+    where: {
       sessionId: input.sessionId,
-      participantCode: input.participantCode,
       speaker: input.role,
-      text: input.text,
-      source: input.source,
-      sourceGroupId: input.sourceGroupId,
-      startMs: input.timing.startMs,
-      endMs: input.timing.endMs,
-      asrProvider: "openai-realtime",
-      asrModel: input.asrModel,
-      analysisVersion: UTTERANCE_ANALYSIS_VERSION,
+      remoteStreamId: input.streamId,
+      remoteTranscriptId: input.transcriptId,
     },
   });
 }
 
-type UtteranceTiming = {
-  startMs: number;
-  endMs: number;
-};
-
 function serializeUtterance(
-  utterance: Awaited<ReturnType<typeof appendOrCreateRemoteUtterance>>,
+  utterance: NonNullable<Awaited<ReturnType<typeof findExistingRealtimeUtterance>>>,
 ) {
   return {
     id: utterance.id,
@@ -275,106 +319,72 @@ function serializeUtterance(
     source_group_id: utterance.sourceGroupId,
     asr_provider: utterance.asrProvider,
     asr_model: utterance.asrModel,
+    remote_stream_id: utterance.remoteStreamId,
+    remote_transcript_id: utterance.remoteTranscriptId,
+    capture_epoch: utterance.captureEpoch,
+    captured_during_ai_speech: utterance.capturedDuringAiSpeech,
+    ai_playback_id_at_capture: utterance.aiPlaybackIdAtCapture,
+    first_partial_at: utterance.firstPartialAt?.toISOString() ?? null,
+    finalized_at: utterance.finalizedAt?.toISOString() ?? null,
     analysis_version: utterance.analysisVersion,
     created_at: utterance.createdAt.toISOString(),
     updated_at: utterance.updatedAt.toISOString(),
   };
 }
 
-function requiredString(value: unknown) {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function parseTranscriptStatus(value: string) {
-  return value === "partial" || value === "final" ? value : null;
-}
-
-function parseDate(value: string) {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function doesTranscriptOverlapAiSpeech(input: {
+function getAiSpeechOverlapReason(input: {
   state: Awaited<ReturnType<typeof getAiSpeechState>>;
-  startedAt: Date | null;
-  finalizedAt: Date | null;
-}) {
+  transcriptStartedAt: Date | null;
+  transcriptEndedAt: Date | null;
+}): "overlaps_ai_speech" | "echo_guard" | null {
   const state = input.state;
-  if (!state?.startedAt) return false;
+  if (!state?.startedAt) return null;
 
-  const releaseAfter = state.releaseAfter ?? state.endedAt ?? null;
-  if (!state.active && !releaseAfter) return false;
+  const transcriptStartMs =
+    input.transcriptStartedAt?.getTime() ?? input.transcriptEndedAt?.getTime();
+  const transcriptEndMs =
+    input.transcriptEndedAt?.getTime() ?? input.transcriptStartedAt?.getTime();
+  if (transcriptStartMs === undefined || transcriptEndMs === undefined) return null;
 
-  const transcriptStartMs = input.startedAt?.getTime() ?? input.finalizedAt?.getTime();
-  const transcriptEndMs = input.finalizedAt?.getTime() ?? transcriptStartMs;
-  if (transcriptStartMs === undefined || transcriptEndMs === undefined) return false;
+  const aiStartMs = state.startedAt.getTime() - AI_SPEECH_CLOCK_SKEW_TOLERANCE_MS;
+  const aiEndMs =
+    (state.endedAt?.getTime() ??
+      (state.active ? Date.now() : state.startedAt.getTime())) +
+    AI_SPEECH_CLOCK_SKEW_TOLERANCE_MS;
+  const releaseAfterMs = state.releaseAfter?.getTime() ?? null;
 
-  const aiStartMs = state.startedAt.getTime();
-  const aiEndMs = state.active
-    ? Date.now()
-    : releaseAfter?.getTime() ?? state.endedAt?.getTime() ?? aiStartMs;
-
-  return transcriptStartMs <= aiEndMs && transcriptEndMs >= aiStartMs;
-}
-
-function canMergeWithLatestRemoteUtterance(
-  latestUtterance: {
-    speaker: string;
-    text: string;
-    source: string | null;
-    createdAt: Date;
-  } | null,
-  role: "elder" | "caregiver",
-  text: string,
-) {
-  if (!latestUtterance) return false;
-  if (latestUtterance.speaker !== role) return false;
-  if (!latestUtterance.source?.startsWith("remote_realtime:")) return false;
-  if (Date.now() - latestUtterance.createdAt.getTime() > SAME_SPEAKER_MERGE_WINDOW_MS) {
-    return false;
+  if (transcriptStartMs < aiEndMs && transcriptEndMs > aiStartMs) {
+    return "overlaps_ai_speech";
   }
 
-  return (
-    joinTranscriptText(latestUtterance.text, text).length <=
-    SAME_SPEAKER_MERGE_MAX_TEXT_LENGTH
-  );
+  if (
+    state.endedAt &&
+    releaseAfterMs !== null &&
+    transcriptStartMs >=
+      state.endedAt.getTime() - AI_SPEECH_CLOCK_SKEW_TOLERANCE_MS &&
+    transcriptStartMs <= releaseAfterMs + AI_SPEECH_CLOCK_SKEW_TOLERANCE_MS
+  ) {
+    return "echo_guard";
+  }
+
+  return null;
 }
 
-function appendTranscriptIdToSource(source: string | null, transcriptId: string) {
-  if (!source) return `remote_realtime:${transcriptId}`;
-  if (source.includes(transcriptId)) return source;
-
-  return `${source},${transcriptId}`;
-}
-
-function joinTranscriptText(currentText: string, nextText: string) {
-  const current = currentText.trim();
-  const next = nextText.trim();
-
-  if (!current) return next;
-  if (!next) return current;
-
-  return `${current} ${next}`;
-}
-
-async function findRecentCrosstalkUtterance(input: {
-  sessionId: string;
-  role: "elder" | "caregiver";
-  text: string;
-}) {
+async function findRecentCrosstalkUtterance(input: FinalTranscriptRequest) {
   const normalizedText = normalizeTranscriptForCrosstalk(input.text);
 
   if (normalizedText.length < CROSSTALK_MIN_NORMALIZED_LENGTH) {
     return null;
   }
 
+  const transcriptEndedAt = parseDate(input.endedAt ?? input.finalizedAt) ?? new Date();
   const recentOppositeRoleUtterances = await prisma.sessionUtterance.findMany({
     where: {
       sessionId: input.sessionId,
       speaker: input.role === "elder" ? "caregiver" : "elder",
       createdAt: {
-        gte: new Date(Date.now() - CROSSTALK_SUPPRESSION_WINDOW_MS),
+        gte: new Date(transcriptEndedAt.getTime() - CROSSTALK_SUPPRESSION_WINDOW_MS),
+        lte: new Date(transcriptEndedAt.getTime() + CROSSTALK_SUPPRESSION_WINDOW_MS),
       },
     },
     orderBy: { createdAt: "desc" },
@@ -382,14 +392,20 @@ async function findRecentCrosstalkUtterance(input: {
     select: {
       id: true,
       text: true,
+      createdAt: true,
     },
   });
 
-  return (
+  const match =
     recentOppositeRoleUtterances.find((utterance) =>
       isLikelySameTranscript(normalizedText, utterance.text),
-    ) ?? null
-  );
+    ) ?? null;
+  if (!match) return null;
+
+  return {
+    id: match.id,
+    timeDiffMs: Math.abs(match.createdAt.getTime() - transcriptEndedAt.getTime()),
+  };
 }
 
 function isLikelySameTranscript(normalizedText: string, candidateText: string) {
@@ -411,4 +427,24 @@ function normalizeTranscriptForCrosstalk(value: string) {
     .normalize("NFKC")
     .toLowerCase()
     .replace(/[\s、。,.，．！？!?「」『』（）()[\]{}]/g, "");
+}
+
+function isUniqueConstraintError(error: unknown) {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
+  );
+}
+
+function requiredString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function optionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function parseDate(value: string | null | undefined) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }

@@ -7,31 +7,31 @@ datasource db {
 }
 
 model Session {
-  id                     String               @id @default(cuid())
-  participantCode        String?              @unique @map("participant_code")
-  condition              String?
-  startedAt              DateTime             @default(now()) @map("started_at")
-  dialogueStartedAt      DateTime?            @map("dialogue_started_at")
-  endedAt                DateTime?            @map("ended_at")
-  sessionAccessTokenHash String?              @unique @map("session_access_token_hash")
-  currentTopicId         String?              @map("current_topic_id")
-  currentTopicIndex      Int?                 @map("current_topic_index")
-  topicStartedAt         DateTime?            @map("topic_started_at")
-  conversationPhase      String?              @map("conversation_phase")
-  topicPausedMs          Int                  @default(0) @map("topic_paused_ms")
-  protocolVersion        String?              @map("protocol_version")
-  appVersion             String?              @map("app_version")
-  aiPolicyVersion        String?              @map("ai_policy_version")
-  finalMinutes           FinalMinute[]
-  aiInterventionLogs     AIInterventionLog[]
-  aiActionEvents         AIActionEvent[]
-  aiProcessingState      AIProcessingState?
-  aiSpeechState          AISpeechState?
-  preparedQuestions      PreparedQuestion[]
+  id                      String                   @id @default(cuid())
+  participantCode         String?                  @unique @map("participant_code")
+  condition               String?
+  startedAt               DateTime                 @default(now()) @map("started_at")
+  dialogueStartedAt       DateTime?                @map("dialogue_started_at")
+  endedAt                 DateTime?                @map("ended_at")
+  sessionAccessTokenHash  String?                  @unique @map("session_access_token_hash")
+  currentTopicId          String?                  @map("current_topic_id")
+  currentTopicIndex       Int?                     @map("current_topic_index")
+  topicStartedAt          DateTime?                @map("topic_started_at")
+  conversationPhase       String?                  @map("conversation_phase")
+  topicPausedMs           Int                      @default(0) @map("topic_paused_ms")
+  protocolVersion         String?                  @map("protocol_version")
+  appVersion              String?                  @map("app_version")
+  aiPolicyVersion         String?                  @map("ai_policy_version")
+  finalMinutes            FinalMinute[]
+  aiInterventionLogs      AIInterventionLog[]
+  aiActionEvents          AIActionEvent[]
+  aiProcessingState       AIProcessingState?
+  aiSpeechState           AISpeechState?
+  preparedQuestions       PreparedQuestion[]
   remoteMicActiveSessions RemoteMicActiveSession[]
-  subSlotStates          SlotSubState[]
-  slotStates             SlotState[]
-  utterances             SessionUtterance[]
+  subSlotStates           SlotSubState[]
+  slotStates              SlotState[]
+  utterances              SessionUtterance[]
 
   @@index([startedAt])
   @@index([dialogueStartedAt])
@@ -40,26 +40,36 @@ model Session {
 }
 
 model SessionUtterance {
-  id              String   @id @default(cuid())
-  participantCode String?  @map("participant_code")
-  sessionId       String   @map("session_id")
-  speaker         String
-  text            String
-  startMs         Int?     @map("start_ms")
-  endMs           Int?     @map("end_ms")
-  source          String?
-  sourceGroupId   String?  @map("source_group_id")
-  asrProvider     String?  @map("asr_provider")
-  asrModel        String?  @map("asr_model")
-  analysisVersion String?  @map("analysis_version")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
-  session         Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  id                     String    @id @default(cuid())
+  participantCode        String?   @map("participant_code")
+  sessionId              String    @map("session_id")
+  speaker                String
+  text                   String
+  startMs                Int?      @map("start_ms")
+  endMs                  Int?      @map("end_ms")
+  source                 String?
+  sourceGroupId          String?   @map("source_group_id")
+  asrProvider            String?   @map("asr_provider")
+  asrModel               String?   @map("asr_model")
+  remoteStreamId         String?   @map("remote_stream_id")
+  remoteTranscriptId     String?   @map("remote_transcript_id")
+  captureEpoch           Int?      @map("capture_epoch")
+  capturedDuringAiSpeech Boolean?  @map("captured_during_ai_speech")
+  aiPlaybackIdAtCapture  String?   @map("ai_playback_id_at_capture")
+  firstPartialAt         DateTime? @map("first_partial_at")
+  finalizedAt            DateTime? @map("finalized_at")
+  analysisVersion        String?   @map("analysis_version")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @default(now()) @updatedAt @map("updated_at")
+  session                Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
+  @@unique([sessionId, speaker, remoteStreamId, remoteTranscriptId])
   @@index([sessionId])
   @@index([participantCode])
   @@index([speaker])
   @@index([sourceGroupId])
+  @@index([remoteTranscriptId])
+  @@index([remoteStreamId])
   @@index([createdAt])
   @@index([sessionId, startMs])
   @@map("utterances")
@@ -229,19 +239,19 @@ model PreparedQuestion {
 }
 
 model AISpeechState {
-  id            String    @id @default(cuid())
-  participantCode String? @map("participant_code")
-  sessionId     String    @unique @map("session_id")
-  active        Boolean   @default(false)
-  playbackId    String?   @map("playback_id")
-  contentType   String?   @map("content_type")
-  revision      Int       @default(0)
-  startedAt     DateTime? @map("started_at")
-  expectedEndAt DateTime? @map("expected_end_at")
-  endedAt       DateTime? @map("ended_at")
-  releaseAfter  DateTime? @map("release_after")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
-  session       Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  id              String    @id @default(cuid())
+  participantCode String?   @map("participant_code")
+  sessionId       String    @unique @map("session_id")
+  active          Boolean   @default(false)
+  playbackId      String?   @map("playback_id")
+  contentType     String?   @map("content_type")
+  revision        Int       @default(0)
+  startedAt       DateTime? @map("started_at")
+  expectedEndAt   DateTime? @map("expected_end_at")
+  endedAt         DateTime? @map("ended_at")
+  releaseAfter    DateTime? @map("release_after")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  session         Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([participantCode])
   @@index([active])

@@ -33,9 +33,12 @@ export async function POST(request: Request) {
       expectedEndAt?: unknown;
       text?: unknown;
       topicId?: unknown;
+      requestedAt?: unknown;
+      mutePreparedAt?: unknown;
       playbackStatus?: unknown;
       playbackStartedAt?: unknown;
       playbackEndedAt?: unknown;
+      micsResumedAt?: unknown;
       speechEngine?: unknown;
       preparedAudioUsed?: unknown;
       audioGenerationDurationMs?: unknown;
@@ -78,12 +81,18 @@ export async function POST(request: Request) {
         playbackId,
         cancelled: action === "cancel",
       });
+
+      return NextResponse.json({ state: serializeState(state) });
+    }
+
+    if (action === "log") {
       await logPlaybackIfRequested({
         sessionId,
         playbackId,
         body,
-        contentType: contentType ?? state.contentType,
+        contentType,
       });
+      const state = await getAiSpeechState(sessionId);
 
       return NextResponse.json({ state: serializeState(state) });
     }
@@ -108,8 +117,11 @@ async function logPlaybackIfRequested(input: {
     text?: unknown;
     topicId?: unknown;
     playbackStatus?: unknown;
+    requestedAt?: unknown;
+    mutePreparedAt?: unknown;
     playbackStartedAt?: unknown;
     playbackEndedAt?: unknown;
+    micsResumedAt?: unknown;
     speechEngine?: unknown;
     preparedAudioUsed?: unknown;
     audioGenerationDurationMs?: unknown;
@@ -121,19 +133,35 @@ async function logPlaybackIfRequested(input: {
   const playbackStatus = requiredString(input.body?.playbackStatus);
   if (!text && !playbackStatus) return;
 
+  const existing = await prisma.aIInterventionLog.findFirst({
+    where: {
+      sessionId: input.sessionId,
+      type: "OTHER",
+      metadata: {
+        path: ["playbackId"],
+        equals: input.playbackId,
+      },
+    },
+    select: { id: true },
+  });
+  if (existing) return;
+
   const session = await prisma.session.findUnique({
     where: { id: input.sessionId },
     select: { participantCode: true },
   });
+  const requestedAt = parseDate(input.body?.requestedAt);
+  const playbackStartedAt = parseDate(input.body?.playbackStartedAt);
+  const playbackEndedAt = parseDate(input.body?.playbackEndedAt);
   await logAIIntervention({
     sessionId: input.sessionId,
     participantCode: session?.participantCode,
     type: "OTHER",
     content: text,
     topicId: optionalString(input.body?.topicId) ?? null,
-    requestedAt: parseDate(input.body?.playbackStartedAt),
-    generatedAt: parseDate(input.body?.playbackEndedAt) ?? new Date(),
-    displayedAt: parseDate(input.body?.playbackStartedAt),
+    requestedAt,
+    generatedAt: playbackEndedAt ?? new Date(),
+    displayedAt: playbackStartedAt,
     metadata: {
       kind: "speech_playback",
       playbackId: input.playbackId,
@@ -141,9 +169,12 @@ async function logPlaybackIfRequested(input: {
         input.contentType === "topic" || input.contentType === "question"
           ? input.contentType
           : null,
+      requestedAt: optionalString(input.body?.requestedAt),
+      mutePreparedAt: optionalString(input.body?.mutePreparedAt),
       playbackStatus: playbackStatus || "completed",
       playbackStartedAt: optionalString(input.body?.playbackStartedAt),
       playbackEndedAt: optionalString(input.body?.playbackEndedAt),
+      micsResumedAt: optionalString(input.body?.micsResumedAt),
       speechEngine:
         optionalString(input.body?.speechEngine) ?? "browser-speechSynthesis",
       preparedAudioUsed: Boolean(input.body?.preparedAudioUsed),

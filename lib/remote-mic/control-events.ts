@@ -1,0 +1,159 @@
+export type RemoteMicRole = "elder" | "caregiver";
+export type RemoteMicSpeechContentType = "topic" | "question";
+
+export const REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS = 1_500;
+export const REMOTE_MIC_CONTROL_ACK_RETRY_COUNT = 1;
+export const REMOTE_MIC_CONTROL_ACK_POLL_MS = 50;
+
+export type RemoteMicControlEvent =
+  | {
+      type: "speech.prepare";
+      sessionId: string;
+      playbackId: string;
+      contentType: RemoteMicSpeechContentType;
+      revision: number;
+      timestamp: string;
+    }
+  | {
+      type: "mic.suppressed";
+      sessionId: string;
+      playbackId: string;
+      role: RemoteMicRole;
+      trackLive: boolean;
+      revision: number;
+      timestamp: string;
+    }
+  | {
+      type: "speech.ended" | "speech.cancelled";
+      sessionId: string;
+      playbackId: string;
+      revision: number;
+      timestamp: string;
+      releaseAfter?: string | null;
+    }
+  | {
+      type: "mic.resumed";
+      sessionId: string;
+      playbackId: string;
+      role: RemoteMicRole;
+      trackLive: boolean;
+      revision: number;
+      timestamp: string;
+    }
+  | {
+      type: "transcript.flush_request";
+      sessionId: string;
+      requestId: string;
+      reason: "question_generation";
+      timestamp: string;
+    }
+  | {
+      type: "transcript.flush_ack";
+      sessionId: string;
+      requestId: string;
+      role: RemoteMicRole;
+      outcome: "complete" | "failed";
+      pendingCount: number;
+      failedTranscriptKeys: string[];
+      timestamp: string;
+    };
+
+export type LiveTranscriptEvent = {
+  type: "transcript.partial" | "transcript.final";
+  sessionId: string;
+  role: RemoteMicRole;
+  streamId: string;
+  transcriptId: string;
+  revision: number;
+  captureEpoch: number;
+  text: string;
+  startedAt?: string;
+  firstPartialAt?: string;
+  finalizedAt?: string;
+  eventId?: string;
+  model?: string;
+};
+
+export type RemoteMicSpeechEvent =
+  | {
+      type: "mic.speech_started";
+      sessionId: string;
+      role: RemoteMicRole;
+      streamId: string;
+      transcriptId: string;
+      captureEpoch: number;
+      timestamp: string;
+    }
+  | {
+      type: "mic.speech_finalized";
+      sessionId: string;
+      role: RemoteMicRole;
+      streamId: string;
+      transcriptId: string;
+      captureEpoch: number;
+      timestamp: string;
+    };
+
+export type TranscriptDiscardedEvent = {
+  type: "transcript.discarded";
+  sessionId: string;
+  role: RemoteMicRole;
+  streamId: string;
+  transcriptId: string;
+  reason: string;
+};
+
+export type RemoteMicConnectionEvent =
+  | {
+      type: "mic.reconnecting";
+      sessionId: string;
+      role: RemoteMicRole;
+      previousStreamId: string;
+      attempt: number;
+      reason: string;
+    }
+  | {
+      type: "mic.reconnected";
+      sessionId: string;
+      role: RemoteMicRole;
+      streamId: string;
+      micPhase: "listening" | "suppressed";
+    }
+  | {
+      type: "mic.reconnect_failed";
+      sessionId: string;
+      role: RemoteMicRole;
+      attempts: number;
+      reason: string;
+    };
+
+export type RemoteMicRealtimeEvent =
+  | RemoteMicControlEvent
+  | LiveTranscriptEvent
+  | RemoteMicSpeechEvent
+  | TranscriptDiscardedEvent
+  | RemoteMicConnectionEvent;
+
+export function createLiveTranscriptKey(event: {
+  sessionId: string;
+  role: RemoteMicRole;
+  streamId: string;
+  transcriptId: string;
+}) {
+  return [
+    event.sessionId,
+    event.role,
+    event.streamId,
+    event.transcriptId,
+  ].join(":");
+}
+
+export function isRemoteMicRole(value: unknown): value is RemoteMicRole {
+  return value === "elder" || value === "caregiver";
+}
+
+export function isRemoteMicSpeechContentType(
+  value: unknown,
+): value is RemoteMicSpeechContentType {
+  return value === "topic" || value === "question";
+}

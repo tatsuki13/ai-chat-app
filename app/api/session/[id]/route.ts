@@ -50,6 +50,15 @@ export async function GET(_request: Request, context: RouteContext) {
           endMs: true,
           source: true,
           sourceGroupId: true,
+          asrProvider: true,
+          asrModel: true,
+          remoteStreamId: true,
+          remoteTranscriptId: true,
+          captureEpoch: true,
+          capturedDuringAiSpeech: true,
+          aiPlaybackIdAtCapture: true,
+          firstPartialAt: true,
+          finalizedAt: true,
           analysisVersion: true,
           createdAt: true,
           updatedAt: true,
@@ -76,6 +85,15 @@ export async function GET(_request: Request, context: RouteContext) {
         end_ms: utterance.endMs,
         source: utterance.source,
         source_group_id: utterance.sourceGroupId,
+        asr_provider: utterance.asrProvider,
+        asr_model: utterance.asrModel,
+        remote_stream_id: utterance.remoteStreamId,
+        remote_transcript_id: utterance.remoteTranscriptId,
+        capture_epoch: utterance.captureEpoch,
+        captured_during_ai_speech: utterance.capturedDuringAiSpeech,
+        ai_playback_id_at_capture: utterance.aiPlaybackIdAtCapture,
+        first_partial_at: utterance.firstPartialAt?.toISOString() ?? null,
+        finalized_at: utterance.finalizedAt?.toISOString() ?? null,
         analysis_version: utterance.analysisVersion,
         created_at: utterance.createdAt.toISOString(),
         updated_at: utterance.updatedAt.toISOString(),
@@ -114,6 +132,12 @@ export async function PATCH(request: Request, context: RouteContext) {
 
       if (!existing) {
         return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+      if (existing.endedAt) {
+        return NextResponse.json(
+          { error: "Session is not active" },
+          { status: 409 },
+        );
       }
 
       const session = existing.dialogueStartedAt

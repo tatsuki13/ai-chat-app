@@ -3,6 +3,7 @@ import {
   getAiSpeechState,
   subscribeAiSpeechEvents,
 } from "../../../../../lib/ai/speech-state";
+import { getActiveFixedRemoteMicSession } from "../../../../../lib/remote-mic/fixed-session";
 
 export const runtime = "nodejs";
 
@@ -23,15 +24,31 @@ export async function GET(request: Request) {
         );
       };
       const state = await getAiSpeechState(sessionId);
+      const activeMicState = getActiveFixedRemoteMicSession();
       send({
         type: "ai_speech_snapshot",
         sessionId,
+        sessionEnded:
+          !activeMicState ||
+          activeMicState.sessionId !== sessionId ||
+          Boolean(activeMicState.endedAt),
         active: state?.active ?? false,
+        activePlaybackId: state?.playbackId ?? null,
         playbackId: state?.playbackId ?? null,
         contentType: state?.contentType ?? null,
         revision: state?.revision ?? 0,
         startedAt: state?.startedAt?.toISOString() ?? null,
         releaseAfter: state?.releaseAfter?.toISOString() ?? null,
+        speechPhase:
+          state?.active
+            ? "playing"
+            : state?.releaseAfter && Date.now() <= state.releaseAfter.getTime()
+              ? "echo-guard"
+              : "idle",
+        roles:
+          activeMicState?.sessionId === sessionId
+            ? activeMicState.roles
+            : null,
         timestamp: new Date().toISOString(),
       });
 

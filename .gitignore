@@ -9,5 +9,3 @@ repomix-output.xml
 *.stt
 *.meta
 logs/*.json
-local-asr/models/
-local-asr/*.zip
