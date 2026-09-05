@@ -29,7 +29,26 @@ export async function POST(request: Request) {
     );
   }
 
-  const active = await getFixedRemoteMicActiveSession();
+  let active:
+    | {
+        sessionId: string;
+        participantCode: string | null;
+        endedAt: string | null;
+        dialogueStartedAt: string | null;
+      }
+    | null = null;
+
+  try {
+    active = await getFixedRemoteMicActiveSession();
+  } catch (error) {
+    console.warn("[remote-mic realtime active session db lookup failed]", {
+      sessionId,
+      role,
+      error,
+    });
+    active = getActiveFixedRemoteMicSession();
+  }
+
   if (!active || active.sessionId !== sessionId || active.endedAt) {
     return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
   }

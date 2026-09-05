@@ -23,7 +23,15 @@ export async function GET(request: Request) {
           encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
         );
       };
-      const state = await getAiSpeechState(sessionId);
+      let state: Awaited<ReturnType<typeof getAiSpeechState>> = null;
+      try {
+        state = await getAiSpeechState(sessionId);
+      } catch (error) {
+        console.warn("[ai speech state stream snapshot db lookup failed]", {
+          sessionId,
+          error,
+        });
+      }
       const activeMicState = getActiveFixedRemoteMicSession();
       send({
         type: "ai_speech_snapshot",

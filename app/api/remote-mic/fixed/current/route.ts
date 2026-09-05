@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  getActiveFixedRemoteMicSession,
   setActiveFixedRemoteMicSession,
   updateFixedRemoteMicRole,
 } from "../../../../../lib/remote-mic/fixed-session";
@@ -16,16 +17,33 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "role is required" }, { status: 400 });
   }
 
-  const active = await getFixedRemoteMicActiveSession();
+  let cachedActive = getActiveFixedRemoteMicSession();
 
-  if (!active || active.endedAt) {
-    return NextResponse.json({
-      active: null,
+  try {
+    const active = await getFixedRemoteMicActiveSession();
+
+    if (!active || active.endedAt) {
+      return NextResponse.json({
+        active: null,
+        role,
+      });
+    }
+
+    cachedActive = setActiveFixedRemoteMicSession(active);
+  } catch (error) {
+    console.warn("[remote-mic fixed current db lookup failed]", {
       role,
+      error,
     });
+
+    if (!cachedActive || cachedActive.endedAt) {
+      return NextResponse.json({
+        active: null,
+        role,
+      });
+    }
   }
 
-  const cachedActive = setActiveFixedRemoteMicSession(active);
   const nextActive =
     updateFixedRemoteMicRole(role, { connectedAt: Date.now() }) ?? cachedActive;
 
