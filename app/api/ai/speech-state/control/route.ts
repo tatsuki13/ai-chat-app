@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import {
   isRemoteMicRole,
-  isRemoteMicSpeechContentType,
   type RemoteMicRealtimeEvent,
 } from "../../../../../lib/remote-mic/control-events";
 import { publishRemoteMicRealtimeEvent } from "../../../../../lib/ai/speech-state";
@@ -33,7 +32,6 @@ function parseRemoteMicRealtimeEvent(
 ): RemoteMicRealtimeEvent | null {
   const type = body?.type;
   const sessionId = requiredString(body?.sessionId);
-  const playbackId = requiredString(body?.playbackId);
   const revision =
     typeof body?.revision === "number" && Number.isFinite(body.revision)
       ? body.revision
@@ -41,90 +39,6 @@ function parseRemoteMicRealtimeEvent(
   const timestamp = optionalString(body?.timestamp) ?? new Date().toISOString();
 
   if (!sessionId) return null;
-
-  if (type === "speech.prepare") {
-    if (!playbackId || revision === null) return null;
-    const contentType = body.contentType;
-    if (!isRemoteMicSpeechContentType(contentType)) return null;
-    return { type, sessionId, playbackId, contentType, revision, timestamp };
-  }
-
-  if (type === "speech.ended" || type === "speech.cancelled") {
-    if (!playbackId || revision === null) return null;
-    return {
-      type,
-      sessionId,
-      playbackId,
-      revision,
-      timestamp,
-      releaseAfter: optionalString(body.releaseAfter) ?? null,
-    };
-  }
-
-  if (type === "mic.suppressed" || type === "mic.resumed") {
-    if (!playbackId || revision === null) return null;
-    const role = body.role;
-    if (!isRemoteMicRole(role) || typeof body.trackLive !== "boolean") {
-      return null;
-    }
-    return {
-      type,
-      sessionId,
-      playbackId,
-      role,
-      trackLive: body.trackLive,
-      revision,
-      timestamp,
-    };
-  }
-
-  if (type === "transcript.flush_request") {
-    const requestId = requiredString(body.requestId);
-    const reason = body.reason;
-    if (!requestId || reason !== "question_generation") return null;
-
-    return {
-      type,
-      sessionId,
-      requestId,
-      reason,
-      timestamp,
-    };
-  }
-
-  if (type === "transcript.flush_ack") {
-    const requestId = requiredString(body.requestId);
-    const role = body.role;
-    const outcome = body.outcome;
-    const pendingCount =
-      typeof body.pendingCount === "number" && Number.isFinite(body.pendingCount)
-        ? body.pendingCount
-        : null;
-    const failedTranscriptKeys = Array.isArray(body.failedTranscriptKeys)
-      ? body.failedTranscriptKeys.filter(
-          (key): key is string => typeof key === "string" && key.trim().length > 0,
-        )
-      : [];
-    if (
-      !requestId ||
-      !isRemoteMicRole(role) ||
-      (outcome !== "complete" && outcome !== "failed") ||
-      pendingCount === null
-    ) {
-      return null;
-    }
-
-    return {
-      type,
-      sessionId,
-      requestId,
-      role,
-      outcome,
-      pendingCount,
-      failedTranscriptKeys,
-      timestamp,
-    };
-  }
 
   if (type === "transcript.partial" || type === "transcript.final") {
     if (revision === null) return null;

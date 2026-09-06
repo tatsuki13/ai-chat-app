@@ -26,7 +26,6 @@ import {
 import {
   createLiveTranscriptKey,
   REMOTE_MIC_CONTROL_ACK_POLL_MS,
-  REMOTE_MIC_CONTROL_ACK_RETRY_COUNT,
   REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS,
   type LiveTranscriptEvent,
   type RemoteMicRealtimeEvent,
@@ -57,14 +56,6 @@ type BrowserSpeechResult = {
   endedAt: string;
   status: Extract<PlaybackStatus, "completed" | "failed" | "cancelled">;
   errorCode: string | null;
-};
-type TranscriptFlushAck = Extract<
-  RemoteMicRealtimeEvent,
-  { type: "transcript.flush_ack" }
->;
-type TranscriptFlushControl = {
-  requestId: string;
-  acks: Partial<Record<SpeakerRole, TranscriptFlushAck>>;
 };
 type ActivePlaybackControl = {
   playbackId: string;
@@ -476,7 +467,6 @@ function SessionPageClient() {
     contentType: "topic" | "question";
   } | null>(null);
   const activePlaybackControlRef = useRef<ActivePlaybackControl | null>(null);
-  const transcriptFlushControlRef = useRef<TranscriptFlushControl | null>(null);
   const nextQuestionInFlightRef = useRef<Promise<void> | null>(null);
   const participantCode = session?.participant_code || "未設定";
   const hasParticipantCode = Boolean(session?.participant_code?.trim());
@@ -1562,31 +1552,7 @@ function SessionPageClient() {
       return;
     }
 
-    if (event.type === "transcript.flush_ack") {
-      applyTranscriptFlushAck(event);
-      return;
-    }
-
-    if (event.type !== "mic.suppressed" && event.type !== "mic.resumed") return;
-    if (event.sessionId !== sessionRef.current?.id) return;
-
-    updatePlaybackControlValue((current) => {
-      if (!current || current.playbackId !== event.playbackId) return current;
-      if (current.revision !== null && current.revision !== event.revision) {
-        return current;
-      }
-      if (!event.trackLive) return current;
-
-      if (event.type === "mic.suppressed") {
-        const suppressedRoles = new Set(current.suppressedRoles);
-        suppressedRoles.add(event.role);
-        return { ...current, suppressedRoles };
-      }
-
-      const resumedRoles = new Set(current.resumedRoles);
-      resumedRoles.add(event.role);
-      return { ...current, resumedRoles };
-    });
+    return;
   }
 
   function applyLiveTranscriptEvent(event: LiveTranscriptEvent) {
@@ -1684,15 +1650,6 @@ function SessionPageClient() {
       },
     }));
   }
-
-  function applyTranscriptFlushAck(event: TranscriptFlushAck) {
-    if (event.sessionId !== sessionRef.current?.id) return;
-    const current = transcriptFlushControlRef.current;
-    if (!current || current.requestId !== event.requestId) return;
-
-    current.acks[event.role] = event;
-  }
-
   function setPlaybackPhase(
     playbackId: string,
     phase: SpeechPhase,
@@ -1708,44 +1665,6 @@ function SessionPageClient() {
         : current,
     );
   }
-
-  async function waitForRemoteMicSuppressedAcks(input: {
-    sessionId: string;
-    playbackId: string;
-    contentType: "topic" | "question";
-    revision: number;
-  }) {
-    for (let attempt = 0; attempt <= REMOTE_MIC_CONTROL_ACK_RETRY_COUNT; attempt += 1) {
-      const ok = await waitForPlaybackRoles(input.playbackId, "suppressedRoles");
-      if (ok) return true;
-
-      const missingRoles = getMissingPlaybackRoles(
-        input.playbackId,
-        "suppressedRoles",
-      );
-      console.warn("[remote-mic mute ack timeout]", {
-        sessionId: input.sessionId,
-        playbackId: input.playbackId,
-        revision: input.revision,
-        attempt,
-        missingRoles,
-      });
-
-      if (attempt < REMOTE_MIC_CONTROL_ACK_RETRY_COUNT) {
-        await publishRemoteMicControlEvent({
-          type: "speech.prepare",
-          sessionId: input.sessionId,
-          playbackId: input.playbackId,
-          contentType: input.contentType,
-          revision: input.revision,
-          timestamp: new Date().toISOString(),
-        });
-      }
-    }
-
-    return false;
-  }
-
   async function waitForHumanSpeechToSettle() {
     const deadline = Date.now() + REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS;
 
@@ -1773,6 +1692,12 @@ function SessionPageClient() {
     return false;
   }
 
+  function getActiveHumanSpeechRoles(): SpeakerRole[] {
+    return (["elder", "caregiver"] as const).filter(
+      (role) => humanSpeechActiveRef.current[role] !== null,
+    );
+  }
+
   async function preparePersistedConversationForQuestionGeneration() {
     const currentSession = sessionRef.current;
     if (!currentSession) throw new Error("session_missing");
@@ -1787,122 +1712,17 @@ function SessionPageClient() {
     }
 
     await commitLocalPendingUtterances();
-    const flush = await flushRemoteMicFinals(currentSession.id);
     const detail = await refreshPersistedConversation(currentSession.id);
     const latestUtterance = detail.utterances.at(-1) ?? null;
 
     console.info("[ai question generation input ready]", {
       sessionId: currentSession.id,
-      flushRequestId: flush.requestId,
-      flushRequestedAt: flush.requestedAt,
-      elderPendingCount: flush.acks.elder?.pendingCount ?? null,
-      caregiverPendingCount: flush.acks.caregiver?.pendingCount ?? null,
-      flushCompletedAt: flush.completedAt,
       conversationRevision: latestUtterance?.id ?? null,
       utteranceCount: detail.utterance_count,
     });
 
     return detail;
   }
-
-  async function flushRemoteMicFinals(sessionId: string) {
-    const requestId = crypto.randomUUID();
-    const requestedAt = new Date().toISOString();
-    transcriptFlushControlRef.current = { requestId, acks: {} };
-    setStatusText("発話の保存確認中");
-
-    for (let attempt = 0; attempt <= REMOTE_MIC_FINAL_FLUSH_RETRY_COUNT; attempt += 1) {
-      await publishRemoteMicControlEvent({
-        type: "transcript.flush_request",
-        sessionId,
-        requestId,
-        reason: "question_generation",
-        timestamp: new Date().toISOString(),
-      });
-
-      const complete = await waitForTranscriptFlushAcks(requestId);
-      if (complete) {
-        const completedAt = new Date().toISOString();
-        const acks = transcriptFlushControlRef.current?.acks ?? {};
-        transcriptFlushControlRef.current = null;
-        return {
-          requestId,
-          requestedAt,
-          completedAt,
-          acks,
-        };
-      }
-
-      console.warn("[remote-mic transcript flush ack timeout]", {
-        sessionId,
-        requestId,
-        attempt,
-        missingRoles: getMissingTranscriptFlushRoles(requestId),
-      });
-    }
-
-    const acks = transcriptFlushControlRef.current?.acks ?? {};
-    const missingRoles = getMissingTranscriptFlushRoles(requestId);
-    transcriptFlushControlRef.current = null;
-    setStatusText("保存エラー");
-    showTemporaryErrorPrompt({
-      title: "スマートフォン発話の保存確認に失敗しました",
-      body: createTranscriptFlushErrorMessage(missingRoles, acks),
-      tone: "error",
-    });
-    throw new Error("remote_mic_final_flush_timeout");
-  }
-
-  async function waitForTranscriptFlushAcks(requestId: string) {
-    const deadline = Date.now() + REMOTE_MIC_FINAL_FLUSH_ACK_TIMEOUT_MS;
-
-    while (Date.now() <= deadline) {
-      const current = transcriptFlushControlRef.current;
-      const elderAck = current?.requestId === requestId ? current.acks.elder : null;
-      const caregiverAck =
-        current?.requestId === requestId ? current.acks.caregiver : null;
-      if (
-        elderAck?.outcome === "complete" &&
-        caregiverAck?.outcome === "complete" &&
-        elderAck.pendingCount === 0 &&
-        caregiverAck.pendingCount === 0
-      ) {
-        return true;
-      }
-
-      await sleep(REMOTE_MIC_CONTROL_ACK_POLL_MS);
-    }
-
-    return false;
-  }
-
-  function getMissingTranscriptFlushRoles(requestId: string): SpeakerRole[] {
-    const current = transcriptFlushControlRef.current;
-    if (!current || current.requestId !== requestId) return ["elder", "caregiver"];
-
-    return (["elder", "caregiver"] as const).filter((role) => {
-      const ack = current.acks[role];
-      return (
-        !ack ||
-        ack.outcome !== "complete" ||
-        ack.pendingCount !== 0
-      );
-    });
-  }
-
-  function createTranscriptFlushErrorMessage(
-    missingRoles: SpeakerRole[],
-    acks: Partial<Record<SpeakerRole, TranscriptFlushAck>>,
-  ) {
-    const roleLabels = missingRoles.map((role) => {
-      const ack = acks[role];
-      const pending = ack ? ` pending=${ack.pendingCount}` : " ACKなし";
-      return `${speakerLabel(role)}(${pending})`;
-    });
-
-    return `${roleLabels.join("、") || "スマートフォン"} の保存確認が未完了です。通信状態を確認して再試行してください。`;
-  }
-
   async function refreshPersistedConversation(sessionId: string) {
     const detail = await fetchSessionDetail(sessionId);
     if (sessionRef.current?.id !== sessionId) {
@@ -1919,62 +1739,6 @@ function SessionPageClient() {
 
     return { ...detail, utterances: persistedUtterances };
   }
-
-  async function waitForRemoteMicResumedAcks(
-    playbackId: string,
-    revision: number,
-  ) {
-    updatePlaybackControlValue((current) =>
-      current?.playbackId === playbackId
-        ? { ...current, revision, phase: "resuming", resumedRoles: new Set() }
-        : current,
-    );
-
-    return waitForPlaybackRoles(playbackId, "resumedRoles");
-  }
-
-  async function waitForPlaybackRoles(
-    playbackId: string,
-    field: "suppressedRoles" | "resumedRoles",
-  ) {
-    const deadline = Date.now() + REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS;
-
-    while (Date.now() <= deadline) {
-      const current = activePlaybackControlRef.current;
-      if (
-        current?.playbackId === playbackId &&
-        current[field].has("elder") &&
-        current[field].has("caregiver")
-      ) {
-        return true;
-      }
-
-      await sleep(REMOTE_MIC_CONTROL_ACK_POLL_MS);
-    }
-
-    return false;
-  }
-
-  function getMissingPlaybackRoles(
-    playbackId: string,
-    field: "suppressedRoles" | "resumedRoles",
-  ): SpeakerRole[] {
-    const current = activePlaybackControlRef.current;
-    if (!current || current.playbackId !== playbackId) {
-      return ["elder", "caregiver"];
-    }
-
-    return (["elder", "caregiver"] as const).filter(
-      (role) => !current[field].has(role),
-    );
-  }
-
-  function getActiveHumanSpeechRoles(): SpeakerRole[] {
-    return (["elder", "caregiver"] as const).filter(
-      (role) => humanSpeechActiveRef.current[role] !== null,
-    );
-  }
-
   function showRemoteMicControlError(
     title: string,
     missingRoles: SpeakerRole[],
@@ -2056,25 +1820,6 @@ function SessionPageClient() {
         throw new Error("remote_mic_prepare_revision_missing");
       }
       setPlaybackPhase(playbackId, "preparing-mute", prepareRevision);
-
-      const muted = await waitForRemoteMicSuppressedAcks({
-        sessionId: currentSession.id,
-        playbackId,
-        contentType: input.contentType,
-        revision: prepareRevision,
-      });
-      if (!muted) {
-        const missingRoles = getMissingPlaybackRoles(playbackId, "suppressedRoles");
-        playbackStatus = "not_started";
-        playbackErrorCode = `mic_suppression_timeout:${missingRoles.join(",")}`;
-        showRemoteMicControlError(
-          "スマートフォンマイクのミュート確認に失敗しました",
-          missingRoles,
-        );
-        setPlaybackPhase(playbackId, "error", prepareRevision);
-        return;
-      }
-
       mutePreparedAt = new Date().toISOString();
       setPlaybackPhase(playbackId, "ready-to-play", prepareRevision);
       if (BROWSER_SPEECH_ENABLED) {
@@ -2143,43 +1888,6 @@ function SessionPageClient() {
             preparedAudioUsed: input.preparedAudioUsed,
           });
           aiSpeechPlaybackRef.current = null;
-          return;
-        }
-
-        const resumed = await waitForRemoteMicResumedAcks(
-          playbackId,
-          releaseRevision,
-        );
-        if (!resumed) {
-          const missingRoles = getMissingPlaybackRoles(playbackId, "resumedRoles");
-          playbackErrorCode = playbackErrorCode ?? `mic_resume_timeout:${missingRoles.join(",")}`;
-          console.warn("[remote-mic resume ack timeout]", {
-            sessionId: currentSession.id,
-            playbackId,
-            revision: releaseRevision,
-            missingRoles,
-          });
-          setPlaybackPhase(playbackId, "error", releaseRevision);
-          showRemoteMicControlError(
-            "スマートフォンマイクの復帰確認に失敗しました",
-            missingRoles,
-          );
-          aiSpeechPlaybackRef.current = null;
-          await logAiSpeechPlayback({
-            sessionId: currentSession.id,
-            playbackId,
-            contentType: input.contentType,
-            text,
-            topicId: input.topicId,
-            requestedAt,
-            mutePreparedAt,
-            playbackStartedAt,
-            playbackEndedAt,
-            micsResumedAt,
-            playbackStatus,
-            playbackErrorCode,
-            preparedAudioUsed: input.preparedAudioUsed,
-          });
           return;
         }
         micsResumedAt = new Date().toISOString();
@@ -4997,10 +4705,6 @@ async function updateAiSpeechState(input: {
   playbackErrorCode?: string | null;
 }): Promise<AiSpeechStateResponse> {
   return postJson<AiSpeechStateResponse>("/api/ai/speech-state", input);
-}
-
-async function publishRemoteMicControlEvent(event: RemoteMicRealtimeEvent) {
-  await postJson("/api/ai/speech-state/control", event);
 }
 
 function getAiSpeechStateRevision(response: AiSpeechStateResponse | null) {

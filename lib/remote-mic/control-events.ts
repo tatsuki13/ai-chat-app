@@ -5,59 +5,6 @@ export const REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS = 1_500;
 export const REMOTE_MIC_CONTROL_ACK_RETRY_COUNT = 1;
 export const REMOTE_MIC_CONTROL_ACK_POLL_MS = 50;
 
-export type RemoteMicControlEvent =
-  | {
-      type: "speech.prepare";
-      sessionId: string;
-      playbackId: string;
-      contentType: RemoteMicSpeechContentType;
-      revision: number;
-      timestamp: string;
-    }
-  | {
-      type: "mic.suppressed";
-      sessionId: string;
-      playbackId: string;
-      role: RemoteMicRole;
-      trackLive: boolean;
-      revision: number;
-      timestamp: string;
-    }
-  | {
-      type: "speech.ended" | "speech.cancelled";
-      sessionId: string;
-      playbackId: string;
-      revision: number;
-      timestamp: string;
-      releaseAfter?: string | null;
-    }
-  | {
-      type: "mic.resumed";
-      sessionId: string;
-      playbackId: string;
-      role: RemoteMicRole;
-      trackLive: boolean;
-      revision: number;
-      timestamp: string;
-    }
-  | {
-      type: "transcript.flush_request";
-      sessionId: string;
-      requestId: string;
-      reason: "question_generation";
-      timestamp: string;
-    }
-  | {
-      type: "transcript.flush_ack";
-      sessionId: string;
-      requestId: string;
-      role: RemoteMicRole;
-      outcome: "complete" | "failed";
-      pendingCount: number;
-      failedTranscriptKeys: string[];
-      timestamp: string;
-    };
-
 export type LiveTranscriptEvent = {
   type: "transcript.partial" | "transcript.final";
   sessionId: string;
@@ -128,7 +75,6 @@ export type RemoteMicConnectionEvent =
     };
 
 export type RemoteMicRealtimeEvent =
-  | RemoteMicControlEvent
   | LiveTranscriptEvent
   | RemoteMicSpeechEvent
   | TranscriptDiscardedEvent

@@ -1,18 +1,14 @@
 import { prisma } from "../prisma";
 import type {
-  RemoteMicControlEvent,
   RemoteMicRealtimeEvent,
   RemoteMicSpeechContentType,
 } from "../remote-mic/control-events";
 import { getRemoteMicRuntimeStore } from "../remote-mic/runtime-store";
 
 export type AiSpeechContentType = RemoteMicSpeechContentType;
-export type AiSpeechEventType = RemoteMicControlEvent["type"];
 
 export const AI_SPEECH_RELEASE_DELAY_MS = 500;
 export const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45_000;
-
-export type AiSpeechEvent = RemoteMicControlEvent;
 
 export async function startAiSpeech(input: {
   sessionId: string;
@@ -56,15 +52,6 @@ export async function startAiSpeech(input: {
     },
   });
 
-  publishRemoteMicControlEvent({
-    type: "speech.prepare",
-    sessionId: input.sessionId,
-    playbackId: input.playbackId,
-    contentType: input.contentType,
-    revision: state.revision,
-    timestamp: startedAt.toISOString(),
-  });
-
   return state;
 }
 
@@ -104,15 +91,6 @@ export async function endAiSpeech(input: {
     },
   });
 
-  publishRemoteMicControlEvent({
-    type: input.cancelled ? "speech.cancelled" : "speech.ended",
-    sessionId: input.sessionId,
-    playbackId: input.playbackId,
-    revision: state.revision,
-    timestamp: endedAt.toISOString(),
-    releaseAfter: releaseAfter.toISOString(),
-  });
-
   return state;
 }
 
@@ -146,10 +124,6 @@ export function subscribeAiSpeechEvents(
   return () => {
     store.aiSpeechSubscribers.delete(listener as (event: unknown) => void);
   };
-}
-
-export function publishRemoteMicControlEvent(event: RemoteMicControlEvent) {
-  publishRemoteMicRealtimeEvent(event);
 }
 
 export function publishRemoteMicRealtimeEvent(event: RemoteMicRealtimeEvent) {
