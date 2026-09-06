@@ -50,6 +50,13 @@ type PendingFinalTranscript = {
   aiPlaybackIdAtCapture?: string | null;
   saveAttempts: number;
 };
+type AiSpeechStateResponse = {
+  state: {
+    active?: boolean | null;
+    playbackId?: string | null;
+    revision?: number | null;
+  } | null;
+};
 
 const CLIENT_VERSION = "remote-mic-client-2026-09-04-openai-realtime";
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
@@ -131,6 +138,7 @@ export default function RemoteMicClient(props: {
   const micPhaseRef = useRef<MicPhase>("disconnected");
   const aiSpeechReleaseTimerRef = useRef<number | null>(null);
   const latestAiSpeechRevisionRef = useRef(0);
+  const activeAiSpeechPlaybackIdRef = useRef<string | null>(null);
 
   const roleLabel = useMemo(() => {
     if (remoteMic?.role === "elder") return "本人用マイク";
@@ -309,25 +317,46 @@ export default function RemoteMicClient(props: {
     latestAiSpeechRevisionRef.current = event.revision;
 
     if (event.active) {
-      suppressCaptureForAiSpeech();
+      void suppressCaptureForAiSpeech(event);
       return;
     }
 
-    releaseCaptureAfterAiSpeech(event.releaseAfter ?? null, event.revision);
+    releaseCaptureAfterAiSpeech(event);
   }
 
-  function suppressCaptureForAiSpeech() {
+  async function suppressCaptureForAiSpeech(
+    event: Extract<
+      RemoteMicRealtimeEvent,
+      { type: "ai_speech_snapshot" | "ai_speech_started" | "ai_speech_ended" }
+    >,
+  ) {
+    if (!event.playbackId) return;
     clearAiSpeechReleaseTimer();
+    activeAiSpeechPlaybackIdRef.current = event.playbackId;
     captureBlockedRef.current = true;
     discardLiveTranscripts("ai_speech_started");
     clearTranscriptState();
 
-    setCaptureGain(0);
+    const gainSuppressed = await setCaptureGain(0);
+    if (!gainSuppressed) {
+      console.warn("[remote-mic ai speech suppress failed]", {
+        sessionId: event.sessionId,
+        role: fixedRoleRef.current,
+        playbackId: event.playbackId,
+        revision: event.revision,
+      });
+      return;
+    }
     setAiSpeechLabel("AI読み上げ中・認識一時停止");
     if (micStateRef.current === "streaming" || micStateRef.current === "requesting") {
       setMicPhaseValue("suppressed");
       setServerLabel("AI音声中のため一時ミュート");
     }
+    await publishMicCaptureStateAck({
+      playbackId: event.playbackId,
+      revision: event.revision,
+      captureState: "suppressed",
+    });
 
     const current = remoteMicRef.current;
     if (current) {
@@ -343,10 +372,21 @@ export default function RemoteMicClient(props: {
   }
 
   function releaseCaptureAfterAiSpeech(
-    releaseAfter: string | null,
-    revision: number,
+    event: Extract<
+      RemoteMicRealtimeEvent,
+      { type: "ai_speech_snapshot" | "ai_speech_started" | "ai_speech_ended" }
+    >,
   ) {
+    const playbackId = event.playbackId ?? activeAiSpeechPlaybackIdRef.current;
+    if (!playbackId) return;
     clearAiSpeechReleaseTimer();
+    if (
+      activeAiSpeechPlaybackIdRef.current &&
+      activeAiSpeechPlaybackIdRef.current !== playbackId
+    ) {
+      return;
+    }
+    const releaseAfter = event.releaseAfter ?? null;
     const releaseAt = releaseAfter ? new Date(releaseAfter).getTime() : Date.now();
     const delayMs = Number.isFinite(releaseAt)
       ? Math.max(0, releaseAt - Date.now())
@@ -358,19 +398,59 @@ export default function RemoteMicClient(props: {
     }
 
     aiSpeechReleaseTimerRef.current = window.setTimeout(() => {
+      void (async () => {
       aiSpeechReleaseTimerRef.current = null;
-      if (revision < latestAiSpeechRevisionRef.current) return;
+      if (event.revision < latestAiSpeechRevisionRef.current) return;
+      if (
+        activeAiSpeechPlaybackIdRef.current &&
+        activeAiSpeechPlaybackIdRef.current !== playbackId
+      ) {
+        return;
+      }
       if (manuallyStoppedRef.current || fullyStoppedRef.current || sessionEndedRef.current) {
+        return;
+      }
+      const currentState = await fetchAiSpeechState(event.sessionId).catch((error) => {
+        console.warn("[remote-mic ai speech state refresh failed]", {
+          sessionId: event.sessionId,
+          role: fixedRoleRef.current,
+          playbackId,
+          revision: event.revision,
+          error,
+        });
+        return null;
+      });
+      if (
+        currentState?.state?.active ||
+        currentState?.state?.playbackId !== playbackId ||
+        (typeof currentState?.state?.revision === "number" &&
+          currentState.state.revision !== event.revision)
+      ) {
         return;
       }
 
       captureBlockedRef.current = false;
-      const gainRestored = setCaptureGain(1);
+      activeAiSpeechPlaybackIdRef.current = null;
+      const gainRestored = await setCaptureGain(1);
+      if (!gainRestored) {
+        console.warn("[remote-mic ai speech resume failed]", {
+          sessionId: event.sessionId,
+          role: fixedRoleRef.current,
+          playbackId,
+          revision: event.revision,
+        });
+        return;
+      }
       setAiSpeechLabel("通常受付");
       if (gainRestored && micStateRef.current === "streaming") {
         setMicPhaseValue("listening");
         setServerLabel("文字起こし中");
       }
+      await publishMicCaptureStateAck({
+        playbackId,
+        revision: event.revision,
+        captureState: "resumed",
+      });
 
       const current = remoteMicRef.current;
       if (current) {
@@ -383,10 +463,11 @@ export default function RemoteMicClient(props: {
           });
         });
       }
+      })();
     }, delayMs);
   }
 
-  function setCaptureGain(value: 0 | 1) {
+  async function setCaptureGain(value: 0 | 1) {
     const context = audioContextRef.current;
     const gain = captureGainNodeRef.current;
     if (!context || !gain) {
@@ -396,6 +477,14 @@ export default function RemoteMicClient(props: {
         setError("マイクの音声経路を制御できませんでした。マイクを停止して再開してください。");
       }
       return false;
+    }
+    if (context.state === "closed") {
+      return false;
+    }
+    if (context.state === "suspended") {
+      await context.resume().catch(() => undefined);
+      const resumedState = audioContextRef.current?.state;
+      if (resumedState !== "running") return false;
     }
 
     gain.gain.setValueAtTime(value, context.currentTime);
@@ -459,7 +548,7 @@ export default function RemoteMicClient(props: {
       });
       const phase: "listening" | "suppressed" =
         captureBlockedRef.current ? "suppressed" : "listening";
-      setCaptureGain(phase === "suppressed" ? 0 : 1);
+      await setCaptureGain(phase === "suppressed" ? 0 : 1);
       recordingActiveRef.current = true;
       reconnectAttemptRef.current = 0;
       setMicState("streaming");
@@ -667,7 +756,7 @@ export default function RemoteMicClient(props: {
     realtimeModelRef.current = realtimeSession.model;
     const stream = await getOrCreateMediaStream(options.reuseLiveStream);
     const outgoingStream = await getOrCreateOutgoingAudioStream(stream);
-    setCaptureGain(captureBlockedRef.current || options.reconnecting ? 0 : 1);
+    await setCaptureGain(captureBlockedRef.current || options.reconnecting ? 0 : 1);
     const connectionStreamId = `${targetRemoteMic.role}:${Date.now()}:${crypto.randomUUID()}`;
     const connectionGeneration = connectionGenerationRef.current + 1;
     connectionGenerationRef.current = connectionGeneration;
@@ -1344,6 +1433,25 @@ export default function RemoteMicClient(props: {
     );
   }
 
+  async function publishMicCaptureStateAck(input: {
+    playbackId: string;
+    revision: number;
+    captureState: "suppressed" | "resumed";
+  }) {
+    const current = remoteMicRef.current;
+    if (!current) return;
+
+    await publishRemoteMicRealtimeEvent({
+      type: "mic.capture_state",
+      sessionId: current.sessionId,
+      role: current.role,
+      playbackId: input.playbackId,
+      revision: input.revision,
+      captureState: input.captureState,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   async function publishRemoteMicRealtimeEvent(event: RemoteMicRealtimeEvent) {
     await fetch("/api/ai/speech-state/control", {
       method: "POST",
@@ -1606,6 +1714,19 @@ async function fetchCurrentSession(role: RemoteMicRole, signal?: AbortSignal) {
     } | null;
     role: RemoteMicRole;
   }>;
+}
+
+async function fetchAiSpeechState(sessionId: string) {
+  const response = await fetch(
+    `/api/ai/speech-state?sessionId=${encodeURIComponent(sessionId)}`,
+    { cache: "no-store" },
+  );
+
+  if (!response.ok) {
+    throw new Error(`AI speech state failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<AiSpeechStateResponse>;
 }
 
 async function createRealtimeSession(remoteMic: RemoteMicSession) {

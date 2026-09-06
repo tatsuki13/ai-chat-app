@@ -61,16 +61,17 @@ The app does not enable OpenAI audio responses for the smartphone mic path. AI v
 Before PC speech playback:
 
 1. PC waits for any active human speech to finalize.
-2. PC publishes `speech.prepare`.
-3. Elder and caregiver phones disable their audio track and ACK `mic.suppressed`.
-4. PC starts browser speech only after both ACKs arrive.
-5. `SpeechSynthesisUtterance.onstart` records actual playback start.
-6. `onend` or `onerror` records actual playback end.
-7. PC publishes `speech.ended` or `speech.cancelled`.
-8. Phones wait for the echo guard, re-enable live audio tracks, and ACK `mic.resumed`.
-9. The topic timer resumes only after both resume ACKs arrive.
+2. PC stores AI speech state with `action = start`.
+3. The server publishes `ai_speech_started` with `playbackId` and `revision`.
+4. Connected elder and caregiver phones set the existing capture `GainNode` to `0` and ACK `mic.capture_state` with `captureState = suppressed`.
+5. PC starts browser speech only after the target connected phones ACK suppression.
+6. `SpeechSynthesisUtterance.onstart` records actual playback start.
+7. `onend` or `onerror` records actual playback end.
+8. PC stores AI speech state with `action = end` or `action = cancel`.
+9. The server publishes `ai_speech_ended` with a new `revision` and `releaseAfter`.
+10. Phones wait until `releaseAfter`, confirm the current DB AI speech state is inactive, set the same `GainNode` back to `1`, and ACK `mic.capture_state` with `captureState = resumed`.
 
-AI speech temporary mute does not close the DataChannel, RTCPeerConnection, MediaStreamTrack, MediaStream, or OpenAI Realtime connection.
+AI speech temporary mute does not close the DataChannel, RTCPeerConnection, MediaStreamTrack, MediaStream, or OpenAI Realtime connection. It also does not use `MediaStreamTrack.enabled` for AI playback suppression.
 
 ## Reconnection And Stream Identity
 
@@ -86,10 +87,8 @@ Before generating or displaying a prepared question, the PC:
 
 1. Waits up to 5 seconds for active human speech to finalize.
 2. Commits PC-local pending utterances.
-3. Sends `transcript.flush_request` to both smartphones.
-4. Requires elder and caregiver `transcript.flush_ack` with `outcome = complete` and `pendingCount = 0`.
-5. Refetches the session detail from the database.
-6. Rejects stale prepared questions whose `basedOnUtteranceId` or slot revision no longer matches.
+3. Refetches the session detail from the database.
+4. Rejects stale prepared questions whose `basedOnUtteranceId` or slot revision no longer matches.
 
 The same persisted-conversation preparation is used before slot updates, topic transitions, and final minutes generation.
 
@@ -119,8 +118,8 @@ It also adds indexes and a unique key on `session_id, speaker, remote_stream_id,
 8. Speak short acknowledgements such as "はい", "うん", and "ん".
 9. Speak slowly and with a correction mid-utterance.
 10. Overlap speech briefly and confirm crosstalk suppression only affects DB final saving.
-11. Press question generation immediately after speech and confirm final flush occurs before generation.
-12. Confirm AI playback mutes both phones before speech starts.
+11. Press question generation immediately after speech and confirm only DB-persisted finals are used.
+12. Confirm AI playback sets connected phones to `GainNode` value `0` before speech starts.
 13. Speak during AI playback and confirm it is not saved.
 14. Speak immediately after playback and confirm recognition resumes without a new Realtime connection in the normal case.
 15. Temporarily disconnect one phone network and confirm reconnect status.

@@ -67,6 +67,16 @@ export type AiSpeechStateEvent = {
   timestamp: string;
 };
 
+export type RemoteMicCaptureStateAckEvent = {
+  type: "mic.capture_state";
+  sessionId: string;
+  role: RemoteMicRole;
+  playbackId: string;
+  revision: number;
+  captureState: "suppressed" | "resumed";
+  timestamp: string;
+};
+
 export type RemoteMicConnectionEvent =
   | {
       type: "mic.reconnecting";
@@ -96,6 +106,7 @@ export type RemoteMicRealtimeEvent =
   | RemoteMicSpeechEvent
   | TranscriptDiscardedEvent
   | AiSpeechStateEvent
+  | RemoteMicCaptureStateAckEvent
   | RemoteMicConnectionEvent;
 
 export function createLiveTranscriptKey(event: {

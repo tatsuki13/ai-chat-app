@@ -26,6 +26,7 @@ import {
 import {
   createLiveTranscriptKey,
   REMOTE_MIC_CONTROL_ACK_POLL_MS,
+  REMOTE_MIC_CONTROL_ACK_RETRY_COUNT,
   REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS,
   type LiveTranscriptEvent,
   type RemoteMicRealtimeEvent,
@@ -446,6 +447,10 @@ function SessionPageClient() {
     elder: null,
     caregiver: null,
   });
+  const remoteMicStatusesRef = useRef<Record<SpeakerRole, RemoteMicRoleStatus>>({
+    elder: { status: "disconnected" },
+    caregiver: { status: "disconnected" },
+  });
   const sessionSyncInFlightRef = useRef(false);
   const pendingCommitPromiseRef = useRef<Promise<void> | null>(null);
   const speakerRef = useRef<Speaker>("elder");
@@ -657,6 +662,10 @@ function SessionPageClient() {
   useEffect(() => {
     humanSpeechActiveRef.current = humanSpeechActive;
   }, [humanSpeechActive]);
+
+  useEffect(() => {
+    remoteMicStatusesRef.current = remoteMicStatuses;
+  }, [remoteMicStatuses]);
 
   useEffect(() => {
     if (!session?.id || session.ended_at) return;
@@ -1543,6 +1552,11 @@ function SessionPageClient() {
       return;
     }
 
+    if (event.type === "mic.capture_state") {
+      applyRemoteMicCaptureStateAck(event);
+      return;
+    }
+
     if (
       event.type === "mic.reconnecting" ||
       event.type === "mic.reconnected" ||
@@ -1622,6 +1636,36 @@ function SessionPageClient() {
     );
   }
 
+  function applyRemoteMicCaptureStateAck(
+    event: Extract<RemoteMicRealtimeEvent, { type: "mic.capture_state" }>,
+  ) {
+    if (event.sessionId !== sessionRef.current?.id) return;
+
+    updatePlaybackControlValue((current) => {
+      if (
+        !current ||
+        current.playbackId !== event.playbackId ||
+        current.revision !== event.revision
+      ) {
+        return current;
+      }
+
+      const suppressedRoles = new Set(current.suppressedRoles);
+      const resumedRoles = new Set(current.resumedRoles);
+      if (event.captureState === "suppressed") {
+        suppressedRoles.add(event.role);
+      } else {
+        resumedRoles.add(event.role);
+      }
+
+      return {
+        ...current,
+        suppressedRoles,
+        resumedRoles,
+      };
+    });
+  }
+
   function applyRemoteMicConnectionEvent(
     event: Extract<
       RemoteMicRealtimeEvent,
@@ -1696,6 +1740,61 @@ function SessionPageClient() {
     return (["elder", "caregiver"] as const).filter(
       (role) => humanSpeechActiveRef.current[role] !== null,
     );
+  }
+
+  function getConnectedRemoteMicRoles(): SpeakerRole[] {
+    return (["elder", "caregiver"] as const).filter(
+      (role) => remoteMicStatusesRef.current[role]?.status === "connected",
+    );
+  }
+
+  async function waitForRemoteMicCaptureAcks(input: {
+    playbackId: string;
+    revision: number;
+    captureState: "suppressed" | "resumed";
+    targetRoles: SpeakerRole[];
+  }) {
+    if (input.targetRoles.length === 0) return true;
+
+    const getAckedRoles = () => {
+      const current = activePlaybackControlRef.current;
+      if (
+        !current ||
+        current.playbackId !== input.playbackId ||
+        current.revision !== input.revision
+      ) {
+        return new Set<SpeakerRole>();
+      }
+
+      return input.captureState === "suppressed"
+        ? current.suppressedRoles
+        : current.resumedRoles;
+    };
+
+    for (let attempt = 0; attempt <= REMOTE_MIC_CONTROL_ACK_RETRY_COUNT; attempt += 1) {
+      const deadline = Date.now() + REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS;
+      while (Date.now() <= deadline) {
+        const ackedRoles = getAckedRoles();
+        if (input.targetRoles.every((role) => ackedRoles.has(role))) {
+          return true;
+        }
+
+        await sleep(REMOTE_MIC_CONTROL_ACK_POLL_MS);
+      }
+
+      const ackedRoles = getAckedRoles();
+      const missingRoles = input.targetRoles.filter((role) => !ackedRoles.has(role));
+      console.warn("[remote-mic capture state ack timeout]", {
+        playbackId: input.playbackId,
+        revision: input.revision,
+        captureState: input.captureState,
+        attempt,
+        ackedRoles: Array.from(ackedRoles),
+        missingRoles,
+      });
+    }
+
+    return false;
   }
 
   async function preparePersistedConversationForQuestionGeneration() {
@@ -1781,6 +1880,7 @@ function SessionPageClient() {
     let playbackErrorCode: string | null = null;
     let releaseRevision: number | null = null;
     let speechStateStarted = false;
+    let ackTargetRoles: SpeakerRole[] = [];
     aiSpeechPlaybackRef.current = {
       sessionId: currentSession.id,
       playbackId,
@@ -1820,6 +1920,23 @@ function SessionPageClient() {
         throw new Error("remote_mic_prepare_revision_missing");
       }
       setPlaybackPhase(playbackId, "preparing-mute", prepareRevision);
+      ackTargetRoles = getConnectedRemoteMicRoles();
+      const suppressed = await waitForRemoteMicCaptureAcks({
+        playbackId,
+        revision: prepareRevision,
+        captureState: "suppressed",
+        targetRoles: ackTargetRoles,
+      });
+      if (!suppressed) {
+        playbackStatus = "not_started";
+        playbackErrorCode = "remote_mic_suppressed_ack_timeout";
+        showRemoteMicControlError(
+          "スマートフォンマイクの一時停止を確認できませんでした",
+          ackTargetRoles,
+        );
+        setPlaybackPhase(playbackId, "error");
+        return;
+      }
       mutePreparedAt = new Date().toISOString();
       setPlaybackPhase(playbackId, "ready-to-play", prepareRevision);
       if (BROWSER_SPEECH_ENABLED) {
@@ -1890,7 +2007,21 @@ function SessionPageClient() {
           aiSpeechPlaybackRef.current = null;
           return;
         }
-        micsResumedAt = new Date().toISOString();
+        const resumed = await waitForRemoteMicCaptureAcks({
+          playbackId,
+          revision: releaseRevision,
+          captureState: "resumed",
+          targetRoles: ackTargetRoles,
+        });
+        if (!resumed) {
+          playbackErrorCode = playbackErrorCode ?? "remote_mic_resumed_ack_timeout";
+          showRemoteMicControlError(
+            "スマートフォンマイクの復帰を確認できませんでした",
+            ackTargetRoles,
+          );
+        } else {
+          micsResumedAt = new Date().toISOString();
+        }
 
         await logAiSpeechPlayback({
           sessionId: currentSession.id,
