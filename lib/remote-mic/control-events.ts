@@ -50,6 +50,23 @@ export type TranscriptDiscardedEvent = {
   reason: string;
 };
 
+export type AiSpeechStateEvent = {
+  type: "ai_speech_snapshot" | "ai_speech_started" | "ai_speech_ended";
+  sessionId: string;
+  active: boolean;
+  playbackId: string | null;
+  activePlaybackId?: string | null;
+  contentType: RemoteMicSpeechContentType | null;
+  revision: number;
+  startedAt?: string | null;
+  expectedEndAt?: string | null;
+  endedAt?: string | null;
+  releaseAfter?: string | null;
+  speechPhase?: "idle" | "playing" | "echo-guard";
+  sessionEnded?: boolean;
+  timestamp: string;
+};
+
 export type RemoteMicConnectionEvent =
   | {
       type: "mic.reconnecting";
@@ -78,6 +95,7 @@ export type RemoteMicRealtimeEvent =
   | LiveTranscriptEvent
   | RemoteMicSpeechEvent
   | TranscriptDiscardedEvent
+  | AiSpeechStateEvent
   | RemoteMicConnectionEvent;
 
 export function createLiveTranscriptKey(event: {

@@ -129,6 +129,8 @@ export default function RemoteMicClient(props: {
   const peerDisconnectedTimerRef = useRef<number | null>(null);
   const connectionGenerationRef = useRef(0);
   const micPhaseRef = useRef<MicPhase>("disconnected");
+  const aiSpeechReleaseTimerRef = useRef<number | null>(null);
+  const latestAiSpeechRevisionRef = useRef(0);
 
   const roleLabel = useMemo(() => {
     if (remoteMic?.role === "elder") return "本人用マイク";
@@ -238,6 +240,29 @@ export default function RemoteMicClient(props: {
     };
   }, [fixedRole, remoteMic, micState]);
 
+  useEffect(() => {
+    if (!remoteMic?.sessionId) return;
+
+    const source = new EventSource(
+      `/api/ai/speech-state/stream?sessionId=${encodeURIComponent(remoteMic.sessionId)}`,
+    );
+    source.onmessage = (event) => {
+      try {
+        handleAiSpeechStateEvent(JSON.parse(event.data) as RemoteMicRealtimeEvent);
+      } catch {}
+    };
+    source.onerror = () => {
+      console.warn("[remote-mic ai speech stream disconnected]", {
+        sessionId: remoteMic.sessionId,
+        role: remoteMic.role,
+      });
+    };
+
+    return () => {
+      source.close();
+    };
+  }, [remoteMic?.sessionId, remoteMic?.role]);
+
   function setMicPhaseValue(nextPhase: MicPhase) {
     micPhaseRef.current = nextPhase;
     setMicPhase(nextPhase);
@@ -254,8 +279,111 @@ export default function RemoteMicClient(props: {
     }
   }
 
+  function clearAiSpeechReleaseTimer() {
+    if (aiSpeechReleaseTimerRef.current !== null) {
+      window.clearTimeout(aiSpeechReleaseTimerRef.current);
+      aiSpeechReleaseTimerRef.current = null;
+    }
+  }
+
   function isAiSpeechBlockingCapture() {
     return captureBlockedRef.current;
+  }
+
+  function handleAiSpeechStateEvent(event: RemoteMicRealtimeEvent) {
+    if (
+      event.type !== "ai_speech_snapshot" &&
+      event.type !== "ai_speech_started" &&
+      event.type !== "ai_speech_ended"
+    ) {
+      return;
+    }
+
+    const current = remoteMicRef.current;
+    if (!current || event.sessionId !== current.sessionId || event.sessionEnded) {
+      return;
+    }
+    if (event.revision < latestAiSpeechRevisionRef.current) {
+      return;
+    }
+    latestAiSpeechRevisionRef.current = event.revision;
+
+    if (event.active) {
+      suppressCaptureForAiSpeech();
+      return;
+    }
+
+    releaseCaptureAfterAiSpeech(event.releaseAfter ?? null, event.revision);
+  }
+
+  function suppressCaptureForAiSpeech() {
+    clearAiSpeechReleaseTimer();
+    captureBlockedRef.current = true;
+    discardLiveTranscripts("ai_speech_started");
+    clearTranscriptState();
+
+    setCaptureGain(0);
+    setAiSpeechLabel("AI読み上げ中・認識一時停止");
+    if (micStateRef.current === "streaming" || micStateRef.current === "requesting") {
+      setMicPhaseValue("suppressed");
+      setServerLabel("AI音声中のため一時ミュート");
+    }
+
+    const current = remoteMicRef.current;
+    if (current) {
+      void setFixedMicMuted(true, current).catch((error) => {
+        console.warn("[remote-mic fixed mute notification failed]", {
+          sessionId: current.sessionId,
+          role: current.role,
+          muted: true,
+          error,
+        });
+      });
+    }
+  }
+
+  function releaseCaptureAfterAiSpeech(
+    releaseAfter: string | null,
+    revision: number,
+  ) {
+    clearAiSpeechReleaseTimer();
+    const releaseAt = releaseAfter ? new Date(releaseAfter).getTime() : Date.now();
+    const delayMs = Number.isFinite(releaseAt)
+      ? Math.max(0, releaseAt - Date.now())
+      : 0;
+
+    if (delayMs > 0 && micStateRef.current === "streaming") {
+      setMicPhaseValue("resuming");
+      setAiSpeechLabel("残響待機中");
+    }
+
+    aiSpeechReleaseTimerRef.current = window.setTimeout(() => {
+      aiSpeechReleaseTimerRef.current = null;
+      if (revision < latestAiSpeechRevisionRef.current) return;
+      if (manuallyStoppedRef.current || fullyStoppedRef.current || sessionEndedRef.current) {
+        return;
+      }
+
+      captureBlockedRef.current = false;
+      const gainRestored = setCaptureGain(1);
+      setAiSpeechLabel("通常受付");
+      if (gainRestored && micStateRef.current === "streaming") {
+        setMicPhaseValue("listening");
+        setServerLabel("文字起こし中");
+      }
+
+      const current = remoteMicRef.current;
+      if (current) {
+        void setFixedMicMuted(false, current).catch((error) => {
+          console.warn("[remote-mic fixed mute notification failed]", {
+            sessionId: current.sessionId,
+            role: current.role,
+            muted: false,
+            error,
+          });
+        });
+      }
+    }, delayMs);
   }
 
   function setCaptureGain(value: 0 | 1) {
@@ -329,9 +457,9 @@ export default function RemoteMicClient(props: {
         reconnecting: true,
         reuseLiveStream: true,
       });
-      setCaptureGain(1);
       const phase: "listening" | "suppressed" =
-        Date.now() >= 0 ? "listening" : "suppressed";
+        captureBlockedRef.current ? "suppressed" : "listening";
+      setCaptureGain(phase === "suppressed" ? 0 : 1);
       recordingActiveRef.current = true;
       reconnectAttemptRef.current = 0;
       setMicState("streaming");
@@ -761,8 +889,8 @@ export default function RemoteMicClient(props: {
         );
       }
 
-      await setFixedMicMuted(false, targetRemoteMic);
-      unmuted = true;
+      await setFixedMicMuted(captureBlockedRef.current, targetRemoteMic);
+      unmuted = !captureBlockedRef.current;
       await openRealtimeConnection(targetRemoteMic, {
         reconnecting: false,
         reuseLiveStream: false,
@@ -772,7 +900,11 @@ export default function RemoteMicClient(props: {
       reconnectAttemptRef.current = 0;
       setPermissionLabel("許可済み");
       setMicState("streaming");
-      setServerLabel("文字起こし中");
+      setServerLabel(
+        captureBlockedRef.current
+          ? "AI音声中のため一時ミュート"
+          : "文字起こし中",
+      );
       setMicPhaseValue(captureBlockedRef.current ? "suppressed" : "listening");
     } catch (startError) {
       if (isPermissionError(startError)) {
@@ -1153,6 +1285,7 @@ export default function RemoteMicClient(props: {
   async function stop(notifyServer = true) {
     manuallyStoppedRef.current = true;
     fullyStoppedRef.current = true;
+    clearAiSpeechReleaseTimer();
     captureBlockedRef.current = false;
     await stopRealtimeConnection();
     setConnectionLabel("未接続");

@@ -52,6 +52,22 @@ export async function startAiSpeech(input: {
     },
   });
 
+  publishRemoteMicRealtimeEvent({
+    type: "ai_speech_started",
+    sessionId: input.sessionId,
+    active: true,
+    playbackId: state.playbackId,
+    activePlaybackId: state.playbackId,
+    contentType: toAiSpeechContentType(state.contentType),
+    revision: state.revision,
+    startedAt: state.startedAt?.toISOString() ?? null,
+    expectedEndAt: state.expectedEndAt?.toISOString() ?? null,
+    endedAt: null,
+    releaseAfter: null,
+    speechPhase: "playing",
+    timestamp: new Date().toISOString(),
+  });
+
   return state;
 }
 
@@ -89,6 +105,22 @@ export async function endAiSpeech(input: {
       endedAt,
       releaseAfter,
     },
+  });
+
+  publishRemoteMicRealtimeEvent({
+    type: "ai_speech_ended",
+    sessionId: input.sessionId,
+    active: false,
+    playbackId: state.playbackId,
+    activePlaybackId: null,
+    contentType: toAiSpeechContentType(state.contentType),
+    revision: state.revision,
+    startedAt: state.startedAt?.toISOString() ?? null,
+    expectedEndAt: state.expectedEndAt?.toISOString() ?? null,
+    endedAt: state.endedAt?.toISOString() ?? null,
+    releaseAfter: state.releaseAfter?.toISOString() ?? null,
+    speechPhase: "echo-guard",
+    timestamp: new Date().toISOString(),
   });
 
   return state;
@@ -133,4 +165,8 @@ export function publishRemoteMicRealtimeEvent(event: RemoteMicRealtimeEvent) {
       listener(event);
     } catch {}
   }
+}
+
+function toAiSpeechContentType(value: string | null | undefined) {
+  return value === "topic" || value === "question" ? value : null;
 }
