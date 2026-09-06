@@ -25,7 +25,7 @@ type ReconnectReason =
   | "data_channel_closed"
   | "data_channel_error"
   | "track_ended"
-  | "ai_speech_restore_failed";
+  | "audio_graph_restore_failed";
 type RemoteMicSession = {
   sessionId: string;
   role: RemoteMicRole;
@@ -97,7 +97,12 @@ export default function RemoteMicClient(props: {
   const [error, setError] = useState("");
   const [level, setLevel] = useState(0);
 
-  const streamRef = useRef<MediaStream | null>(null);
+  const originalMicStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const captureGainNodeRef = useRef<GainNode | null>(null);
+  const destinationNodeRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const outgoingTrackRef = useRef<MediaStreamTrack | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
   const levelStopRef = useRef<(() => void) | null>(null);
@@ -342,7 +347,7 @@ export default function RemoteMicClient(props: {
 
     if (shouldSuppress) {
       captureBlockedRef.current = true;
-      muteLocalAudioTracks();
+      muteOutgoingAudio();
       setMicPhaseValue("suppressed");
       setAiSpeechLabel("AI音声中のため一時ミュート");
     }
@@ -365,6 +370,11 @@ export default function RemoteMicClient(props: {
   }
 
   function pauseCaptureForAiSpeech(playbackId: string, revision: number) {
+    if (aiSpeechReleaseTimerRef.current !== null) {
+      window.clearTimeout(aiSpeechReleaseTimerRef.current);
+      aiSpeechReleaseTimerRef.current = null;
+    }
+
     if (
       aiSpeechStateRef.current.active &&
       aiSpeechStateRef.current.playbackId &&
@@ -385,10 +395,17 @@ export default function RemoteMicClient(props: {
       releaseUntil: 0,
     };
     setAiSpeechLabel("AI音声中のため一時ミュート");
-    muteLocalAudioTracks();
-    void publishMicControlAck("mic.suppressed", playbackId, revision, areAudioTracksSuppressed());
+    const suppressed = muteOutgoingAudio();
+    void publishMicControlAck(
+      "mic.suppressed",
+      playbackId,
+      revision,
+      suppressed && areAudioTracksSuppressed(),
+    );
     void setFixedMicMuted(true).catch(() => undefined);
-    setMicPhaseValue("suppressed");
+    if (suppressed) {
+      setMicPhaseValue("suppressed");
+    }
 
     if (aiSpeechSafetyTimerRef.current !== null) {
       window.clearTimeout(aiSpeechSafetyTimerRef.current);
@@ -407,6 +424,7 @@ export default function RemoteMicClient(props: {
       aiSpeechSafetyTimerRef.current = null;
     }
 
+    const playbackId = aiSpeechStateRef.current.playbackId;
     const delayMs = Math.max(0, releaseUntil - Date.now());
     aiSpeechStateRef.current = {
       ...aiSpeechStateRef.current,
@@ -414,9 +432,22 @@ export default function RemoteMicClient(props: {
       revision,
       releaseUntil,
     };
-    aiSpeechReleaseTimerRef.current = window.setTimeout(() => {
+    aiSpeechReleaseTimerRef.current = window.setTimeout(async () => {
       aiSpeechReleaseTimerRef.current = null;
-      const playbackId = aiSpeechStateRef.current.playbackId;
+      if (
+        aiSpeechStateRef.current.playbackId !== playbackId ||
+        aiSpeechStateRef.current.revision !== revision
+      ) {
+        return;
+      }
+
+      const released = await confirmAiSpeechReleased(playbackId, revision);
+      if (!released) {
+        captureBlockedRef.current = true;
+        setMicPhaseValue("suppressed");
+        return;
+      }
+
       aiSpeechStateRef.current = {
         active: false,
         playbackId: null,
@@ -438,7 +469,7 @@ export default function RemoteMicClient(props: {
         return;
       }
 
-      if (restoreLocalAudioCapture()) {
+      if (restoreOutgoingAudio()) {
         captureEpochRef.current += 1;
         captureBlockedRef.current = false;
         setMicPhaseValue("listening");
@@ -454,8 +485,42 @@ export default function RemoteMicClient(props: {
       if (playbackId) {
         void publishMicControlAck("mic.resumed", playbackId, revision, false);
       }
-      void reconnectRealtime("ai_speech_restore_failed");
+      void reconnectRealtime("audio_graph_restore_failed");
     }, delayMs);
+  }
+
+  async function confirmAiSpeechReleased(
+    playbackId: string | null,
+    revision: number,
+  ) {
+    const current = remoteMicRef.current;
+    if (!playbackId || !current) return false;
+
+    try {
+      const response = await fetch(
+        `/api/ai/speech-state?sessionId=${encodeURIComponent(current.sessionId)}`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) return true;
+      const data = (await response.json()) as {
+        state?: {
+          active?: boolean;
+          playbackId?: string | null;
+          revision?: number | null;
+        } | null;
+      };
+      const state = data.state ?? null;
+      if (!state) return true;
+
+      return (
+        state.active === false &&
+        state.playbackId === playbackId &&
+        (state.revision ?? 0) >= revision
+      );
+    } catch (error) {
+      console.warn("[remote-mic ai speech release confirmation failed]", error);
+      return true;
+    }
   }
 
   function isAiSpeechBlockingCapture() {
@@ -463,31 +528,35 @@ export default function RemoteMicClient(props: {
     return captureBlockedRef.current || state.active || Date.now() <= state.releaseUntil;
   }
 
-  function muteLocalAudioTracks() {
-    for (const track of streamRef.current?.getAudioTracks() ?? []) {
-      track.enabled = false;
-    }
+  function muteOutgoingAudio() {
+    return setCaptureGain(0);
   }
 
   function areAudioTracksSuppressed() {
-    const audioTracks = streamRef.current?.getAudioTracks() ?? [];
+    const gain = captureGainNodeRef.current;
+    const audioTracks = originalMicStreamRef.current?.getAudioTracks() ?? [];
+    const outgoingTrack = outgoingTrackRef.current;
 
     return (
+      Boolean(gain) &&
       audioTracks.length > 0 &&
-      audioTracks.every(
-        (track) => track.readyState === "live" && track.enabled === false,
-      )
+      audioTracks.every((track) => track.readyState === "live") &&
+      outgoingTrack?.readyState === "live" &&
+      (gain?.gain.value ?? 1) <= 0.0001
     );
   }
 
-  function restoreLocalAudioCapture() {
-    const stream = streamRef.current;
+  function restoreOutgoingAudio() {
+    const stream = originalMicStreamRef.current;
     const audioTracks = stream?.getAudioTracks() ?? [];
     const peerConnection = peerConnectionRef.current;
     const dataChannel = dataChannelRef.current;
+    const gain = captureGainNodeRef.current;
+    const outgoingTrack = outgoingTrackRef.current;
 
     if (!stream || audioTracks.length === 0) return false;
     if (audioTracks.some((track) => track.readyState !== "live")) return false;
+    if (!gain || !outgoingTrack || outgoingTrack.readyState !== "live") return false;
     if (
       !peerConnection ||
       peerConnection.connectionState === "failed" ||
@@ -497,10 +566,24 @@ export default function RemoteMicClient(props: {
     }
     if (!dataChannel || dataChannel.readyState === "closed") return false;
 
-    for (const track of audioTracks) {
-      track.enabled = true;
+    setCaptureGain(1);
+
+    return true;
+  }
+
+  function setCaptureGain(value: 0 | 1) {
+    const context = audioContextRef.current;
+    const gain = captureGainNodeRef.current;
+    if (!context || !gain) {
+      if (recordingActiveRef.current || startInFlightRef.current) {
+        setMicPhaseValue("error");
+        setConnectionLabel("音声経路エラー");
+        setError("マイクの音声経路を制御できませんでした。マイクを停止して再開してください。");
+      }
+      return false;
     }
 
+    gain.gain.setValueAtTime(value, context.currentTime);
     return true;
   }
 
@@ -554,7 +637,7 @@ export default function RemoteMicClient(props: {
   async function runReconnect(targetRemoteMic: RemoteMicSession, reason: ReconnectReason) {
     try {
       connectionGenerationRef.current += 1;
-      closeRealtimeTransport(false);
+      await closeRealtimeTransport(false);
       await openRealtimeConnection(targetRemoteMic, {
         reconnecting: true,
         reuseLiveStream: true,
@@ -668,7 +751,7 @@ export default function RemoteMicClient(props: {
     if (!current) {
       captureBlockedRef.current = true;
       setMicPhaseValue("suppressed");
-      muteLocalAudioTracks();
+      muteOutgoingAudio();
       return "suppressed";
     }
 
@@ -705,33 +788,29 @@ export default function RemoteMicClient(props: {
 
       if (shouldSuppress) {
         captureBlockedRef.current = true;
-        muteLocalAudioTracks();
+        muteOutgoingAudio();
         setMicPhaseValue("suppressed");
         return "suppressed";
       }
 
       captureBlockedRef.current = false;
-      restoreAudioTracksWithoutConnectionCheck();
+      restoreOutgoingAudioWithoutConnectionCheck();
       setMicPhaseValue("listening");
       return "listening";
     } catch (error) {
       console.warn("[remote-mic speech state snapshot failed]", error);
       captureBlockedRef.current = true;
-      muteLocalAudioTracks();
+      muteOutgoingAudio();
       setMicPhaseValue("suppressed");
       return "suppressed";
     }
   }
 
-  function restoreAudioTracksWithoutConnectionCheck() {
-    for (const track of streamRef.current?.getAudioTracks() ?? []) {
-      if (track.readyState === "live") {
-        track.enabled = true;
-      }
-    }
+  function restoreOutgoingAudioWithoutConnectionCheck() {
+    setCaptureGain(1);
   }
 
-  function closeRealtimeTransport(stopTracks: boolean) {
+  async function closeRealtimeTransport(stopTracks: boolean) {
     if (peerDisconnectedTimerRef.current !== null) {
       window.clearTimeout(peerDisconnectedTimerRef.current);
       peerDisconnectedTimerRef.current = null;
@@ -744,14 +823,7 @@ export default function RemoteMicClient(props: {
 
     if (!stopTracks) return;
 
-    levelStopRef.current?.();
-    levelStopRef.current = null;
-    streamRef.current?.getTracks().forEach((track) => {
-      track.onended = null;
-      track.enabled = false;
-      track.stop();
-    });
-    streamRef.current = null;
+    await closeAudioCapture();
   }
 
   function clearTranscriptState(transcriptId?: string) {
@@ -841,6 +913,8 @@ export default function RemoteMicClient(props: {
     const realtimeSession = await createRealtimeSession(targetRemoteMic);
     realtimeModelRef.current = realtimeSession.model;
     const stream = await getOrCreateMediaStream(options.reuseLiveStream);
+    const outgoingStream = await getOrCreateOutgoingAudioStream(stream);
+    setCaptureGain(captureBlockedRef.current || options.reconnecting ? 0 : 1);
     const connectionStreamId = `${targetRemoteMic.role}:${Date.now()}:${crypto.randomUUID()}`;
     const connectionGeneration = connectionGenerationRef.current + 1;
     connectionGenerationRef.current = connectionGeneration;
@@ -895,13 +969,17 @@ export default function RemoteMicClient(props: {
     };
 
     for (const track of stream.getAudioTracks()) {
-      track.enabled = options.reconnecting ? false : !captureBlockedRef.current;
       track.onended = () => {
         if (!isCurrentConnection(connectionGeneration, connectionStreamId)) return;
         void reconnectRealtime("track_ended");
       };
-      peerConnection.addTrack(track, stream);
     }
+
+    const outgoingTrack = outgoingTrackRef.current;
+    if (!outgoingTrack || outgoingTrack.readyState !== "live") {
+      throw new Error("送信用のマイク音声経路を作成できませんでした。");
+    }
+    peerConnection.addTrack(outgoingTrack, outgoingStream);
 
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
@@ -921,7 +999,7 @@ export default function RemoteMicClient(props: {
   }
 
   async function getOrCreateMediaStream(reuseLiveStream: boolean) {
-    const existing = streamRef.current;
+    const existing = originalMicStreamRef.current;
     const existingTracks = existing?.getAudioTracks() ?? [];
     if (
       reuseLiveStream &&
@@ -932,12 +1010,7 @@ export default function RemoteMicClient(props: {
       return existing;
     }
 
-    levelStopRef.current?.();
-    levelStopRef.current = null;
-    existing?.getTracks().forEach((track) => {
-      track.onended = null;
-      track.stop();
-    });
+    await closeAudioCapture();
 
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -947,8 +1020,89 @@ export default function RemoteMicClient(props: {
       },
       video: false,
     });
-    streamRef.current = stream;
+    originalMicStreamRef.current = stream;
     return stream;
+  }
+
+  async function getOrCreateOutgoingAudioStream(micStream: MediaStream) {
+    const existingDestination = destinationNodeRef.current;
+    const existingTrack = outgoingTrackRef.current;
+    const existingContext = audioContextRef.current;
+    if (
+      existingDestination &&
+      existingTrack?.readyState === "live" &&
+      existingContext?.state !== "closed"
+    ) {
+      if (existingContext.state === "suspended") {
+        await existingContext.resume().catch(() => undefined);
+      }
+      return existingDestination.stream;
+    }
+
+    await closeAudioGraph();
+
+    const AudioContextClass = getAudioContextClass();
+    if (!AudioContextClass) {
+      throw new Error("Web Audio API is not available in this browser");
+    }
+
+    const audioContext = new AudioContextClass();
+    if (audioContext.state === "suspended") {
+      await audioContext.resume().catch(() => undefined);
+    }
+
+    const sourceNode = audioContext.createMediaStreamSource(micStream);
+    const gainNode = audioContext.createGain();
+    const destinationNode = audioContext.createMediaStreamDestination();
+    gainNode.gain.setValueAtTime(captureBlockedRef.current ? 0 : 1, audioContext.currentTime);
+    sourceNode.connect(gainNode);
+    gainNode.connect(destinationNode);
+
+    const outgoingTrack = destinationNode.stream.getAudioTracks()[0] ?? null;
+    if (!outgoingTrack) {
+      sourceNode.disconnect();
+      gainNode.disconnect();
+      audioContext.close().catch(() => undefined);
+      throw new Error("送信用のマイク音声trackを作成できませんでした。");
+    }
+
+    audioContextRef.current = audioContext;
+    sourceNodeRef.current = sourceNode;
+    captureGainNodeRef.current = gainNode;
+    destinationNodeRef.current = destinationNode;
+    outgoingTrackRef.current = outgoingTrack;
+
+    return destinationNode.stream;
+  }
+
+  async function closeAudioCapture() {
+    levelStopRef.current?.();
+    levelStopRef.current = null;
+    await closeAudioGraph();
+    originalMicStreamRef.current?.getTracks().forEach((track) => {
+      track.onended = null;
+      track.stop();
+    });
+    originalMicStreamRef.current = null;
+  }
+
+  async function closeAudioGraph() {
+    outgoingTrackRef.current?.stop();
+    outgoingTrackRef.current = null;
+    try {
+      sourceNodeRef.current?.disconnect();
+    } catch {}
+    try {
+      captureGainNodeRef.current?.disconnect();
+    } catch {}
+    try {
+      destinationNodeRef.current?.disconnect();
+    } catch {}
+    sourceNodeRef.current = null;
+    captureGainNodeRef.current = null;
+    destinationNodeRef.current = null;
+    await audioContextRef.current?.close().catch(() => undefined);
+    audioContextRef.current = null;
   }
 
   async function start(targetRemoteMic = remoteMicRef.current) {
@@ -1401,7 +1555,7 @@ export default function RemoteMicClient(props: {
     discardLiveTranscripts("connection_stopped");
     flushPendingFinalTranscripts();
     clearTranscriptState();
-    closeRealtimeTransport(true);
+    await closeRealtimeTransport(true);
   }
 
   async function setFixedMicMuted(
@@ -1940,10 +2094,7 @@ function getMicPhaseLabel(phase: MicPhase) {
 }
 
 function startLevelMeter(stream: MediaStream, onLevel: (level: number) => void) {
-  const AudioContextClass =
-    window.AudioContext ??
-    (window as Window & { webkitAudioContext?: typeof AudioContext })
-      .webkitAudioContext;
+  const AudioContextClass = getAudioContextClass();
 
   if (!AudioContextClass) {
     throw new Error("Web Audio API is not available in this browser");
@@ -1977,6 +2128,14 @@ function startLevelMeter(stream: MediaStream, onLevel: (level: number) => void) 
     } catch {}
     void context.close().catch(() => {});
   };
+}
+
+function getAudioContextClass() {
+  return (
+    window.AudioContext ??
+    (window as Window & { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext
+  );
 }
 
 function calculateLevel(samples: Float32Array) {
