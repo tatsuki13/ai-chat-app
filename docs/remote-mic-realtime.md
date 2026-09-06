@@ -117,7 +117,7 @@ It also adds indexes and a unique key on `session_id, speaker, remote_stream_id,
 7. Speak from the caregiver phone and confirm role separation.
 8. Speak short acknowledgements such as "はい", "うん", and "ん".
 9. Speak slowly and with a correction mid-utterance.
-10. Overlap speech briefly and confirm crosstalk suppression only affects DB final saving.
+10. Overlap speech briefly and confirm crosstalk suppression removes rejected live transcripts and DB final rows consistently.
 11. Press question generation immediately after speech and confirm only DB-persisted finals are used.
 12. Confirm AI playback sets connected phones to `GainNode` value `0` before speech starts.
 13. Speak during AI playback and confirm it is not saved.

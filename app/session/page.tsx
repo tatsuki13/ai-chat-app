@@ -65,6 +65,16 @@ type ActivePlaybackControl = {
   revision: number | null;
   suppressedRoles: Set<SpeakerRole>;
   resumedRoles: Set<SpeakerRole>;
+  captureFailures: Partial<
+    Record<
+      SpeakerRole,
+      {
+        captureState: "suppressed" | "resumed";
+        reason: string;
+        timestamp: string;
+      }
+    >
+  >;
 };
 type LiveTranscript = {
   key: string;
@@ -1557,6 +1567,11 @@ function SessionPageClient() {
       return;
     }
 
+    if (event.type === "mic.capture_error") {
+      applyRemoteMicCaptureStateError(event);
+      return;
+    }
+
     if (
       event.type === "mic.reconnecting" ||
       event.type === "mic.reconnected" ||
@@ -1652,16 +1667,47 @@ function SessionPageClient() {
 
       const suppressedRoles = new Set(current.suppressedRoles);
       const resumedRoles = new Set(current.resumedRoles);
+      const captureFailures = { ...current.captureFailures };
       if (event.captureState === "suppressed") {
         suppressedRoles.add(event.role);
       } else {
         resumedRoles.add(event.role);
       }
+      delete captureFailures[event.role];
 
       return {
         ...current,
         suppressedRoles,
         resumedRoles,
+        captureFailures,
+      };
+    });
+  }
+
+  function applyRemoteMicCaptureStateError(
+    event: Extract<RemoteMicRealtimeEvent, { type: "mic.capture_error" }>,
+  ) {
+    if (event.sessionId !== sessionRef.current?.id) return;
+
+    updatePlaybackControlValue((current) => {
+      if (
+        !current ||
+        current.playbackId !== event.playbackId ||
+        current.revision !== event.revision
+      ) {
+        return current;
+      }
+
+      return {
+        ...current,
+        captureFailures: {
+          ...current.captureFailures,
+          [event.role]: {
+            captureState: event.captureState,
+            reason: event.reason,
+            timestamp: event.timestamp,
+          },
+        },
       };
     });
   }
@@ -1770,6 +1816,21 @@ function SessionPageClient() {
         ? current.suppressedRoles
         : current.resumedRoles;
     };
+    const getFailedRoles = () => {
+      const current = activePlaybackControlRef.current;
+      if (
+        !current ||
+        current.playbackId !== input.playbackId ||
+        current.revision !== input.revision
+      ) {
+        return [];
+      }
+
+      return input.targetRoles.filter((role) => {
+        const failure = current.captureFailures[role];
+        return failure?.captureState === input.captureState;
+      });
+    };
 
     for (let attempt = 0; attempt <= REMOTE_MIC_CONTROL_ACK_RETRY_COUNT; attempt += 1) {
       const deadline = Date.now() + REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS;
@@ -1778,19 +1839,42 @@ function SessionPageClient() {
         if (input.targetRoles.every((role) => ackedRoles.has(role))) {
           return true;
         }
+        const failedRoles = getFailedRoles();
+        if (failedRoles.length > 0) {
+          const disconnectedRoles = input.targetRoles.filter(
+            (role) => remoteMicStatusesRef.current[role]?.status !== "connected",
+          );
+          console.warn("[remote-mic capture state ack failed]", {
+            sessionId: sessionRef.current?.id ?? null,
+            playbackId: input.playbackId,
+            revision: input.revision,
+            captureState: input.captureState,
+            ackedRoles: Array.from(ackedRoles),
+            failedRoles,
+            disconnectedRoles,
+          });
+          return false;
+        }
 
         await sleep(REMOTE_MIC_CONTROL_ACK_POLL_MS);
       }
 
       const ackedRoles = getAckedRoles();
       const missingRoles = input.targetRoles.filter((role) => !ackedRoles.has(role));
+      const disconnectedRoles = input.targetRoles.filter(
+        (role) => remoteMicStatusesRef.current[role]?.status !== "connected",
+      );
+      const failedRoles = getFailedRoles();
       console.warn("[remote-mic capture state ack timeout]", {
+        sessionId: sessionRef.current?.id ?? null,
         playbackId: input.playbackId,
         revision: input.revision,
         captureState: input.captureState,
         attempt,
         ackedRoles: Array.from(ackedRoles),
         missingRoles,
+        disconnectedRoles,
+        failedRoles,
       });
     }
 
@@ -1893,6 +1977,7 @@ function SessionPageClient() {
       revision: null,
       suppressedRoles: new Set(),
       resumedRoles: new Set(),
+      captureFailures: {},
     });
 
     try {

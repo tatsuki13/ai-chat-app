@@ -149,6 +149,33 @@ function parseRemoteMicRealtimeEvent(
     };
   }
 
+  if (type === "mic.capture_error") {
+    const role = body.role;
+    const playbackId = requiredString(body.playbackId);
+    const captureState = body.captureState;
+    const reason = requiredString(body.reason);
+    if (
+      !isRemoteMicRole(role) ||
+      !playbackId ||
+      revision === null ||
+      (captureState !== "suppressed" && captureState !== "resumed") ||
+      !reason
+    ) {
+      return null;
+    }
+
+    return {
+      type,
+      sessionId,
+      role,
+      playbackId,
+      revision,
+      captureState,
+      reason,
+      timestamp,
+    };
+  }
+
   if (type === "mic.reconnecting") {
     const role = body.role;
     const previousStreamId = requiredString(body.previousStreamId);

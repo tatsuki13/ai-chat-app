@@ -57,6 +57,15 @@ type AiSpeechStateResponse = {
     revision?: number | null;
   } | null;
 };
+type RealtimeTranscriptSaveResponse = {
+  ok?: boolean;
+  outcome?: "created" | "existing" | "skipped";
+  reason?: string;
+  sourceUtteranceId?: string;
+  utterance?: {
+    id: string;
+  };
+};
 
 const CLIENT_VERSION = "remote-mic-client-2026-09-04-openai-realtime";
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
@@ -345,6 +354,12 @@ export default function RemoteMicClient(props: {
         playbackId: event.playbackId,
         revision: event.revision,
       });
+      await publishMicCaptureStateError({
+        playbackId: event.playbackId,
+        revision: event.revision,
+        captureState: "suppressed",
+        reason: "gain_unavailable",
+      }).catch(() => undefined);
       return;
     }
     setAiSpeechLabel("AI読み上げ中・認識一時停止");
@@ -429,8 +444,6 @@ export default function RemoteMicClient(props: {
         return;
       }
 
-      captureBlockedRef.current = false;
-      activeAiSpeechPlaybackIdRef.current = null;
       const gainRestored = await setCaptureGain(1);
       if (!gainRestored) {
         console.warn("[remote-mic ai speech resume failed]", {
@@ -439,8 +452,16 @@ export default function RemoteMicClient(props: {
           playbackId,
           revision: event.revision,
         });
+        await publishMicCaptureStateError({
+          playbackId,
+          revision: event.revision,
+          captureState: "resumed",
+          reason: "gain_unavailable",
+        }).catch(() => undefined);
         return;
       }
+      captureBlockedRef.current = false;
+      activeAiSpeechPlaybackIdRef.current = null;
       setAiSpeechLabel("通常受付");
       if (gainRestored && micStateRef.current === "streaming") {
         setMicPhaseValue("listening");
@@ -1107,25 +1128,6 @@ export default function RemoteMicClient(props: {
           captureEpoch,
           aiPlaybackIdAtCapture,
         });
-      } else {
-        broadcastFinalTranscript(session, transcriptId, {
-          streamId: eventStreamId,
-          captureEpoch,
-          text,
-          startedAt,
-          firstPartialAt,
-          finalizedAt,
-          eventId: event.event_id,
-        });
-        void publishRemoteMicRealtimeEvent({
-          type: "mic.speech_finalized",
-          sessionId: session.sessionId,
-          role: session.role,
-          streamId: eventStreamId,
-          transcriptId,
-          captureEpoch,
-          timestamp: finalizedAt,
-        }).catch(() => undefined);
       }
       clearTranscriptState(transcriptId);
 
@@ -1274,6 +1276,32 @@ export default function RemoteMicClient(props: {
         sessionId: session.sessionId,
         role: session.role,
         transcriptId,
+        error,
+      });
+    });
+  }
+
+  function discardLiveTranscript(
+    session: RemoteMicSession,
+    input: {
+      streamId: string;
+      transcriptId: string;
+      reason: string;
+    },
+  ) {
+    void publishRemoteMicRealtimeEvent({
+      type: "transcript.discarded",
+      sessionId: session.sessionId,
+      role: session.role,
+      streamId: input.streamId,
+      transcriptId: input.transcriptId,
+      reason: input.reason,
+    }).catch((error) => {
+      console.warn("[remote-mic live transcript discard publish failed]", {
+        sessionId: session.sessionId,
+        role: session.role,
+        transcriptId: input.transcriptId,
+        reason: input.reason,
         error,
       });
     });
@@ -1448,6 +1476,27 @@ export default function RemoteMicClient(props: {
       playbackId: input.playbackId,
       revision: input.revision,
       captureState: input.captureState,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  async function publishMicCaptureStateError(input: {
+    playbackId: string;
+    revision: number;
+    captureState: "suppressed" | "resumed";
+    reason: string;
+  }) {
+    const current = remoteMicRef.current;
+    if (!current) return;
+
+    await publishRemoteMicRealtimeEvent({
+      type: "mic.capture_error",
+      sessionId: current.sessionId,
+      role: current.role,
+      playbackId: input.playbackId,
+      revision: input.revision,
+      captureState: input.captureState,
+      reason: input.reason,
       timestamp: new Date().toISOString(),
     });
   }
@@ -1651,16 +1700,22 @@ export default function RemoteMicClient(props: {
       return;
     }
 
-    const data = (await response.json().catch(() => null)) as {
-      ok?: boolean;
-      outcome?: "created" | "existing" | "skipped";
-      reason?: string;
-    } | null;
+    const data = (await response.json().catch(() => null)) as
+      | RealtimeTranscriptSaveResponse
+      | null;
     if (data?.outcome === "skipped") {
       console.info("[remote-mic final transcript save skipped]", {
         transcriptId: pending.transcriptId,
         reason: data.reason ?? null,
+        sourceUtteranceId: data.sourceUtteranceId ?? null,
       });
+      discardLiveTranscript(current, {
+        streamId: pending.streamId,
+        transcriptId: pending.transcriptId,
+        reason: data.reason ?? "final_rejected",
+      });
+      pendingFinalByTranscriptRef.current.delete(finalQueueKey);
+      return;
     }
     if (
       data?.outcome !== "created" &&
@@ -1679,6 +1734,24 @@ export default function RemoteMicClient(props: {
       }
       return;
     }
+    broadcastFinalTranscript(current, pending.transcriptId, {
+      streamId: pending.streamId,
+      captureEpoch: pending.captureEpoch,
+      text,
+      startedAt: pending.startedAt,
+      firstPartialAt: pending.firstPartialAt ?? input.firstPartialAt,
+      finalizedAt: pending.finalizedAt ?? input.finalizedAt ?? new Date().toISOString(),
+      eventId: input.eventId,
+    });
+    void publishRemoteMicRealtimeEvent({
+      type: "mic.speech_finalized",
+      sessionId: current.sessionId,
+      role: current.role,
+      streamId: pending.streamId,
+      transcriptId: pending.transcriptId,
+      captureEpoch: pending.captureEpoch,
+      timestamp: pending.finalizedAt ?? input.finalizedAt ?? new Date().toISOString(),
+    }).catch(() => undefined);
     pendingFinalByTranscriptRef.current.delete(finalQueueKey);
   }
 

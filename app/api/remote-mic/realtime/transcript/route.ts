@@ -18,6 +18,7 @@ const CROSSTALK_MIN_NORMALIZED_LENGTH = 8;
 const MAX_TRANSCRIPT_TEXT_LENGTH = 10_000;
 // Client and server clocks can differ slightly; keep this narrow to avoid dropping valid speech.
 const AI_SPEECH_CLOCK_SKEW_TOLERANCE_MS = 250;
+const transcriptDecisionLocks = new Map<string, Promise<void>>();
 
 type FinalSkipReason =
   | "blocked_at_capture"
@@ -68,75 +69,77 @@ export async function POST(request: Request) {
     }
     setActiveFixedRemoteMicSession(active);
 
-    const existing = await findExistingRealtimeUtterance(input);
-    if (existing) {
-      if (existing.text !== input.text) {
-        console.warn("[remote-mic realtime duplicate text mismatch]", {
+    return await withTranscriptDecisionLock(input.sessionId, async () => {
+      const existing = await findExistingRealtimeUtterance(input);
+      if (existing) {
+        if (existing.text !== input.text) {
+          console.warn("[remote-mic realtime duplicate text mismatch]", {
+            sessionId: input.sessionId,
+            role: input.role,
+            streamId: input.streamId,
+            transcriptId: input.transcriptId,
+            existingUtteranceId: existing.id,
+          });
+        }
+
+        return NextResponse.json({
+          ok: true,
+          outcome: "existing",
+          utterance: serializeUtterance(existing),
+        });
+      }
+
+      const skip = await evaluateFinalTranscript(input);
+      if (skip) {
+        console.info("[remote-mic realtime transcript skipped]", {
           sessionId: input.sessionId,
           role: input.role,
           streamId: input.streamId,
           transcriptId: input.transcriptId,
-          existingUtteranceId: existing.id,
+          reason: skip.reason,
+          sourceUtteranceId: skip.sourceUtteranceId,
+          timeDiffMs: skip.timeDiffMs,
         });
+        return NextResponse.json({ ok: true, outcome: "skipped", ...skip });
       }
 
-      return NextResponse.json({
-        ok: true,
-        outcome: "existing",
-        utterance: serializeUtterance(existing),
+      const session = await prisma.session.findUnique({
+        where: { id: input.sessionId },
+        select: {
+          startedAt: true,
+          dialogueStartedAt: true,
+        },
       });
-    }
 
-    const skip = await evaluateFinalTranscript(input);
-    if (skip) {
-      console.info("[remote-mic realtime transcript skipped]", {
+      if (!session) {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+
+      const timing = createUtteranceTiming({
+        baseAt: pickUtteranceTimingBase(session),
+        startedAt: input.startedAt ?? input.finalizedAt ?? input.endedAt ?? "",
+        endedAt: input.endedAt ?? input.finalizedAt ?? input.startedAt ?? "",
+      });
+
+      const utterance = await createRealtimeUtterance(input, {
+        participantCode: active.participantCode,
+        timing,
+      });
+
+      console.info("[remote-mic realtime transcript saved]", {
         sessionId: input.sessionId,
         role: input.role,
         streamId: input.streamId,
         transcriptId: input.transcriptId,
-        reason: skip.reason,
-        sourceUtteranceId: skip.sourceUtteranceId,
-        timeDiffMs: skip.timeDiffMs,
+        outcome: "created",
+        textLength: input.text.length,
       });
-      return NextResponse.json({ ok: true, outcome: "skipped", ...skip });
-    }
 
-    const session = await prisma.session.findUnique({
-      where: { id: input.sessionId },
-      select: {
-        startedAt: true,
-        dialogueStartedAt: true,
-      },
-    });
-
-    if (!session) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    const timing = createUtteranceTiming({
-      baseAt: pickUtteranceTimingBase(session),
-      startedAt: input.startedAt ?? input.finalizedAt ?? input.endedAt ?? "",
-      endedAt: input.endedAt ?? input.finalizedAt ?? input.startedAt ?? "",
-    });
-
-    const utterance = await createRealtimeUtterance(input, {
-      participantCode: active.participantCode,
-      timing,
-    });
-
-    console.info("[remote-mic realtime transcript saved]", {
-      sessionId: input.sessionId,
-      role: input.role,
-      streamId: input.streamId,
-      transcriptId: input.transcriptId,
-      outcome: "created",
-      textLength: input.text.length,
-    });
-
-    return NextResponse.json({
-      ok: true,
-      outcome: "created",
-      utterance: serializeUtterance(utterance),
+      return NextResponse.json({
+        ok: true,
+        outcome: "created",
+        utterance: serializeUtterance(utterance),
+      });
     });
   } catch (error) {
     if (isUniqueConstraintError(error)) {
@@ -159,6 +162,32 @@ export async function POST(request: Request) {
       { error: "Failed to save realtime transcript" },
       { status: 500 },
     );
+  }
+}
+
+async function withTranscriptDecisionLock<T>(
+  sessionId: string,
+  run: () => Promise<T>,
+) {
+  const previous = transcriptDecisionLocks.get(sessionId);
+  let releaseCurrentLock: (() => void) | null = null;
+  const current = new Promise<void>((resolve) => {
+    releaseCurrentLock = resolve;
+  });
+  const chained = previous ? previous.catch(() => undefined).then(() => current) : current;
+  transcriptDecisionLocks.set(sessionId, chained);
+
+  if (previous) {
+    await previous.catch(() => undefined);
+  }
+
+  try {
+    return await run();
+  } finally {
+    releaseCurrentLock?.();
+    if (transcriptDecisionLocks.get(sessionId) === chained) {
+      transcriptDecisionLocks.delete(sessionId);
+    }
   }
 }
 
@@ -378,14 +407,20 @@ async function findRecentCrosstalkUtterance(input: FinalTranscriptRequest) {
   }
 
   const transcriptEndedAt = parseDate(input.endedAt ?? input.finalizedAt) ?? new Date();
+  const windowStart = new Date(
+    transcriptEndedAt.getTime() - CROSSTALK_SUPPRESSION_WINDOW_MS,
+  );
+  const windowEnd = new Date(
+    transcriptEndedAt.getTime() + CROSSTALK_SUPPRESSION_WINDOW_MS,
+  );
   const recentOppositeRoleUtterances = await prisma.sessionUtterance.findMany({
     where: {
       sessionId: input.sessionId,
       speaker: input.role === "elder" ? "caregiver" : "elder",
-      createdAt: {
-        gte: new Date(transcriptEndedAt.getTime() - CROSSTALK_SUPPRESSION_WINDOW_MS),
-        lte: new Date(transcriptEndedAt.getTime() + CROSSTALK_SUPPRESSION_WINDOW_MS),
-      },
+      OR: [
+        { createdAt: { gte: windowStart, lte: windowEnd } },
+        { finalizedAt: { gte: windowStart, lte: windowEnd } },
+      ],
     },
     orderBy: { createdAt: "desc" },
     take: 5,
@@ -393,6 +428,7 @@ async function findRecentCrosstalkUtterance(input: FinalTranscriptRequest) {
       id: true,
       text: true,
       createdAt: true,
+      finalizedAt: true,
     },
   });
 
@@ -404,7 +440,9 @@ async function findRecentCrosstalkUtterance(input: FinalTranscriptRequest) {
 
   return {
     id: match.id,
-    timeDiffMs: Math.abs(match.createdAt.getTime() - transcriptEndedAt.getTime()),
+    timeDiffMs: Math.abs(
+      (match.finalizedAt ?? match.createdAt).getTime() - transcriptEndedAt.getTime(),
+    ),
   };
 }
 
