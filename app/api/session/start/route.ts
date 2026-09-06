@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../../lib/prisma";
+import { DISCUSSION_TOPICS } from "../../../../lib/acp-mvp";
 import { createInitialSlotStates } from "../../../../lib/acp-store";
 
 export const runtime = "nodejs";
@@ -33,6 +34,8 @@ export async function POST(request: Request) {
       data: {
         participantCode,
         condition,
+        currentTopicId: DISCUSSION_TOPICS[0]?.id,
+        currentTopicIndex: 0,
       },
     });
     const slotStates = await createInitialSlotStates(session.id);
@@ -45,6 +48,8 @@ export async function POST(request: Request) {
         started_at: session.startedAt.toISOString(),
         dialogue_started_at: session.dialogueStartedAt?.toISOString() ?? null,
         ended_at: session.endedAt?.toISOString() ?? null,
+        current_topic_id: session.currentTopicId,
+        current_topic_index: session.currentTopicIndex,
       },
       slot_states: slotStates,
     });

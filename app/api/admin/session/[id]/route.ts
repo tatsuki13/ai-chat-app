@@ -67,6 +67,8 @@ export async function GET(_request: Request, context: RouteContext) {
       start_ms: utterance.startMs,
       end_ms: utterance.endMs,
       source: utterance.source,
+      topic_id: utterance.topicId,
+      topic_index: utterance.topicIndex,
       analysis_version: utterance.analysisVersion,
       created_at: utterance.createdAt.toISOString(),
     }));
@@ -124,6 +126,8 @@ export async function GET(_request: Request, context: RouteContext) {
         start_ms: utterance.start_ms,
         end_ms: utterance.end_ms,
         source: utterance.source,
+        topic_id: utterance.topic_id,
+        topic_index: utterance.topic_index,
         analysis_version: utterance.analysis_version,
         created_at: utterance.created_at,
       })),

@@ -27,7 +27,7 @@ model Session {
   aiActionEvents          AIActionEvent[]
   aiProcessingState       AIProcessingState?
   aiSpeechState           AISpeechState?
-  preparedQuestions       PreparedQuestion[]
+  slotProcessingStates    SlotProcessingState[]
   remoteMicActiveSessions RemoteMicActiveSession[]
   subSlotStates           SlotSubState[]
   slotStates              SlotState[]
@@ -48,6 +48,8 @@ model SessionUtterance {
   startMs                Int?      @map("start_ms")
   endMs                  Int?      @map("end_ms")
   source                 String?
+  topicId                String?   @map("topic_id")
+  topicIndex             Int?      @map("topic_index")
   sourceGroupId          String?   @map("source_group_id")
   asrProvider            String?   @map("asr_provider")
   asrModel               String?   @map("asr_model")
@@ -67,6 +69,7 @@ model SessionUtterance {
   @@index([sessionId])
   @@index([participantCode])
   @@index([speaker])
+  @@index([sessionId, topicId])
   @@index([sourceGroupId])
   @@index([remoteTranscriptId])
   @@index([remoteStreamId])
@@ -206,36 +209,32 @@ model AIProcessingState {
   @@map("ai_processing_states")
 }
 
-model PreparedQuestion {
-  id                    String    @id @default(cuid())
-  participantCode       String?   @map("participant_code")
-  sessionId             String    @map("session_id")
-  topicId               String    @map("topic_id")
-  topicSlotName         String?   @map("topic_slot_name")
-  question              String
-  transitionPhrase      String    @default("") @map("transition_phrase")
-  targetMainSlotId      String    @map("target_main_slot_id")
-  targetSubSlotId       String    @map("target_sub_slot_id")
-  questionPurpose       String    @map("question_purpose")
-  reasonForSelection    String    @map("reason_for_selection")
-  basedOnUtteranceId    String?   @map("based_on_utterance_id")
-  slotRevision          Int       @map("slot_revision")
-  status                String
-  generatedAt           DateTime  @default(now()) @map("generated_at")
-  displayedAt           DateTime? @map("displayed_at")
-  invalidatedAt         DateTime? @map("invalidated_at")
-  invalidationReason    String?   @map("invalidation_reason")
-  expiresAt             DateTime? @map("expires_at")
-  displayLogCommittedAt DateTime? @map("display_log_committed_at")
-  createdAt             DateTime  @default(now()) @map("created_at")
-  updatedAt             DateTime  @updatedAt @map("updated_at")
-  session               Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+model SlotProcessingState {
+  id                              String    @id @default(cuid())
+  participantCode                 String?   @map("participant_code")
+  sessionId                       String    @map("session_id")
+  topicId                         String    @map("topic_id")
+  lastProcessedUtteranceId        String?   @map("last_processed_utterance_id")
+  lastProcessedAt                 DateTime? @map("last_processed_at")
+  processingRangeEndUtteranceId   String?   @map("processing_range_end_utterance_id")
+  processingRangeStartedAt        DateTime? @map("processing_range_started_at")
+  slotRevision                    Int       @default(0) @map("slot_revision")
+  processingStatus                String    @default("idle") @map("processing_status")
+  processingStartedAt             DateTime? @map("processing_started_at")
+  processingFinishedAt            DateTime? @map("processing_finished_at")
+  lastError                       String?   @map("last_error")
+  retryCount                      Int       @default(0) @map("retry_count")
+  createdAt                       DateTime  @default(now()) @map("created_at")
+  updatedAt                       DateTime  @updatedAt @map("updated_at")
+  session                         Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
-  @@index([sessionId, topicId, status])
-  @@index([sessionId, status])
+  @@unique([sessionId, topicId])
+  @@index([sessionId])
   @@index([participantCode])
-  @@index([generatedAt])
-  @@map("prepared_questions")
+  @@index([topicId])
+  @@index([processingStatus])
+  @@index([updatedAt])
+  @@map("slot_processing_states")
 }
 
 model AISpeechState {

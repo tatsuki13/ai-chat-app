@@ -56,6 +56,8 @@ export async function getSessionContext(sessionId: string) {
       start_ms: utterance.startMs,
       end_ms: utterance.endMs,
       source: utterance.source,
+      topic_id: utterance.topicId,
+      topic_index: utterance.topicIndex,
       analysis_version: utterance.analysisVersion,
       created_at: utterance.createdAt.toISOString(),
     })) satisfies ConversationUtterance[],
@@ -108,7 +110,6 @@ export async function resetSlotProcessingAfterUtteranceChange(
   utteranceIds: string[],
 ) {
   const idsToRemove = [...new Set(utteranceIds.map((id) => id.trim()).filter(Boolean))];
-  const invalidatedAt = new Date();
 
   if (idsToRemove.length > 0) {
     const states = await prisma.slotSubState.findMany({
@@ -163,15 +164,15 @@ export async function resetSlotProcessingAfterUtteranceChange(
         lastError: null,
       },
     }),
-    prisma.preparedQuestion.updateMany({
-      where: {
-        sessionId,
-        status: "prepared",
-      },
+    prisma.slotProcessingState.updateMany({
+      where: { sessionId },
       data: {
-        status: "invalidated",
-        invalidatedAt,
-        invalidationReason: "utterance_changed",
+        lastProcessedUtteranceId: null,
+        lastProcessedAt: null,
+        processingStatus: "idle",
+        processingRangeStartedAt: null,
+        processingRangeEndUtteranceId: null,
+        lastError: null,
       },
     }),
   ]);

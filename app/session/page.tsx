@@ -150,6 +150,8 @@ type SessionInfo = {
   started_at: string;
   dialogue_started_at: string | null;
   ended_at: string | null;
+  current_topic_id?: string | null;
+  current_topic_index?: number | null;
 };
 
 type Utterance = {
@@ -160,6 +162,8 @@ type Utterance = {
   start_ms?: number | null;
   end_ms?: number | null;
   source?: string | null;
+  topic_id?: string | null;
+  topic_index?: number | null;
   source_group_id?: string | null;
   asr_provider?: string | null;
   asr_model?: string | null;
@@ -202,12 +206,20 @@ type ProposalReason =
   | "no_more_to_add"
   | "not_considered"
   | "prefer_not_to_answer"
+  | "ai_advance_topic"
   | "ready_to_end";
 
 type TopicTransitionProposal = {
   reason: ProposalReason;
   suggestedAt: number;
   topicIndex: number;
+  source?: "timer" | "ai_question";
+  proposalId?: string;
+  sessionId?: string;
+  topicId?: string;
+  slotRevision?: number;
+  basedOnUtteranceId?: string | null;
+  action?: "advance_topic";
 };
 
 type SessionCompletionState =
@@ -230,6 +242,12 @@ type TranscribeUtteranceResponse = {
 };
 
 type FinalMinutesResponse = {
+  requestId?: string;
+  request_status?: "processing" | "completed" | "failed";
+  idempotent_replay?: boolean;
+  in_progress?: boolean;
+  failed?: boolean;
+  error?: string;
   session: SessionInfo;
   slot_states: SlotState[];
   final_minutes: StoredFinalMinutes;
@@ -243,10 +261,14 @@ type StoredFinalMinutes = {
 };
 
 type UpdateSlotsResponse = {
+  outcome?: "updated" | "already_current" | "no_utterances" | "in_progress";
+  slot_update_outcome?: "updated" | "already_current" | "no_utterances" | "in_progress";
   slot_states: SlotState[];
   sub_slot_states: DeveloperSubSlotState[];
   slot_control?: SlotControlDebugState;
   slot_classification_debug?: SlotClassificationDebugDetails;
+  processed_through_utterance_id?: string | null;
+  processed_utterance_ids?: string[];
 };
 
 type DeveloperSubSlotState = {
@@ -292,24 +314,12 @@ type ReplaySessionResponse = {
   slot_states: SlotState[];
 };
 
-type PreparedQuestion = {
-  id: string;
-  session_id: string;
-  topic_id: string;
-  topic_slot_name: string | null;
-  question: string;
-  transition_phrase: string;
-  targetMainSlotId: string;
-  targetSubSlotId: string;
-  questionPurpose: string;
-  reasonForSelection: string;
-  basedOnUtteranceId: string | null;
-  slotRevision: number;
-  status: "prepared" | "displayed" | "invalidated" | "expired" | "failed";
-  generated_at: string;
-};
-
-type PrepareQuestionResponse = {
+type AiQuestionResponse = {
+  requestId?: string;
+  request_status?: "processing" | "completed" | "failed";
+  idempotent_replay?: boolean;
+  failed?: boolean;
+  error?: string;
   processing: {
     processingStatus: string;
     lastProcessedUtteranceId: string | null;
@@ -320,11 +330,37 @@ type PrepareQuestionResponse = {
     lastError: string | null;
     retryCount: number;
   } | null;
-  prepared_question: PreparedQuestion | null;
+  topic_processing?: {
+    processingStatus: string;
+    lastProcessedUtteranceId: string | null;
+    lastProcessedAt: string | null;
+    slotRevision: number;
+    processingStartedAt: string | null;
+    processingFinishedAt: string | null;
+    lastError: string | null;
+    retryCount: number;
+  } | null;
+  suggestion: NextQuestionResponse["suggestion"] | null;
+  transition_proposal?: {
+    type: "advance_topic";
+    action: "advance_topic";
+    sessionId?: string;
+    session_id?: string;
+    topicId?: string;
+    topic_id?: string;
+    recommendationId?: string;
+    recommendation_id?: string;
+    reason: string;
+    slotRevision: number;
+    generated_at: string;
+  } | null;
   no_relevant_followup?: boolean;
   reason?: string;
   in_progress?: boolean;
-  reused?: boolean;
+  slot_update_outcome?: "updated" | "already_current" | "no_utterances" | "in_progress";
+  slot_states?: SlotState[];
+  slot_control?: SlotControlDebugState | null;
+  slot_classification_debug?: SlotClassificationDebugDetails | null;
 };
 
 const STORAGE_KEY = "acp-hitl-pending-auto-session-id";
@@ -337,9 +373,6 @@ const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const PROMPT_ERROR_RESTORE_DELAY_MS = 3000;
 const AI_SPEECH_RELEASE_DELAY_MS = 500;
 const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45_000;
-const HUMAN_SPEECH_FINAL_WAIT_MS = 5_000;
-const REMOTE_MIC_FINAL_FLUSH_ACK_TIMEOUT_MS = 3_000;
-const REMOTE_MIC_FINAL_FLUSH_RETRY_COUNT = 1;
 const BROWSER_SPEECH_ENABLED =
   process.env.NEXT_PUBLIC_BROWSER_SPEECH_ENABLED !== "false";
 const REMOTE_MIC_SESSION_SYNC_MS = 3_000;
@@ -434,8 +467,7 @@ function SessionPageClient() {
     useState<SlotClassificationDebugDetails | null>(null);
   const [developerSlotLoading, setDeveloperSlotLoading] = useState(false);
   const [developerSlotError, setDeveloperSlotError] = useState("");
-  const [preparedQuestion, setPreparedQuestion] = useState<PreparedQuestion | null>(null);
-  const [backgroundProcessingStatus, setBackgroundProcessingStatus] = useState("idle");
+  const [aiProcessingStatus, setAiProcessingStatus] = useState("idle");
   const [activePlaybackControl, setActivePlaybackControl] =
     useState<ActivePlaybackControl | null>(null);
   const [liveTranscripts, setLiveTranscripts] = useState<Record<string, LiveTranscript>>({});
@@ -468,14 +500,12 @@ function SessionPageClient() {
   const pushToTalkStartingRef = useRef(false);
   const pushToTalkActiveRef = useRef(false);
   const topicStartedAtRef = useRef<number | null>(null);
+  const lastSyncedSessionTopicKeyRef = useRef("");
   const timerPausedStartedAtRef = useRef<number | null>(null);
   const timerRunningRef = useRef(false);
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
-  const preparedQuestionRef = useRef<PreparedQuestion | null>(null);
   const latestProcessingSlotRevisionRef = useRef<number | null>(null);
-  const backgroundPreparePromiseRef = useRef<Promise<PrepareQuestionResponse | null> | null>(null);
-  const latestPrepareKeyRef = useRef("");
   const aiSpeechPlaybackRef = useRef<{
     sessionId: string;
     playbackId: string;
@@ -483,6 +513,8 @@ function SessionPageClient() {
   } | null>(null);
   const activePlaybackControlRef = useRef<ActivePlaybackControl | null>(null);
   const nextQuestionInFlightRef = useRef<Promise<void> | null>(null);
+  const topicTransitionInFlightRef = useRef<string | null>(null);
+  const departedTopicSlotUpdateInFlightRef = useRef<Set<string>>(new Set());
   const participantCode = session?.participant_code || "未設定";
   const hasParticipantCode = Boolean(session?.participant_code?.trim());
   const dialogueStarted = Boolean(session?.dialogue_started_at);
@@ -696,7 +728,6 @@ function SessionPageClient() {
 
           if (hasNewPersistedUtterance) {
             markTopicInteractionStarted("remote_voice");
-            invalidatePreparedQuestion("remote_utterance_saved");
           }
 
           removePersistedLiveTranscripts(persistedUtterances);
@@ -759,10 +790,6 @@ function SessionPageClient() {
   }, [promptPanel]);
 
   useEffect(() => {
-    preparedQuestionRef.current = preparedQuestion;
-  }, [preparedQuestion]);
-
-  useEffect(() => {
     return () => {
       clearPromptRestoreTimeout();
       void cancelActiveAiSpeechPlayback();
@@ -779,6 +806,44 @@ function SessionPageClient() {
 
     void refreshDeveloperSlotStates(session.id);
   }, [session?.id, currentTopic.slot_name]);
+
+  useEffect(() => {
+    if (!session?.id || session.ended_at) return;
+
+    void syncSessionCurrentTopic(session.id, currentTopic, currentTopicIndex);
+  }, [session?.id, session?.ended_at, currentTopic.id, currentTopicIndex]);
+
+  async function syncSessionCurrentTopic(
+    sessionId: string,
+    topic: (typeof DISCUSSION_TOPICS)[number],
+    topicIndex: number,
+  ) {
+    const syncKey = `${sessionId}:${topic.id}:${topicIndex}`;
+    if (lastSyncedSessionTopicKeyRef.current === syncKey) return;
+    lastSyncedSessionTopicKeyRef.current = syncKey;
+
+    try {
+      const data = await patchJson<{ session: SessionInfo }>(
+        `/api/session/${encodeURIComponent(sessionId)}`,
+        {
+          update_current_topic: true,
+          current_topic_id: topic.id,
+          current_topic_index: topicIndex,
+        },
+      );
+      setSession(data.session);
+      sessionRef.current = data.session;
+    } catch (error) {
+      lastSyncedSessionTopicKeyRef.current = "";
+      console.warn("[session topic sync failed]", {
+        sessionId,
+        topicId: topic.id,
+        topicIndex,
+        error,
+      });
+      throw error;
+    }
+  }
 
   useEffect(() => {
     speakerRef.current = normalizeSpeaker(speaker);
@@ -1000,13 +1065,15 @@ function SessionPageClient() {
     setDeveloperSlotClassificationDebug(null);
 
     try {
-      const utterance = await addUtterance(session.id, speaker, text);
+      const utterance = await addUtterance(session.id, speaker, text, {
+        topicId: currentTopic.id,
+        topicIndex: currentTopicIndex,
+      });
       setUtterances((current) =>
         [...current, utterance].slice(-MAX_RENDERED_UTTERANCES),
       );
       setUtteranceTotal((current) => current + 1);
       markSessionUsed(session.id);
-      invalidatePreparedQuestion("manual_utterance_saved");
       setStatusText("保存済み");
     } catch {
       setDraft(text);
@@ -1171,6 +1238,8 @@ function SessionPageClient() {
           startedAt: new Date(chunk.startedAt).toISOString(),
           endedAt: new Date(chunk.endedAt).toISOString(),
           source,
+          topicId: currentTopic.id,
+          topicIndex: currentTopicIndex,
         },
       );
       setUtterances((current) =>
@@ -1180,7 +1249,6 @@ function SessionPageClient() {
       );
       setUtteranceTotal((current) => current + 1);
       markSessionUsed(currentSession.id);
-      invalidatePreparedQuestion(`${source}_utterance_saved`);
       setStatusText("保存済み");
     } catch (error) {
       console.warn("Voice audio transcription failed", error);
@@ -1230,9 +1298,8 @@ function SessionPageClient() {
 
       for (const [key, transcript] of Object.entries(current)) {
         if (
-          transcript.status === "final" &&
-          (persistedRemoteKeys.has(key) ||
-            persistedSourceGroupIds.has(transcript.transcriptId))
+          persistedRemoteKeys.has(key) ||
+          persistedSourceGroupIds.has(transcript.transcriptId)
         ) {
           delete next[key];
           changed = true;
@@ -1267,6 +1334,8 @@ function SessionPageClient() {
             startedAt: localUtterance.captured_started_at ?? localUtterance.created_at,
             endedAt: localUtterance.captured_ended_at ?? localUtterance.created_at,
             source: "local_voice",
+            topicId: localUtterance.topic_id ?? currentTopic.id,
+            topicIndex: localUtterance.topic_index ?? currentTopicIndex,
           },
         );
 
@@ -1281,7 +1350,6 @@ function SessionPageClient() {
           return next;
         });
         setUtteranceTotal((current) => current + 1);
-        invalidatePreparedQuestion("pending_utterance_saved");
       }
     };
 
@@ -1321,7 +1389,6 @@ function SessionPageClient() {
           utterance.id === utteranceId ? updated : utterance,
         ),
       );
-      invalidatePreparedQuestion("utterance_edited");
       setStatusText(getAudioAwareSavedStatus());
     } catch (error) {
       setStatusText("保存エラー");
@@ -1351,7 +1418,6 @@ function SessionPageClient() {
         current.filter((utterance) => utterance.id !== utteranceId),
       );
       setUtteranceTotal((current) => Math.max(0, current - 1));
-      invalidatePreparedQuestion("utterance_deleted");
       setStatusText(getAudioAwareSavedStatus());
     } catch (error) {
       setStatusText("保存エラー");
@@ -1395,137 +1461,20 @@ function SessionPageClient() {
     );
   }
 
-  function invalidatePreparedQuestion(_reason: string) {
-    setPreparedQuestion(null);
-    preparedQuestionRef.current = null;
-  }
+  function applyAiQuestionProcessingState(data: AiQuestionResponse) {
+    const latestSlotRevision =
+      typeof data.topic_processing?.slotRevision === "number"
+        ? data.topic_processing.slotRevision
+        : data.processing?.slotRevision;
+    latestProcessingSlotRevisionRef.current =
+      typeof latestSlotRevision === "number"
+        ? latestSlotRevision
+        : latestProcessingSlotRevisionRef.current;
 
-  async function prepareQuestionNow(
-    reason: string,
-  ): Promise<PrepareQuestionResponse | null> {
-    const currentSession = sessionRef.current;
-    if (!currentSession || completionState !== "active") return null;
-
-    const prepareKey = `${currentSession.id}:${currentTopic.slot_name}:${reason}`;
-    if (
-      backgroundPreparePromiseRef.current &&
-      latestPrepareKeyRef.current === prepareKey
-    ) {
-      return backgroundPreparePromiseRef.current;
+    if (data.processing?.processingStatus) {
+      setAiProcessingStatus(data.processing.processingStatus);
     }
-
-    latestPrepareKeyRef.current = prepareKey;
-    setBackgroundProcessingStatus("updating_slots");
-
-    const promise = prepareNextQuestion({
-      sessionId: currentSession.id,
-      currentTopic: currentTopic.slot_name,
-      currentTopicTitle: currentTopic.title,
-    })
-      .then((data) => {
-        latestProcessingSlotRevisionRef.current =
-          typeof data.processing?.slotRevision === "number"
-            ? data.processing.slotRevision
-            : latestProcessingSlotRevisionRef.current;
-        if (data.processing?.processingStatus) {
-          setBackgroundProcessingStatus(data.processing.processingStatus);
-        }
-
-        const nextPrepared = data.prepared_question;
-        if (
-          nextPrepared &&
-          isPreparedQuestionValidForCurrentTopic(nextPrepared)
-        ) {
-          setPreparedQuestion(nextPrepared);
-          preparedQuestionRef.current = nextPrepared;
-          return data;
-        }
-
-        if (data.no_relevant_followup) {
-          setPreparedQuestion(null);
-          preparedQuestionRef.current = null;
-        }
-
-        return data;
-      })
-      .catch((error) => {
-        console.warn("[ai prepare-question client failed]", error);
-        setBackgroundProcessingStatus("failed");
-        return null;
-      })
-      .finally(() => {
-        backgroundPreparePromiseRef.current = null;
-      });
-
-    backgroundPreparePromiseRef.current = promise;
-    return promise;
   }
-
-  function isPreparedQuestionValidForCurrentTopic(
-    question: PreparedQuestion | null,
-  ) {
-    if (!question) return false;
-    if (question.status !== "prepared") return false;
-    const currentLatestUtteranceId = getLatestPersistedUtteranceId(
-      utterancesRef.current,
-    );
-    const currentSlotRevision = latestProcessingSlotRevisionRef.current;
-    return (
-      question.session_id === sessionRef.current?.id &&
-      (question.topic_id === currentTopic.id ||
-        question.topic_slot_name === currentTopic.slot_name) &&
-      (currentSlotRevision === null ||
-        question.slotRevision === currentSlotRevision) &&
-      (question.basedOnUtteranceId ?? null) === currentLatestUtteranceId
-    );
-  }
-
-  function createSuggestionFromPreparedQuestion(
-    question: PreparedQuestion,
-  ): NextQuestionResponse["suggestion"] {
-    return {
-      question: question.question,
-      transition_phrase: question.transition_phrase,
-      targetMainSlotId: question.targetMainSlotId,
-      targetSubSlotId: question.targetSubSlotId,
-      questionPurpose: question.questionPurpose,
-      reasonForSelection: question.reasonForSelection,
-      no_relevant_followup: false,
-    };
-  }
-
-  async function showPreparedQuestion(question: PreparedQuestion) {
-    setPromptPanel(
-      createQuestionPromptPanel(
-        createSuggestionFromPreparedQuestion(question),
-        "AIからの質問",
-      ),
-    );
-    invalidatePreparedQuestion("prepared_question_displayed");
-
-    try {
-      await displayPreparedQuestion(sessionRef.current?.id ?? "", question.id);
-    } catch (error) {
-      console.warn("[ai prepared question display log failed]", error);
-    }
-
-    if (!(await waitForRemoteSpeechFinals())) {
-      const activeRoles = getActiveHumanSpeechRoles();
-      showRemoteMicControlError(
-        "発話中のためAI読み上げを待機しましたが、確定しませんでした",
-        activeRoles.length > 0 ? activeRoles : ["elder", "caregiver"],
-      );
-      return;
-    }
-
-    void playSpokenContent({
-      contentType: "question",
-      topicId: question.topic_id,
-      text: question.question,
-      preparedAudioUsed: false,
-    });
-  }
-
   function setPlaybackControlValue(next: ActivePlaybackControl | null) {
     activePlaybackControlRef.current = next;
     setActivePlaybackControl(next);
@@ -1768,20 +1717,6 @@ function SessionPageClient() {
     return false;
   }
 
-  async function waitForRemoteSpeechFinals(timeoutMs = HUMAN_SPEECH_FINAL_WAIT_MS) {
-    const deadline = Date.now() + timeoutMs;
-
-    while (Date.now() <= deadline) {
-      const activeRoles = getActiveHumanSpeechRoles();
-      if (activeRoles.length === 0) return true;
-
-      setStatusText("発話の確定待ち");
-      await sleep(REMOTE_MIC_CONTROL_ACK_POLL_MS);
-    }
-
-    return false;
-  }
-
   function getActiveHumanSpeechRoles(): SpeakerRole[] {
     return (["elder", "caregiver"] as const).filter(
       (role) => humanSpeechActiveRef.current[role] !== null,
@@ -1881,31 +1816,6 @@ function SessionPageClient() {
     return false;
   }
 
-  async function preparePersistedConversationForQuestionGeneration() {
-    const currentSession = sessionRef.current;
-    if (!currentSession) throw new Error("session_missing");
-
-    if (!(await waitForRemoteSpeechFinals())) {
-      const activeRoles = getActiveHumanSpeechRoles();
-      showRemoteMicControlError(
-        "発話の確定を待機中にタイムアウトしました",
-        activeRoles.length > 0 ? activeRoles : ["elder", "caregiver"],
-      );
-      throw new Error("human_speech_final_timeout");
-    }
-
-    await commitLocalPendingUtterances();
-    const detail = await refreshPersistedConversation(currentSession.id);
-    const latestUtterance = detail.utterances.at(-1) ?? null;
-
-    console.info("[ai question generation input ready]", {
-      sessionId: currentSession.id,
-      conversationRevision: latestUtterance?.id ?? null,
-      utteranceCount: detail.utterance_count,
-    });
-
-    return detail;
-  }
   async function refreshPersistedConversation(sessionId: string) {
     const detail = await fetchSessionDetail(sessionId);
     if (sessionRef.current?.id !== sessionId) {
@@ -2214,6 +2124,7 @@ function SessionPageClient() {
 
   async function runNextQuestionAction() {
     if (!sessionRef.current) return;
+    const requestId = crypto.randomUUID();
     const actionSessionId = sessionRef.current.id;
     const actionTopicId = currentTopic.id;
     const actionTopicSlotName = currentTopic.slot_name;
@@ -2221,83 +2132,108 @@ function SessionPageClient() {
     clearPromptRestoreTimeout();
     setBusyAction("next_question");
     setStatusText("質問確認中");
+    setAiProcessingStatus("updating_slots");
     setDeveloperSlotClassificationDebug(null);
 
     try {
-      const detail = await preparePersistedConversationForQuestionGeneration();
       if (
         sessionRef.current?.id !== actionSessionId ||
         currentTopic.id !== actionTopicId ||
         currentTopic.slot_name !== actionTopicSlotName
       ) {
         return;
-      }
-
-      const currentPrepared = preparedQuestionRef.current;
-      if (isPreparedQuestionValidForCurrentTopic(currentPrepared)) {
-        console.info("[ai prepared question reused]", {
-          sessionId: actionSessionId,
-          topicId: actionTopicId,
-          preparedQuestionId: currentPrepared.id,
-          conversationRevision: getLatestPersistedUtteranceId(detail.utterances),
-          preparedQuestionReused: true,
-        });
-        await showPreparedQuestion(currentPrepared);
-        setStatusText("保存済み");
-        return;
-      }
-      if (currentPrepared) {
-        console.info("[ai prepared question invalidated before display]", {
-          sessionId: actionSessionId,
-          topicId: actionTopicId,
-          preparedQuestionId: currentPrepared.id,
-          preparedQuestionInvalidationReason: "conversation_revision_changed",
-          conversationRevision: getLatestPersistedUtteranceId(detail.utterances),
-          basedOnUtteranceId: currentPrepared.basedOnUtteranceId,
-          slotRevision: currentPrepared.slotRevision,
-        });
-        invalidatePreparedQuestion("conversation_revision_changed");
       }
 
       setPromptPanel(getPendingPrompt("next_question"));
       setStatusText("質問生成中");
       console.info("[ai question generation started]", {
+        requestId,
         sessionId: actionSessionId,
         topicId: actionTopicId,
-        conversationRevision: getLatestPersistedUtteranceId(detail.utterances),
+        conversationRevision: getLatestPersistedUtteranceId(utterancesRef.current),
         questionGenerationStartedAt: new Date().toISOString(),
       });
-      const prepared = await prepareQuestionNow("button_fallback");
+
+      const data = await generateNextQuestionNow({
+        requestId,
+        sessionId: actionSessionId,
+        currentTopicId: actionTopicId,
+        currentTopic: actionTopicSlotName,
+        currentTopicTitle: currentTopic.title,
+      });
+      applyAiQuestionProcessingState(data);
+      if (data.slot_states) {
+        setDeveloperSlotStates(data.slot_states);
+      }
+      if (data.slot_control) {
+        setDeveloperSlotControl(data.slot_control);
+      }
+      setDeveloperSlotClassificationDebug(
+        data.slot_classification_debug ?? null,
+      );
+
       if (
         sessionRef.current?.id !== actionSessionId ||
         currentTopic.id !== actionTopicId ||
         currentTopic.slot_name !== actionTopicSlotName
       ) {
+        console.info("[ai question result ignored after topic/session change]", {
+          requestId,
+          actionSessionId,
+          actionTopicId,
+          currentSessionId: sessionRef.current?.id ?? null,
+          currentTopicId: currentTopic.id,
+        });
         return;
       }
 
-      if (prepared?.prepared_question) {
-        if (!isPreparedQuestionValidForCurrentTopic(prepared.prepared_question)) {
-          console.info("[ai prepared question rejected after generation]", {
-            sessionId: actionSessionId,
-            topicId: actionTopicId,
-            preparedQuestionId: prepared.prepared_question.id,
-            preparedQuestionInvalidationReason: "conversation_revision_changed",
-            conversationRevision: getLatestPersistedUtteranceId(
-              utterancesRef.current,
-            ),
-            basedOnUtteranceId: prepared.prepared_question.basedOnUtteranceId,
-            slotRevision: prepared.prepared_question.slotRevision,
-          });
-          invalidatePreparedQuestion("conversation_revision_changed");
-          throw new Error("prepared_question_stale_after_generation");
-        }
-        await showPreparedQuestion(prepared.prepared_question);
+      if (data.failed) {
+        throw new Error(data.error ?? "ai_question_request_failed");
+      }
+
+      if (data.in_progress) {
+        setStatusText("準備中");
+        setPromptPanel({
+          title: "質問準備中",
+          body: "発話内容を整理しています。少し待ってからもう一度「質問生成」を押してください。",
+          tone: "status",
+        });
+        return;
+      }
+
+      if (data.suggestion?.question) {
+        setPromptPanel(createQuestionPromptPanel(data.suggestion, "AIからの質問"));
         setStatusText("保存済み");
+        void playSpokenContent({
+          contentType: "question",
+          topicId: actionTopicId,
+          text: data.suggestion.question,
+          preparedAudioUsed: false,
+        });
         return;
       }
 
-      if (prepared?.no_relevant_followup) {
+      if (data.no_relevant_followup) {
+        if (data.transition_proposal?.action === "advance_topic") {
+          setTransitionProposal({
+            reason: "ai_advance_topic",
+            suggestedAt: Date.now(),
+            topicIndex: currentTopicIndex,
+            source: "ai_question",
+            proposalId:
+              data.transition_proposal.recommendationId ??
+              data.transition_proposal.recommendation_id,
+            sessionId:
+              data.transition_proposal.sessionId ??
+              data.transition_proposal.session_id,
+            topicId:
+              data.transition_proposal.topicId ??
+              data.transition_proposal.topic_id,
+            slotRevision: data.transition_proposal.slotRevision,
+            basedOnUtteranceId: null,
+            action: "advance_topic",
+          });
+        }
         setPromptPanel(
           createQuestionPromptPanel(
             {
@@ -2312,36 +2248,139 @@ function SessionPageClient() {
         return;
       }
 
-      if (prepared?.in_progress) {
-        setStatusText("準備中");
-        setPromptPanel({
-          title: "質問準備中",
-          body: "発話内容を整理しています。数秒後にもう一度「質問生成」を押してください。",
-          tone: "status",
-        });
-        return;
-      }
-
-      throw new Error("prepared question unavailable");
+      throw new Error("next_question_unavailable");
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
       setStatusText("保存エラー");
-      if (
-        errorMessage !== "human_speech_final_timeout" &&
-        errorMessage !== "remote_mic_final_flush_timeout"
-      ) {
-        showTemporaryErrorPrompt({
-          title: "AI支援を実行できません",
-          body: "通信状態またはデータベース接続を確認してください。",
-          tone: "error",
-        });
-      }
+      setAiProcessingStatus("failed");
+      showTemporaryErrorPrompt({
+        title: "AI支援を実行できません",
+        body: "通信状態またはデータベース接続を確認してください。",
+        tone: "error",
+      });
+      console.warn("[ai question generation failed]", error);
     } finally {
       setBusyAction(null);
     }
   }
 
+  function startDepartedTopicSlotUpdate(input: {
+    sessionId: string;
+    fromTopicId: string;
+    fromTopicSlotName: string;
+    fromTopicTitle: string;
+    toTopicId: string | null;
+    reason: "manual" | "max_time";
+  }) {
+    const key = `${input.sessionId}:${input.fromTopicId}`;
+    if (departedTopicSlotUpdateInFlightRef.current.has(key)) {
+      console.info("[topic transition slot update skipped duplicate]", {
+        sessionId: input.sessionId,
+        fromTopicId: input.fromTopicId,
+        toTopicId: input.toTopicId,
+        reason: input.reason,
+      });
+      return;
+    }
+
+    departedTopicSlotUpdateInFlightRef.current.add(key);
+    console.info("[topic transition slot update started]", {
+      sessionId: input.sessionId,
+      fromTopicId: input.fromTopicId,
+      toTopicId: input.toTopicId,
+      reason: input.reason,
+      startedAt: new Date().toISOString(),
+    });
+
+    void postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
+      session_id: input.sessionId,
+      current_topic_id: input.fromTopicId,
+      current_topic: input.fromTopicSlotName,
+      current_topic_title: input.fromTopicTitle,
+    })
+      .then((updateResult) => {
+        setDeveloperSlotStates(updateResult.slot_states);
+        console.info("[topic transition slot update completed]", {
+          sessionId: input.sessionId,
+          fromTopicId: input.fromTopicId,
+          toTopicId: input.toTopicId,
+          reason: input.reason,
+          outcome: updateResult.slot_update_outcome ?? updateResult.outcome,
+          processedThroughUtteranceId:
+            updateResult.processed_through_utterance_id ?? null,
+          processedUtteranceCount:
+            updateResult.processed_utterance_ids?.length ?? 0,
+          completedAt: new Date().toISOString(),
+        });
+      })
+      .catch((error) => {
+        console.warn("[topic transition slot update failed]", {
+          sessionId: input.sessionId,
+          fromTopicId: input.fromTopicId,
+          toTopicId: input.toTopicId,
+          reason: input.reason,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        departedTopicSlotUpdateInFlightRef.current.delete(key);
+      });
+  }
+
+  async function advanceToNextTopicNow(input: {
+    sessionId: string;
+    fromTopic: (typeof DISCUSSION_TOPICS)[number];
+    fromTopicIndex: number;
+    toTopic: (typeof DISCUSSION_TOPICS)[number];
+    reason: "manual" | "max_time" | "ai_proposal";
+    updateDepartedTopicSlots: boolean;
+  }) {
+    const transitionKey = `${input.sessionId}:${input.fromTopic.id}:${input.toTopic.id}`;
+    if (topicTransitionInFlightRef.current === transitionKey) return;
+    topicTransitionInFlightRef.current = transitionKey;
+
+    console.info("[topic transition started]", {
+      sessionId: input.sessionId,
+      fromTopicId: input.fromTopic.id,
+      toTopicId: input.toTopic.id,
+      reason: input.reason,
+      updateDepartedTopicSlots: input.updateDepartedTopicSlots,
+      startedAt: new Date().toISOString(),
+    });
+
+    try {
+      if (input.updateDepartedTopicSlots) {
+        startDepartedTopicSlotUpdate({
+          sessionId: input.sessionId,
+          fromTopicId: input.fromTopic.id,
+          fromTopicSlotName: input.fromTopic.slot_name,
+          fromTopicTitle: input.fromTopic.title,
+          toTopicId: input.toTopic.id,
+          reason: input.reason === "max_time" ? "max_time" : "manual",
+        });
+      }
+
+      await syncSessionCurrentTopic(
+        input.sessionId,
+        input.toTopic,
+        input.fromTopicIndex + 1,
+      );
+      advanceTopic();
+      setPromptPanel(createTopicTransitionPrompt(input.toTopic));
+      playTopicPrompt(input.toTopic);
+      setStatusText("菫晏ｭ俶ｸ医∩");
+
+      if (!input.updateDepartedTopicSlots) {
+        console.info("[topic transition slot update skipped]", {
+          sessionId: input.sessionId,
+          fromTopicId: input.fromTopic.id,
+          toTopicId: input.toTopic.id,
+          reason: input.reason,
+        });
+      }
+    } finally {
+      topicTransitionInFlightRef.current = null;
+    }
+  }
   async function handleSwitchTopicAction() {
     if (!session || busyAction) return;
 
@@ -2353,28 +2392,17 @@ function SessionPageClient() {
     setBusyAction("switch_topic");
     setStatusText("保存中");
     setDeveloperSlotClassificationDebug(null);
-    invalidatePreparedQuestion("topic_changed");
 
     try {
-      await preparePersistedConversationForQuestionGeneration();
-
       if (nextTopic) {
-        const updateResult = await postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
-          session_id: previousSessionId,
-          current_topic: previousTopic.slot_name,
-          current_topic_title: previousTopicTitle,
+        await advanceToNextTopicNow({
+          sessionId: previousSessionId,
+          fromTopic: previousTopic,
+          fromTopicIndex: currentTopicIndex,
+          toTopic: nextTopic,
+          reason: "manual",
+          updateDepartedTopicSlots: true,
         });
-        setDeveloperSlotStates(updateResult.slot_states);
-        setDeveloperSlotClassificationDebug(
-          updateResult.slot_classification_debug ?? null,
-        );
-        if (updateResult.slot_control) {
-          setDeveloperSlotControl(updateResult.slot_control);
-        }
-        advanceTopic();
-        setPromptPanel(createTopicTransitionPrompt(nextTopic));
-        playTopicPrompt(nextTopic);
-        setStatusText("保存済み");
         return;
       }
 
@@ -2416,9 +2444,9 @@ function SessionPageClient() {
     setDeveloperSlotClassificationDebug(null);
 
     try {
-      await preparePersistedConversationForQuestionGeneration();
       const updateResult = await postJson<UpdateSlotsResponse>("/api/ai/update-slots", {
         session_id: session.id,
+        current_topic_id: currentTopic.id,
         current_topic: currentTopic.slot_name,
         current_topic_title: currentTopic.title,
       });
@@ -2463,7 +2491,9 @@ function SessionPageClient() {
         }
 
         const data = await postJson<FinalMinutesResponse>("/api/ai/final-minutes", {
+          request_id: crypto.randomUUID(),
           session_id: session.id,
+          current_topic_id: currentTopic.id,
           current_topic: currentTopic.slot_name,
           current_topic_title: currentTopic.title,
           finalize: false,
@@ -2821,8 +2851,33 @@ function SessionPageClient() {
   async function acceptTransitionProposal() {
     if (!session || busyAction || completionState !== "active") return;
 
-    const proposalReason = transitionProposal?.reason;
+    const proposal = transitionProposal;
+    const proposalReason = proposal?.reason;
     setTransitionProposal(null);
+
+    if (
+      proposal?.source === "ai_question" &&
+      proposal.action === "advance_topic" &&
+      proposal.sessionId === session.id &&
+      proposal.topicId === currentTopic.id
+    ) {
+      if (isLastTopic) {
+        await completeSession();
+        return;
+      }
+
+      if (!nextTopic) return;
+
+      await advanceToNextTopicNow({
+        sessionId: session.id,
+        fromTopic: currentTopic,
+        fromTopicIndex: currentTopicIndex,
+        toTopic: nextTopic,
+        reason: "ai_proposal",
+        updateDepartedTopicSlots: false,
+      });
+      return;
+    }
 
     if (isLastTopic) {
       if (proposalReason === "ready_to_end") {
@@ -2880,17 +2935,14 @@ function SessionPageClient() {
     setStatusText("話題切替中");
 
     try {
-      await preparePersistedConversationForQuestionGeneration();
-      await postJson("/api/ai/update-slots", {
-        session_id: session.id,
-        current_topic: currentTopic.slot_name,
-        current_topic_title: currentTopic.title,
+      await advanceToNextTopicNow({
+        sessionId: session.id,
+        fromTopic: currentTopic,
+        fromTopicIndex: currentTopicIndex,
+        toTopic: nextTopic,
+        reason: "max_time",
+        updateDepartedTopicSlots: true,
       });
-      advanceTopic();
-      setPromptPanel(createTopicTransitionPrompt(nextTopic));
-      playTopicPrompt(nextTopic);
-      await refreshDeveloperSlotStates(session.id);
-      setStatusText("保存済み");
     } catch {
       setStatusText("保存エラー");
       showTemporaryErrorPrompt({
@@ -2903,9 +2955,10 @@ function SessionPageClient() {
     }
   }
 
-  async function completeSession() {
+async function completeSession() {
     if (!session || completionState === "generating_minutes") return;
 
+    const requestId = crypto.randomUUID();
     stopVoiceAudioInput();
     setCompletionState("generating_minutes");
     setBusyAction("update_slots");
@@ -2913,14 +2966,10 @@ function SessionPageClient() {
     setStatusText("議事録生成中");
 
     try {
-      await preparePersistedConversationForQuestionGeneration();
-      await postJson("/api/ai/update-slots", {
-        session_id: session.id,
-        current_topic: currentTopic.slot_name,
-        current_topic_title: currentTopic.title,
-      });
       const data = await postJson<FinalMinutesResponse>("/api/ai/final-minutes", {
+        request_id: requestId,
         session_id: session.id,
+        current_topic_id: currentTopic.id,
         current_topic: currentTopic.slot_name,
         current_topic_title: currentTopic.title,
         finalize: true,
@@ -3315,7 +3364,7 @@ function SessionPageClient() {
                 carryToNextTopicMs,
                 maxReached: maxTimeElapsed,
               }}
-              aiPreparationStatus={backgroundProcessingStatus}
+              aiPreparationStatus={aiProcessingStatus}
               loading={developerSlotLoading}
               error={developerSlotError}
               onRefresh={() => {
@@ -4685,6 +4734,8 @@ async function addUtterance(
     startedAt?: string;
     endedAt?: string;
     source?: "manual" | "local_voice" | "remote_voice";
+    topicId?: string | null;
+    topicIndex?: number | null;
   },
 ): Promise<Utterance> {
   const data = await postJson<{ utterance: Utterance }>("/api/utterance", {
@@ -4694,6 +4745,8 @@ async function addUtterance(
     startedAt: timing?.startedAt,
     endedAt: timing?.endedAt,
     source: timing?.source ?? "manual",
+    topicId: timing?.topicId,
+    topicIndex: timing?.topicIndex,
   });
 
   return data.utterance;
@@ -4880,25 +4933,19 @@ async function createReplaySession(
   });
 }
 
-async function prepareNextQuestion(input: {
+async function generateNextQuestionNow(input: {
+  requestId: string;
   sessionId: string;
+  currentTopicId: string;
   currentTopic: string;
   currentTopicTitle: string;
-}): Promise<PrepareQuestionResponse> {
-  return postJson<PrepareQuestionResponse>("/api/ai/prepare-question", {
+}): Promise<AiQuestionResponse> {
+  return postJson<AiQuestionResponse>("/api/ai/next-question", {
+    request_id: input.requestId,
     session_id: input.sessionId,
+    current_topic_id: input.currentTopicId,
     current_topic: input.currentTopic,
     current_topic_title: input.currentTopicTitle,
-  });
-}
-
-async function displayPreparedQuestion(
-  sessionId: string,
-  preparedQuestionId: string,
-): Promise<NextQuestionResponse> {
-  return postJson<NextQuestionResponse>("/api/ai/next-question", {
-    session_id: sessionId,
-    prepared_question_id: preparedQuestionId,
   });
 }
 
@@ -5218,7 +5265,6 @@ function createConversationEntries(
     ...liveTranscripts
       .filter(
         (transcript) =>
-          transcript.status === "partial" ||
           !finalSourceGroupIds.has(transcript.transcriptId),
       )
       .map((transcript) => ({
@@ -5402,6 +5448,7 @@ function proposalReasonLabel(reason: ProposalReason) {
     no_more_to_add: "追加なし",
     not_considered: "保留回答",
     prefer_not_to_answer: "回答回避",
+    ai_advance_topic: "AI判定による遷移",
     ready_to_end: "終了可能",
   };
 

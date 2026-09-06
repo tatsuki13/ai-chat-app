@@ -24,6 +24,13 @@ export async function POST(request: Request) {
       body.source,
       body.source === "local_voice" ? "local_voice" : "manual",
     );
+    const requestedTopicId = optionalString(body.topic_id ?? body.topicId);
+    const requestedTopicIndex =
+      typeof body.topic_index === "number" && Number.isInteger(body.topic_index)
+        ? body.topic_index
+        : typeof body.topicIndex === "number" && Number.isInteger(body.topicIndex)
+          ? body.topicIndex
+          : null;
 
     if (!sessionId || !isSpeaker(rawSpeaker) || !text) {
       return NextResponse.json(
@@ -38,6 +45,8 @@ export async function POST(request: Request) {
         participantCode: true,
         startedAt: true,
         dialogueStartedAt: true,
+        currentTopicId: true,
+        currentTopicIndex: true,
       },
     });
 
@@ -61,6 +70,8 @@ export async function POST(request: Request) {
         startMs: timing.startMs,
         endMs: timing.endMs,
         source,
+        topicId: requestedTopicId ?? session.currentTopicId,
+        topicIndex: requestedTopicIndex ?? session.currentTopicIndex,
         analysisVersion: UTTERANCE_ANALYSIS_VERSION,
       },
     });
@@ -73,6 +84,8 @@ export async function POST(request: Request) {
         start_ms: utterance.startMs,
         end_ms: utterance.endMs,
         source: utterance.source,
+        topic_id: utterance.topicId,
+        topic_index: utterance.topicIndex,
         analysis_version: utterance.analysisVersion,
         created_at: utterance.createdAt.toISOString(),
       },
@@ -89,6 +102,10 @@ export async function POST(request: Request) {
 
 function requiredString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function optionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function normalizeSpeaker(value: string) {

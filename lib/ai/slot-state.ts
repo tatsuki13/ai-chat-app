@@ -1,1 +1,4 @@
-export { updateSlotStateBundleFromConversation } from "../llm";
+export {
+  updateSlotStateBundleFromConversation,
+  updateSlotsAndGenerateNextQuestionAction,
+} from "../llm";

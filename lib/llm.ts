@@ -37,6 +37,7 @@ import {
   isCaregiverSpeaker,
   isElderSpeaker,
   isDeferredSubSlotState,
+  isTerminalValidResponseState,
   isTerminalSlotStatus,
   mergeSlotStates,
   normalizeSlotName,
@@ -82,7 +83,6 @@ type ConversationContext = {
   currentTopicTitle?: string;
   nextTopic?: string;
   nextTopicTitle?: string;
-  useDeterministicQuestionText?: boolean;
 };
 
 const NEXT_QUESTION_RECENT_UTTERANCE_COUNT = 16;
@@ -128,39 +128,6 @@ const COMMON_AI_POLICY = [
 
 const CAREGIVER_INTERPRETATION_AGREEMENT_PREFIX = "介護者解釈に同意: ";
 
-const SYSTEM_NEXT_QUESTION = [
-  "あなたはACP対話を支援するAIです。会話を主導せず、介護者がそのまま読み上げられる、文脈に合った答えやすい質問を1つだけ生成してください。",
-  "【参照範囲】",
-  "質問選択はcurrent_topicを主軸とし、ACP全体の未充足状態は補助情報に限ります。",
-  "research_themesの6Themeが研究上の評価単位です。available_topicsは画面遷移用であり、研究Themeではありません。",
-  "通常はquestion_scope内の現在テーマ、その配下サブスロット、関連する保留項目だけを参照してください。",
-  "question_scope.allSlotReferenceUsedは必ずfalseとし、将来テーマや現在テーマと無関係な未充足スロットを候補に含めないでください。",
-  "current_topic.aspectsは記録・質問生成の補助であり、質問ノルマではありません。core_aspectsを優先し、optional_aspectsを埋めるためだけに質問しないでください。",
-  "【質問対象】",
-  "targetMainSlotId/targetSubSlotIdには、next_question_input.askableSubSlots内の組み合わせだけを指定してください。",
-  "askableSubSlotsは、アプリが現在テーマ内かつ直近発話と自然に関連すると判断した候補です。未確認という理由だけで質問してはいけません。",
-  "next_question_input.selectedQuestionTargetだけを対象にし、他のsub-slotや目的を質問に含めないでください。",
-  "target_slotにはacp_slots内のACPスロットだけを指定し、「未解決課題」は指定しないでください。",
-  "【質問選択】",
-  "未充足スロットを機械的に埋めず、直前の発話から自然につながる質問を選んでください。",
-  "minutesReadinessとfollowUpNeedを参照してください。requiredは根拠ある議事録に必要、helpfulは自然につながる場合のみ質問可能、noneは質問禁止です。",
-  "原則としてcurrent_thought、background_reason、conditions_specificityの順に優先してください。ただし、回答状態に反して無理に埋めないでください。",
-  "重い話題や無関係な未充足スロットへ急に移らず、既に十分話された内容を繰り返さないでください。",
-  "【回答状態と重複防止】",
-  "未検討、不明、言語化困難、回答拒否、「特にない」「今はない」「思いつかない」なども有効な回答として扱い、同じ直接質問を追及・反復しないでください。",
-  "next_question_input.aiQuestionHistoryとcurrentTopicQuestionCountを参照し、同じテーマでの追加質問は最大1回としてください。同じ意味の言い換えも反復に含みます。",
-  "続ける場合は同じ質問の言い換えではなく、最近の出来事、嫌だったこと、避けたいこと、時間の使い方など、具体的な別角度から尋ねてください。",
-  "【会話情報の扱い】",
-  "next_question_input.slotBackedMemoryはslotに保存済みの安定した記録として扱ってください。",
-  "next_question_input.unassignedRecentUtterancesは会話の流れにのみ利用し、明確な根拠がない限り確定したslot内容として扱わないでください。",
-  "両者が食い違う場合、充足判定にはslotBackedMemory、質問文の自然さにはunassignedRecentUtterancesを優先してください。",
-  "【質問なしの条件】",
-  "askableSubSlotsが空、または自然に関連する候補がない場合は、questionをnull、no_relevant_followupをtrueにしてください。",
-  "質問生成処理では、次テーマへの遷移を実行・提案しないでください。",
-  "高齢者を責めず、短く自然な日本語で質問してください。出力は次のJSONのみとしてください。",
-  '{"question":"... | null","transition_phrase":"...","target_slot":"...","targetMainSlotId":"...","targetSubSlotId":"...","questionPurpose":"elicit_preference | ask_reason | ask_example | ask_condition | clarify | resolve_conflict","reasonForSelection":"...","reason":"...","sensitivity":"low | medium | high","no_relevant_followup":false}',
-].join("\n");
-
 const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
  "あなたはACP対話ログの発話を、提供された固定のメインスロット・サブスロットへ意味分類するAIです。",
   "【役割】",
@@ -182,6 +149,19 @@ const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
   "介護者発話を本人の意思のevidenceに使えるのは、近接する本人の明確な同意または補足がある場合だけです。その場合は介護者発話と本人発話の両IDをevidenceUtteranceIdsに含めてください。",
   "次のJSON形式のみを返してください。",
   '{"classifications":[{"mainSlotId":"...","subSlotId":"...","relevantMentionPresent":true,"responsePresent":true,"specificContentPresent":true,"reasonPresent":false,"conditionPresent":false,"examplePresent":false,"ambiguityPresent":false,"conflictPresent":false,"responseMeaning":"preference_expressed | explicit_none | not_considered | unable_to_verbalize | declined | other_response | unknown","evidenceType":"direct_elder_statement | elder_confirmation | caregiver_report_with_elder_confirmation | caregiver_report_only | shared_statement | unknown","evidenceUtteranceIds":["..."],"classificationNote":"optional"}],"unmatchedUtteranceIds":["..."]}',
+].join("\n");
+
+const SYSTEM_AI_QUESTION_WITH_SLOT_UPDATES = [
+  "You support an ACP dialogue in Japanese. Return only JSON.",
+  "For one AI question button press, produce both slot update candidates and the next action in a single response.",
+  "Use unprocessed_utterances only for slot_updates. recent_context is only background for natural question wording and must not become new evidence.",
+  "The application validates completion, responseState, reasonCode, canAskAgain, isDeferred, evidence, speaker consent, and state transitions.",
+  "Prefer the elder person's own words. Do not confirm the elder's preference from caregiver-only speech.",
+  "Do not overwrite meaningful existing state with mere acknowledgements or progress utterances.",
+  "Choose exactly one next_action. Use ask_question only when one current-topic sub-slot can still be asked about. Use advance_topic when no askable item remains.",
+  "The question must be short, natural Japanese, easy for an older adult, non-leading, and ask only one thing.",
+  "Do not repeat previous_ai_questions or ask again about declined, explicit_none, not_considered, or unable_to_verbalize items.",
+  '{"slot_updates":[{"mainSlotId":"...","subSlotId":"...","relevantMentionPresent":true,"responsePresent":true,"specificContentPresent":true,"reasonPresent":false,"conditionPresent":false,"examplePresent":false,"ambiguityPresent":false,"conflictPresent":false,"responseMeaning":"preference_expressed | explicit_none | not_considered | unable_to_verbalize | declined | other_response | unknown","evidenceType":"direct_elder_statement | elder_confirmation | caregiver_report_with_elder_confirmation | caregiver_report_only | shared_statement | unknown","evidenceUtteranceIds":["..."],"classificationNote":"optional"}],"unmatchedUtteranceIds":["..."],"next_action":{"type":"ask_question | advance_topic","target_sub_slot_id":"... | null","question":"... | null","reason":"..."}}',
 ].join("\n");
 
 
@@ -284,6 +264,18 @@ type SlotClassificationResult = {
   __requestMeta?: JsonRequestMeta;
 };
 
+type AiQuestionWithSlotUpdatesResult = {
+  slot_updates?: SlotClassification[];
+  unmatchedUtteranceIds?: string[];
+  next_action?: {
+    type?: "ask_question" | "advance_topic";
+    target_sub_slot_id?: string | null;
+    question?: string | null;
+    reason?: string | null;
+  };
+  __requestMeta?: JsonRequestMeta;
+};
+
 type QuestionHistoryItem = {
   content: string;
   topicId?: string | null;
@@ -371,9 +363,11 @@ type SlotCandidateValidationResult =
         | "invalid_response_meaning"
         | "invalid_evidence_type"
         | "missing_evidence"
-        | "unknown_evidence_utterance"
-        | "non_elder_evidence"
-        | "invalid_transition";
+      | "unknown_evidence_utterance"
+      | "invalid_evidence_topic"
+      | "progress_only_evidence"
+      | "non_elder_evidence"
+      | "invalid_transition";
     };
 
 type SlotStateBundle = {
@@ -477,6 +471,129 @@ export async function updateSlotStateBundleFromConversation(
   };
 }
 
+export async function updateSlotsAndGenerateNextQuestionAction(
+  context: ConversationContext,
+): Promise<
+  SlotStateBundle & {
+    nextQuestion: NextQuestionResult;
+    nextActionDebug: {
+      llmActionType: string | null;
+      llmTargetSubSlotId: string | null;
+      acceptedActionType: "ask_question" | "advance_topic";
+      reason: string;
+    };
+  }
+> {
+  const fallbackSubSlotStates = context.subSlotStates?.length
+    ? context.subSlotStates
+    : createEmptySubSlotStates();
+  const utterancesToClassify = (context.utterancesToClassify ?? []).filter(
+    (utterance) => utterance.id,
+  );
+  const currentTopic = resolveDiscussionTopic(context.currentTopic);
+  const fallbackSlotStates = deriveMainSlotStatesFromSubSlots(
+    context.slotStates,
+    fallbackSubSlotStates,
+    context.utterances,
+  );
+  const fallbackContext = {
+    ...context,
+    slotStates: fallbackSlotStates,
+    subSlotStates: fallbackSubSlotStates,
+  };
+  const fallbackCandidate = selectNextQuestionCandidate(fallbackContext);
+  const fallbackQuestion = fallbackCandidate
+    ? fallbackNextQuestion(
+        context.utterances,
+        fallbackSlotStates,
+        currentTopic.slot_name,
+        fallbackSubSlotStates,
+        fallbackCandidate,
+      )
+    : noRelevantFollowUpResult(
+        currentTopic.slot_name as AcpSlotName,
+        "追加で質問可能な項目がありません。",
+      );
+  const fallbackActionType = fallbackCandidate ? "ask_question" : "advance_topic";
+
+  const result = await requestJson<AiQuestionWithSlotUpdatesResult>(
+    SYSTEM_AI_QUESTION_WITH_SLOT_UPDATES,
+    buildAiQuestionWithSlotUpdatesPayload(
+      {
+        ...context,
+        currentTopic: currentTopic.slot_name,
+      },
+      fallbackSubSlotStates,
+      fallbackSlotStates,
+    ),
+    {
+      slot_updates: [],
+      unmatchedUtteranceIds: [],
+      next_action: {
+        type: fallbackActionType,
+        target_sub_slot_id: fallbackCandidate?.subSlotId ?? null,
+        question: fallbackQuestion.question,
+        reason: fallbackQuestion.reason,
+      },
+    },
+    { type: "json_object" },
+    { throwOnFailure: true },
+  );
+  const applied = applySlotClassifications({
+    result: {
+      classifications: result.slot_updates ?? [],
+      unmatchedUtteranceIds: result.unmatchedUtteranceIds,
+      __requestMeta: result.__requestMeta,
+    },
+    utterances: utterancesToClassify,
+    currentStates: fallbackSubSlotStates,
+    currentTopic: currentTopic.slot_name,
+    sessionId: context.sessionId,
+  });
+  const slotStates = deriveMainSlotStatesFromSubSlots(
+    context.slotStates,
+    applied.subSlotStates,
+    context.utterances,
+  );
+  const updatedContext = {
+    ...context,
+    currentTopic: currentTopic.slot_name,
+    slotStates,
+    subSlotStates: applied.subSlotStates,
+  };
+  const selectedAfterUpdate = selectNextQuestionCandidate(updatedContext);
+  const nextQuestion = normalizeCombinedNextQuestionAction({
+    result,
+    context: updatedContext,
+    currentTopic,
+    selectedCandidate: selectedAfterUpdate,
+  });
+
+  return {
+    slotStates,
+    subSlotStates: applied.subSlotStates,
+    debug: {
+      ...applied.debug,
+      classifiedUtteranceIds: utterancesToClassify
+        .map((utterance) => utterance.id)
+        .filter(Boolean) as string[],
+      skippedClassification: utterancesToClassify.length === 0,
+    },
+    nextQuestion,
+    nextActionDebug: {
+      llmActionType: result.next_action?.type ?? null,
+      llmTargetSubSlotId:
+        typeof result.next_action?.target_sub_slot_id === "string"
+          ? result.next_action.target_sub_slot_id
+          : null,
+      acceptedActionType: nextQuestion.no_relevant_followup
+        ? "advance_topic"
+        : "ask_question",
+      reason: nextQuestion.reason,
+    },
+  };
+}
+
 function buildSlotClassificationPayload(
   context: ConversationContext,
   subSlotStates: StoredSubSlotState[],
@@ -530,6 +647,153 @@ function buildSlotClassificationPayload(
   };
 }
 
+function buildAiQuestionWithSlotUpdatesPayload(
+  context: ConversationContext,
+  subSlotStates: StoredSubSlotState[],
+  slotStates: AcpSlotState[],
+) {
+  const currentTopic = resolveDiscussionTopic(context.currentTopic);
+  const topicSubSlotStates = subSlotStates.filter(
+    (state) => state.mainSlotId === currentTopic.id,
+  );
+  const slotControl = buildSlotControlDebugState({
+    slots: slotStates,
+    currentTopic: currentTopic.slot_name,
+    subSlotStates,
+  });
+  const askableSubSlots = buildRelevantAskableSubSlotsForQuestionPayload(
+    slotControl,
+    subSlotStates,
+    context.utterances,
+  );
+
+  return {
+    session: getSessionMetadata(context),
+    current_topic: {
+      id: currentTopic.id,
+      slot_name: currentTopic.slot_name,
+      title: currentTopic.title,
+    },
+    sub_slot_definitions: getSubSlotDefinitions()
+      .filter((definition) => definition.mainSlotId === currentTopic.id)
+      .map((definition) => ({
+        id: definition.id,
+        label: definition.label,
+        description: definition.description,
+        completeCriteria: definition.completeCriteria,
+        partialCriteria: definition.partialCriteria,
+        exclusionCriteria: definition.exclusionCriteria,
+        completionRule: definition.completionRule,
+      })),
+    current_sub_slot_states: topicSubSlotStates.map((state) => ({
+      mainSlotId: state.mainSlotId,
+      subSlotId: state.subSlotId,
+      completion: state.completion,
+      responseState: state.responseState,
+      reasonCode: state.reasonCode,
+      evidenceUtteranceIds: state.evidenceUtteranceIds,
+      depth: state.depth,
+      canAskAgain: state.canAskAgain,
+      isDeferred: state.isDeferred,
+    })),
+    unprocessed_utterances: (context.utterancesToClassify ?? [])
+      .filter((utterance) => utterance.id)
+      .map(toQuestionUtterancePayload),
+    recent_context: recentUtterances(
+      context.utterances,
+      NEXT_QUESTION_RECENT_UTTERANCE_COUNT,
+    ).map(toQuestionUtterancePayload),
+    previous_ai_questions: (context.aiQuestionHistory ?? [])
+      .slice(-NEXT_QUESTION_ALREADY_ASKED_COUNT),
+    askable_sub_slots: askableSubSlots.map((slot) => ({
+      mainSlotId: slot.mainSlotId,
+      subSlotId: slot.subSlotId,
+      label: slot.label,
+      description: slot.description,
+      completion: slot.completion,
+      responseState: slot.responseState,
+      minutesReadiness: slot.minutesReadiness,
+      followUpNeed: slot.followUpNeed,
+      questionPurpose: slot.questionPurpose,
+      reasonForSelection: slot.reasonForSelection,
+    })),
+    rules: {
+      slot_updates_evidence_source: "unprocessed_utterances_only",
+      recent_context_is_not_evidence: true,
+      next_action_types: ["ask_question", "advance_topic"],
+      max_question_count: 1,
+      avoid_repeated_questions: true,
+      elder_voice_priority: true,
+    },
+  };
+}
+
+function normalizeCombinedNextQuestionAction(input: {
+  result: AiQuestionWithSlotUpdatesResult;
+  context: ConversationContext;
+  currentTopic: (typeof DISCUSSION_TOPICS)[number];
+  selectedCandidate: QuestionCandidate | null;
+}): NextQuestionResult {
+  const action = input.result.next_action;
+  const reason = nonEmpty(
+    typeof action?.reason === "string" ? action.reason : "",
+    "AI質問ボタン押下時の統合判定結果です。",
+  );
+
+  if (!input.selectedCandidate) {
+    return noRelevantFollowUpResult(
+      input.currentTopic.slot_name as AcpSlotName,
+      reason,
+    );
+  }
+
+  if (action?.type === "advance_topic") {
+    throw new Error("ai_next_action_advance_with_askable_candidate");
+  }
+
+  if (action?.type !== "ask_question") {
+    throw new Error("ai_next_action_invalid_type");
+  }
+
+  if (action.target_sub_slot_id !== input.selectedCandidate.subSlotId) {
+    throw new Error("ai_next_action_invalid_target");
+  }
+
+  const question = typeof action.question === "string" ? action.question.trim() : "";
+  if (!question) {
+    throw new Error("ai_next_action_empty_question");
+  }
+  if (isRepeatedQuestion(input.context.utterances, question, input.currentTopic.slot_name)) {
+    throw new Error("ai_next_action_repeated_question");
+  }
+  if (isRepeatedAIQuestion(input.context.aiQuestionHistory ?? [], question)) {
+    throw new Error("ai_next_action_repeated_ai_question");
+  }
+  if (looksLikeMultipleQuestions(question)) {
+    throw new Error("ai_next_action_multiple_questions");
+  }
+
+  return {
+    question,
+    transition_phrase: "",
+    target_slot: input.currentTopic.slot_name,
+    targetMainSlotId: input.currentTopic.id,
+    targetSubSlotId: input.selectedCandidate.subSlotId,
+    questionPurpose: input.selectedCandidate.questionPurpose,
+    reasonForSelection: input.selectedCandidate.reasonForSelection,
+    reason,
+    sensitivity: getSlotSensitivity(input.currentTopic.slot_name as AcpSlotName),
+    no_relevant_followup: false,
+  };
+}
+
+function looksLikeMultipleQuestions(question: string) {
+  const questionMarks = question.match(/[?？]/g)?.length ?? 0;
+  if (questionMarks > 1) return true;
+
+  return /、.*(?:ですか|でしょうか).*(?:ですか|でしょうか)/.test(question);
+}
+
 function applySlotClassifications(input: {
   result: SlotClassificationResult;
   utterances: ConversationUtterance[];
@@ -559,6 +823,7 @@ function applySlotClassifications(input: {
       evidenceIds,
       utteranceIds,
       input.utterances,
+      currentTopicId,
     );
 
     if (validation.accepted === false) {
@@ -692,12 +957,16 @@ function validateSlotClassificationCandidate(
   evidenceIds: string[],
   utteranceIds: Set<string>,
   utterances: ConversationUtterance[],
+  currentTopicId: string,
 ): SlotCandidateValidationResult {
   const mainSlotId = typeof candidate.mainSlotId === "string" ? candidate.mainSlotId : "";
   const subSlotId = typeof candidate.subSlotId === "string" ? candidate.subSlotId : "";
   const knownMainSlot = DISCUSSION_TOPICS.some((topic) => topic.id === mainSlotId);
 
   if (!knownMainSlot) return { accepted: false, reason: "unknown_main_slot" };
+  if (mainSlotId !== currentTopicId) {
+    return { accepted: false, reason: "invalid_evidence_topic" };
+  }
   if (!subSlotId) return { accepted: false, reason: "unknown_sub_slot" };
 
   const anySubSlot = getSubSlotDefinitions().some(
@@ -724,6 +993,15 @@ function validateSlotClassificationCandidate(
   if (evidenceIds.some((id) => !utteranceIds.has(id))) {
     return { accepted: false, reason: "unknown_evidence_utterance" };
   }
+  if (!evidenceIdsMatchTopic(evidenceIds, utterances, mainSlotId)) {
+    return { accepted: false, reason: "invalid_evidence_topic" };
+  }
+  if (
+    candidate.evidenceType !== "caregiver_report_with_elder_confirmation" &&
+    evidenceIdsAreOnlyProgressUtterances(evidenceIds, utterances)
+  ) {
+    return { accepted: false, reason: "progress_only_evidence" };
+  }
   if (candidate.evidenceType === "caregiver_report_only") {
     return { accepted: false, reason: "non_elder_evidence" };
   }
@@ -732,6 +1010,65 @@ function validateSlotClassificationCandidate(
   }
 
   return { accepted: true };
+}
+
+function evidenceIdsMatchTopic(
+  evidenceIds: string[],
+  utterances: ConversationUtterance[],
+  topicId: string,
+) {
+  const byId = new Map(
+    utterances
+      .filter((utterance) => utterance.id)
+      .map((utterance) => [utterance.id as string, utterance]),
+  );
+
+  return evidenceIds.every((id) => {
+    const utterance = byId.get(id);
+    return Boolean(utterance) && utterance?.topic_id === topicId;
+  });
+}
+
+function evidenceIdsAreOnlyProgressUtterances(
+  evidenceIds: string[],
+  utterances: ConversationUtterance[],
+) {
+  if (evidenceIds.length === 0) return false;
+
+  const byId = new Map(
+    utterances
+      .filter((utterance) => utterance.id)
+      .map((utterance) => [utterance.id as string, utterance]),
+  );
+  const evidenceUtterances = evidenceIds
+    .map((id) => byId.get(id))
+    .filter((utterance): utterance is ConversationUtterance => Boolean(utterance));
+
+  return (
+    evidenceUtterances.length > 0 &&
+    evidenceUtterances.every((utterance) =>
+      isProgressOnlyUtterance(utterance.text),
+    )
+  );
+}
+
+function isProgressOnlyUtterance(text: string) {
+  const normalized = text
+    .trim()
+    .replace(/[、。,.!！?？「」『』（）()\s]/g, "")
+    .toLowerCase();
+
+  return (
+    normalized === "はい" ||
+    normalized === "うん" ||
+    normalized === "ん" ||
+    normalized === "そうです" ||
+    normalized === "わかりました" ||
+    normalized === "分かりました" ||
+    normalized === "次に行きましょう" ||
+    normalized === "じゃあ次へ" ||
+    normalized === "次の話題へですね"
+  );
 }
 
 function deriveStoredSlotState(
@@ -888,13 +1225,18 @@ function mergeSubSlotState(
   next: StoredSubSlotState,
 ): StoredSubSlotState {
   if (!current) return next;
+  if (shouldPreserveCurrentSubSlotState(current, next)) {
+    return mergePreservedSubSlotState(current, next);
+  }
+
+  const mergedEvidenceIds = mergeEvidenceIds(
+    current.evidenceUtteranceIds,
+    next.evidenceUtteranceIds,
+  );
   if (current.completion === "complete" && next.completion !== "complete") {
     return {
       ...current,
-      evidenceUtteranceIds: mergeEvidenceIds(
-        current.evidenceUtteranceIds,
-        next.evidenceUtteranceIds,
-      ),
+      evidenceUtteranceIds: mergedEvidenceIds,
       hasConflict:
         current.hasConflict === true || next.responseState === "conflicting",
       needsOptionalFollowUp:
@@ -906,11 +1248,54 @@ function mergeSubSlotState(
 
   return {
     ...next,
+    evidenceUtteranceIds: mergedEvidenceIds,
+  };
+}
+
+function shouldPreserveCurrentSubSlotState(
+  current: StoredSubSlotState,
+  next: StoredSubSlotState,
+) {
+  if (completionRank(next.completion) < completionRank(current.completion)) {
+    return true;
+  }
+  if (
+    current.responseState === "answered" &&
+    next.responseState !== "answered" &&
+    next.responseState !== "ambiguous" &&
+    next.responseState !== "conflicting"
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function mergePreservedSubSlotState(
+  current: StoredSubSlotState,
+  next: StoredSubSlotState,
+): StoredSubSlotState {
+  const hasConflict =
+    current.hasConflict === true || next.responseState === "conflicting";
+
+  return {
+    ...current,
     evidenceUtteranceIds: mergeEvidenceIds(
       current.evidenceUtteranceIds,
       next.evidenceUtteranceIds,
     ),
+    hasConflict,
+    needsOptionalFollowUp:
+      current.needsOptionalFollowUp === true ||
+      next.responseState === "conflicting",
+    updatedAt: hasConflict ? next.updatedAt : current.updatedAt,
   };
+}
+
+function completionRank(completion: SlotCompletion) {
+  if (completion === "complete") return 2;
+  if (completion === "partial") return 1;
+  return 0;
 }
 
 function deriveMainSlotStatesFromSubSlots(
@@ -927,7 +1312,7 @@ function deriveMainSlotStatesFromSubSlots(
 
   return DISCUSSION_TOPICS.map((topic) => {
     const topicStates = subSlotStates.filter((state) => state.mainSlotId === topic.id);
-    const strongest = getMainSlotStatusFromSubSlots(topicStates);
+    const strongest = getMainSlotStatusFromSubSlots(topic, topicStates);
     const evidenceIds = mergeEvidenceIds(
       [],
       topicStates.flatMap((state) => state.evidenceUtteranceIds),
@@ -963,35 +1348,72 @@ function deriveMainSlotStatesFromSubSlots(
 }
 
 function getMainSlotStatusFromSubSlots(
+  topic: (typeof DISCUSSION_TOPICS)[number],
   states: StoredSubSlotState[],
 ): AcpSlotState["status"] {
-  if (states.some((state) => state.responseState === "declined")) {
+  const topicSubSlotIds = new Set(topic.aspects.map((aspect) => aspect.id));
+  const topicStates = states.filter((state) => topicSubSlotIds.has(state.subSlotId));
+  const meaningfulStates = topicStates.filter(
+    (state) =>
+      state.evidenceUtteranceIds.length > 0 &&
+      (state.completion !== "none" || state.responseState !== "no_response"),
+  );
+  const askableIncompleteStates = topicStates.filter(isAskableIncompleteSubSlotState);
+
+  if (askableIncompleteStates.length > 0) {
+    return meaningfulStates.length > 0 ? "partial" : "unanswered";
+  }
+
+  if (meaningfulStates.length === 0) {
+    return "unanswered";
+  }
+
+  if (
+    meaningfulStates.every((state) => state.responseState === "declined")
+  ) {
     return "prefer_not_to_answer";
   }
-  if (states.some((state) => state.responseState === "explicit_none")) {
+  if (
+    meaningfulStates.every((state) => state.responseState === "explicit_none")
+  ) {
     return "no_preference";
   }
-  if (states.some((state) => state.responseState === "unable_to_verbalize")) {
+  if (
+    meaningfulStates.every((state) => state.responseState === "unable_to_verbalize")
+  ) {
     return "cannot_verbalize";
   }
-  if (states.some((state) => state.responseState === "not_considered")) {
+  if (
+    meaningfulStates.every((state) => state.responseState === "not_considered")
+  ) {
     return "not_considered";
   }
-  if (states.some((state) => state.completion === "complete")) {
-    return "answered";
-  }
+
   if (
-    states.some(
+    meaningfulStates.some(
       (state) =>
-        state.completion === "partial" ||
-        state.responseState === "ambiguous" ||
-        state.responseState === "conflicting",
+        state.completion === "complete" ||
+        state.responseState === "answered" ||
+        isTerminalValidResponseState(state.responseState),
     )
   ) {
-    return "partial";
+    return "answered";
   }
 
   return "unanswered";
+}
+
+function isAskableIncompleteSubSlotState(state: StoredSubSlotState) {
+  if (state.completion === "complete") return false;
+  if (state.canAskAgain === false) return false;
+  if (isTerminalValidResponseState(state.responseState)) return false;
+
+  return (
+    state.responseState === "no_response" ||
+    state.responseState === "answered" ||
+    state.responseState === "ambiguous" ||
+    state.responseState === "conflicting"
+  );
 }
 
 function normalizeEvidenceIds(value: unknown) {
@@ -1017,45 +1439,6 @@ function logRejectedSlotCandidate(
     sessionId,
     occurredAt: new Date().toISOString(),
   });
-}
-
-export async function generateNextQuestion(
-  context: ConversationContext,
-): Promise<NextQuestionResult> {
-  const selectedCandidate = selectNextQuestionCandidate(context);
-  const currentTopic = resolveTopic(context.currentTopic);
-
-  if (!selectedCandidate) {
-    return noRelevantFollowUpResult(
-      currentTopic.slot_name as AcpSlotName,
-      "現在の話題について、議事録作成に必要な内容はおおむね確認できています。",
-    );
-  }
-
-  const fallback = fallbackNextQuestion(
-    context.utterances,
-    context.slotStates,
-    context.currentTopic,
-    context.subSlotStates,
-    selectedCandidate,
-  );
-  if (context.useDeterministicQuestionText) {
-    return isLegacyDialogueMode()
-      ? fallback
-      : applyUncertaintyNextQuestionPolicy(context, fallback);
-  }
-
-  const result = await requestJson<Partial<NextQuestionResult>>(
-    SYSTEM_NEXT_QUESTION,
-    await buildQuestionPayload(context, selectedCandidate),
-    fallback,
-  );
-
-  const output = normalizeNextQuestionResult(result, fallback, context, selectedCandidate);
-
-  return isLegacyDialogueMode()
-    ? output
-    : applyUncertaintyNextQuestionPolicy(context, output);
 }
 
 export async function generateFinalMinutes(
@@ -1676,57 +2059,6 @@ function getClient(apiKey: string) {
   return client;
 }
 
-function normalizeNextQuestionResult(
-  result: Partial<NextQuestionResult>,
-  fallback: NextQuestionResult,
-  context: ConversationContext,
-  selectedCandidate: QuestionCandidate,
-): NextQuestionResult {
-  const currentTopic = resolveTopic(context.currentTopic);
-  const currentSlot = findSlotState(context.slotStates, currentTopic.slot_name);
-
-  const shouldPreferFallbackDepthQuestion =
-    isTerminalSlotStatus(currentSlot?.status) &&
-    looksLikeMoveOnQuestion(result.question);
-  const nextResult = shouldPreferFallbackDepthQuestion ? fallback : result;
-
-  const targetSlot = normalizeAcpTargetSlot(nextResult.target_slot, fallback.target_slot);
-  const targetMainSlotId = selectedCandidate.mainSlotId;
-  const targetSubSlotId = selectedCandidate.subSlotId;
-  const hasValidTargetSubSlot =
-    nextResult.targetMainSlotId === targetMainSlotId &&
-    nextResult.targetSubSlotId === targetSubSlotId;
-  const question = nonEmptyNullable(nextResult.question, fallback.question);
-  const shouldUseFallbackQuestion =
-    (question ? isRepeatedQuestion(context.utterances, question, targetSlot) : false) ||
-    (question ? isRepeatedAIQuestion(context.aiQuestionHistory ?? [], question) : false) ||
-    !isQuestionRelevantToCurrentTopic(context, targetSlot) ||
-    !hasValidTargetSubSlot;
-
-  return {
-    question: shouldUseFallbackQuestion ? fallback.question : question,
-    transition_phrase: question
-      ? nonEmpty(nextResult.transition_phrase, fallback.transition_phrase)
-      : "",
-    target_slot: shouldUseFallbackQuestion ? fallback.target_slot : targetSlot,
-    targetMainSlotId,
-    targetSubSlotId,
-    questionPurpose: selectedCandidate.questionPurpose,
-    reasonForSelection: selectedCandidate.reasonForSelection,
-    reason: nonEmpty(nextResult.reason, fallback.reason),
-    sensitivity: normalizeSensitivity(nextResult.sensitivity, fallback.sensitivity),
-    no_relevant_followup:
-      shouldUseFallbackQuestion
-        ? fallback.no_relevant_followup
-        : nextResult.no_relevant_followup === true || !question,
-  };
-}
-
-function looksLikeMoveOnQuestion(value: unknown) {
-  const text = typeof value === "string" ? value : "";
-  return /次の話題|移っても|話題転換|終了確認|終えて/.test(text);
-}
-
 function noRelevantFollowUpResult(
   targetSlot: AcpSlotName,
   reason: string,
@@ -1741,275 +2073,6 @@ function noRelevantFollowUpResult(
   };
 }
 
-function buildConversationPayload(context: ConversationContext) {
-  const currentTopic = resolveTopic(context.currentTopic);
-  const nextTopic = context.nextTopic ? resolveTopic(context.nextTopic) : null;
-  const acpSlotStates = filterAcpSlotStates(context.slotStates);
-  const currentSlotState = findSlotState(acpSlotStates, currentTopic.slot_name);
-  const currentResearchTheme = resolveResearchThemeForSlot(currentTopic.slot_name);
-  const utteranceById = new Map(
-    context.utterances
-      .filter((utterance) => utterance.id)
-      .map((utterance) => [utterance.id as string, utterance]),
-  );
-  const subSlotStates = context.subSlotStates ?? [];
-
-  return {
-    discussion_topic: DISCUSSION_TOPIC,
-    session: getSessionMetadata(context),
-    current_research_theme: {
-      id: currentResearchTheme.id,
-      level: currentResearchTheme.level,
-      title: currentResearchTheme.title,
-      opening_question: currentResearchTheme.openingQuestion,
-      source_slot_names: currentResearchTheme.sourceSlotNames,
-      aspects: getResearchThemeAspects(currentResearchTheme),
-      core_aspects: getCoreResearchThemeAspects(currentResearchTheme),
-      optional_aspects: getOptionalResearchThemeAspects(currentResearchTheme),
-      cross_topic_aspects: getCrossTopicResearchThemeAspects(currentResearchTheme),
-      max_follow_up_questions: currentResearchTheme.maxFollowUpQuestions,
-      response_state: getResearchThemeResponseState(
-        currentResearchTheme,
-        acpSlotStates,
-      ),
-      summary: getResearchThemeSummary(currentResearchTheme, acpSlotStates),
-      evidence_utterance: getResearchThemeEvidence(
-        currentResearchTheme,
-        acpSlotStates,
-      ),
-    },
-    current_topic: {
-      id: currentTopic.id,
-      level: currentTopic.level,
-      slot_name: currentTopic.slot_name,
-      title: context.currentTopicTitle || currentTopic.title,
-      opening_question: currentTopic.openingQuestion,
-      core_slots: currentTopic.coreSlots,
-      optional_slots: currentTopic.optionalSlots,
-      cross_topic_slots: currentTopic.crossTopicSlots,
-      aspects: getTopicAspects(currentTopic),
-      core_aspects: getCoreAspects(currentTopic),
-      optional_aspects: getOptionalAspects(currentTopic),
-      cross_topic_aspects: getCrossTopicAspects(currentTopic),
-      max_follow_up_questions: currentTopic.maxFollowUpQuestions,
-      status: currentSlotState?.status ?? "unanswered",
-      response_state: getSlotResponseState(currentSlotState),
-      summary: currentSlotState?.summary ?? "",
-      evidence_utterance: currentSlotState?.evidence_utterance ?? "",
-    },
-    next_topic: nextTopic
-      ? {
-          id: nextTopic.id,
-          level: nextTopic.level,
-          slot_name: nextTopic.slot_name,
-          title: context.nextTopicTitle || nextTopic.title,
-          opening_question: nextTopic.openingQuestion,
-        }
-      : null,
-    available_topics: DISCUSSION_TOPICS.map((topic) => ({
-      id: topic.id,
-      level: topic.level,
-      slot_name: topic.slot_name,
-      title: topic.title,
-      opening_question: topic.openingQuestion,
-      opening_prompt: topic.opening_prompt,
-      core_slots: topic.coreSlots,
-      optional_slots: topic.optionalSlots,
-      cross_topic_slots: topic.crossTopicSlots,
-      aspects: getTopicAspects(topic),
-      core_aspects: getCoreAspects(topic),
-      optional_aspects: getOptionalAspects(topic),
-      cross_topic_aspects: getCrossTopicAspects(topic),
-      max_follow_up_questions: topic.maxFollowUpQuestions,
-    })),
-    research_themes: RESEARCH_THEMES.map((theme) => ({
-      id: theme.id,
-      level: theme.level,
-      title: theme.title,
-      opening_question: theme.openingQuestion,
-      source_slot_names: theme.sourceSlotNames,
-      aspects: getResearchThemeAspects(theme),
-      core_aspects: getCoreResearchThemeAspects(theme),
-      optional_aspects: getOptionalResearchThemeAspects(theme),
-      cross_topic_aspects: getCrossTopicResearchThemeAspects(theme),
-      max_follow_up_questions: theme.maxFollowUpQuestions,
-      response_state: getResearchThemeResponseState(theme, acpSlotStates),
-      summary: getResearchThemeSummary(theme, acpSlotStates),
-      evidence_utterance: getResearchThemeEvidence(theme, acpSlotStates),
-    })),
-    optional_research_themes: OPTIONAL_RESEARCH_THEMES.map((theme) => ({
-      id: theme.id,
-      level: theme.level,
-      title: theme.title,
-      opening_question: theme.openingQuestion,
-      source_slot_names: theme.sourceSlotNames,
-      aspects: getResearchThemeAspects(theme),
-      response_state: getResearchThemeResponseState(theme, acpSlotStates),
-      summary: getResearchThemeSummary(theme, acpSlotStates),
-      evidence_utterance: getResearchThemeEvidence(theme, acpSlotStates),
-    })),
-    current_topic_transcript: renderTranscript(getTopicRelatedUtterances(context)),
-    all_conversation_log: renderTranscript(context.utterances),
-    recent_5_turns: renderTranscript(recentUtterances(context.utterances, 5)),
-    slot_states: acpSlotStates,
-    sub_slot_states: subSlotStates.map((state) => ({
-      ...state,
-      evidenceUtterances: state.evidenceUtteranceIds
-        .map((id) => utteranceById.get(id))
-        .filter((utterance): utterance is ConversationUtterance => Boolean(utterance))
-        .map((utterance) => ({
-          id: utterance.id,
-          speaker: utterance.speaker,
-          text: utterance.text,
-          start_ms: utterance.start_ms ?? null,
-          end_ms: utterance.end_ms ?? null,
-          created_at: utterance.created_at ?? utterance.createdAt ?? null,
-        })),
-    })),
-    theme_metrics: calculateThemeCompletenessMetrics(acpSlotStates),
-    unfilled_slots: getUnfilledSlots(acpSlotStates).map((slot) => ({
-      slot_name: slot.slot_name,
-      status: slot.status,
-      response_state: getSlotResponseState(slot),
-      summary: slot.summary,
-    })),
-    theme_states: RESEARCH_THEMES.map((theme) => ({
-      theme_id: theme.id,
-      title: theme.title,
-      level: theme.level,
-      source_slot_names: theme.sourceSlotNames,
-      response_state: getResearchThemeResponseState(theme, acpSlotStates),
-      summary: getResearchThemeSummary(theme, acpSlotStates),
-      evidence_utterance: getResearchThemeEvidence(theme, acpSlotStates),
-    })),
-    explicit_none_answers: detectExplicitNoneResponses(context).map((response) => ({
-      slot_name: response.slotName,
-      evidence_utterance: formatSpeakerEvidence(response.utterance),
-    })),
-    uncertainty_answers: isLegacyDialogueMode()
-      ? []
-      : detectUncertainResponses(context).map((response) => ({
-          slot_name: response.slotName,
-          kind: response.kind,
-          evidence_utterance: formatSpeakerEvidence(response.utterance),
-          policy:
-            "Treat this as meaningful ACP information, not as missing data. Ask one gentle reason-check question at most, then allow moving to another topic.",
-        })),
-    dialogue_policy: isLegacyDialogueMode()
-      ? { mode: "legacy" }
-      : {
-          policy_version: AI_POLICY_VERSION,
-          mode: "uncertainty_aware",
-          unknown_is_valid_answer: true,
-          avoid_repeating_unclear_questions: true,
-          use_partial_status_for_deferral: true,
-          prefer_reason_check_or_topic_switch: true,
-        },
-    last_utterance: context.utterances.at(-1) ?? null,
-    acp_slots: ACP_SLOT_NAMES,
-  };
-}
-
-async function buildQuestionPayload(
-  context: ConversationContext,
-  selectedCandidate: QuestionCandidate,
-) {
-  const payload = buildConversationPayload(context);
-  const currentTopic = resolveTopic(context.currentTopic);
-  const scopedSlots = filterAcpSlotStates(context.slotStates);
-  const currentSlotState = findSlotState(scopedSlots, currentTopic.slot_name);
-  const fallbackQuestionScope = getCurrentTopicQuestionScope({
-    slots: scopedSlots,
-    currentTopic: currentTopic.slot_name,
-    subSlotStates: context.subSlotStates,
-  });
-  const slotControl = buildSlotControlDebugState({
-    slots: scopedSlots,
-    currentTopic: currentTopic.slot_name,
-    subSlotStates: context.subSlotStates,
-  });
-  const questionScope = buildQuestionScopeFromSlotControl(
-    slotControl,
-    fallbackQuestionScope,
-  );
-  const askableSubSlots = [selectedCandidate];
-  const slotBackedMemory = buildSlotBackedQuestionMemory(
-    currentTopic.id,
-    context.subSlotStates ?? [],
-    context.utterances,
-  );
-  const unassignedRecentUtterances = buildUnassignedRecentUtterances(
-    context.utterances,
-    context.subSlotStates ?? [],
-    NEXT_QUESTION_UNASSIGNED_UTTERANCE_COUNT,
-  );
-
-  return {
-    ...payload,
-    available_topics: payload.available_topics.filter(
-      (topic) => topic.slot_name === currentTopic.slot_name,
-    ),
-    slot_states: currentSlotState ? [currentSlotState] : [],
-    unfilled_slots:
-      currentSlotState && !isTerminalSlotStatus(currentSlotState.status)
-        ? [
-            {
-              slot_name: currentSlotState.slot_name,
-              status: currentSlotState.status,
-              response_state: getSlotResponseState(currentSlotState),
-              summary: currentSlotState.summary,
-            },
-          ]
-        : [],
-    question_scope: questionScope,
-    next_question_input: {
-      currentTopic: {
-        id: currentTopic.id,
-        title: currentTopic.title,
-      },
-      askableSubSlots,
-      selectedQuestionTarget: {
-        targetMainSlotId: selectedCandidate.mainSlotId,
-        targetSubSlotId: selectedCandidate.subSlotId,
-        questionPurpose: selectedCandidate.questionPurpose,
-        reasonForSelection: selectedCandidate.reasonForSelection,
-        minutesReadiness: selectedCandidate.minutesReadiness,
-        followUpNeed: selectedCandidate.followUpNeed,
-      },
-      slotBackedMemory,
-      unassignedRecentUtterances,
-      recentUtterances: recentUtterances(
-        context.utterances,
-        NEXT_QUESTION_RECENT_UTTERANCE_COUNT,
-      ).map(toQuestionUtterancePayload),
-      alreadyAskedQuestions: context.utterances
-        .filter((utterance) => !isElderSpeaker(utterance.speaker))
-        .map((utterance) => utterance.text)
-        .slice(-NEXT_QUESTION_ALREADY_ASKED_COUNT),
-      aiQuestionHistory: (context.aiQuestionHistory ?? [])
-        .slice(-NEXT_QUESTION_ALREADY_ASKED_COUNT),
-      currentTopicQuestionCount:
-        context.currentTopicQuestionCount ??
-        countPromptsForSlot(context.utterances, currentTopic.slot_name as AcpSlotName),
-      remainingQuestionCount: Math.max(
-        0,
-        currentTopic.maxFollowUpQuestions -
-          (context.currentTopicQuestionCount ??
-            countPromptsForSlot(context.utterances, currentTopic.slot_name as AcpSlotName)),
-      ),
-    },
-    control_debug: {
-      currentTopicId: questionScope.currentTopicId,
-      currentMainSlot: questionScope.currentMainSlot,
-      referencedSubSlots: questionScope.referencedSubSlots.map((slot) => slot.label),
-      selectionReason:
-        "質問生成payloadでは現在テーマのスロットと関連保留項目のみを参照対象にしています。",
-      deferredSlotQueue: questionScope.relatedDeferredItems,
-      allSlotReferenceUsed: false,
-    },
-  };
-}
-
 function buildAskableSubSlotsForQuestionPayload(
   debugState: SlotControlDebugState,
   subSlotStates: StoredSubSlotState[],
@@ -2018,7 +2081,18 @@ function buildAskableSubSlotsForQuestionPayload(
   if (!currentMainSlot) return [];
 
   return currentMainSlot.subSlots
-    .filter((slot) => slot.canAskAgain)
+    .filter((slot) => {
+      if (!slot.canAskAgain) return false;
+      const stored = subSlotStates.find(
+        (state) =>
+          state.mainSlotId === currentMainSlot.topicId &&
+          state.subSlotId === slot.id,
+      );
+      if (stored?.completion === "complete") return false;
+      if (stored && isTerminalValidResponseState(stored.responseState)) return false;
+
+      return true;
+    })
     .map((slot) => {
       const definition = resolveSubSlotDefinition(currentMainSlot.topicId, slot.id);
       const stored = subSlotStates.find(
@@ -2066,6 +2140,8 @@ function buildRelevantAskableSubSlotsForQuestionPayload(
       const baseCandidate = candidates.find((candidate) => candidate.subSlotId === slot.id);
       const stored = statesBySubSlotId.get(slot.id);
       if (!baseCandidate && !canAskOptionalSubSlot(slot.priority, stored)) return null;
+      if (stored?.completion === "complete") return null;
+      if (stored && isTerminalValidResponseState(stored.responseState)) return null;
       if (slot.followUpNeed === "none" || slot.canAskAgain === false) return null;
       if (stored?.isDeferred && slot.followUpNeed !== "required") return null;
 

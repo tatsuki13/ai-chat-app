@@ -558,6 +558,8 @@ export type ConversationUtterance = {
   start_ms?: number | null;
   end_ms?: number | null;
   source?: string | null;
+  topic_id?: string | null;
+  topic_index?: number | null;
   analysis_version?: string | null;
   created_at?: string;
   createdAt?: string;
@@ -1361,8 +1363,10 @@ function buildMainSlotControlState(
     topicId: topic.id,
     status,
     isCurrentTopic: topic.id === currentTopicId,
-    inDeferredQueue: canDeferSlotStatus(status),
-    canAskAgain: canAskAgainStatus(status),
+    inDeferredQueue: subSlots.some((slot) => slot.inDeferredQueue),
+    canAskAgain: subSlots.some(
+      (slot) => slot.canAskAgain && slot.followUpNeed !== "none",
+    ),
     unansweredReason,
     lastUpdatedAt: slot?.updated_at,
     lastUpdatedTopicId: slot?.updated_at ? topic.id : undefined,

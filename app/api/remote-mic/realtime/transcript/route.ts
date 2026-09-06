@@ -108,6 +108,8 @@ export async function POST(request: Request) {
         select: {
           startedAt: true,
           dialogueStartedAt: true,
+          currentTopicId: true,
+          currentTopicIndex: true,
         },
       });
 
@@ -124,6 +126,8 @@ export async function POST(request: Request) {
       const utterance = await createRealtimeUtterance(input, {
         participantCode: active.participantCode,
         timing,
+        topicId: session.currentTopicId,
+        topicIndex: session.currentTopicIndex,
       });
 
       console.info("[remote-mic realtime transcript saved]", {
@@ -287,6 +291,8 @@ async function createRealtimeUtterance(
   context: {
     participantCode: string | null;
     timing: { startMs: number; endMs: number };
+    topicId: string | null;
+    topicIndex: number | null;
   },
 ) {
   try {
@@ -297,6 +303,8 @@ async function createRealtimeUtterance(
         speaker: input.role,
         text: input.text,
         source: `remote_realtime:${input.streamId}:${input.transcriptId}`,
+        topicId: context.topicId,
+        topicIndex: context.topicIndex,
         sourceGroupId: input.transcriptId,
         asrProvider: "openai-realtime",
         asrModel: input.model,
@@ -345,6 +353,8 @@ function serializeUtterance(
     start_ms: utterance.startMs,
     end_ms: utterance.endMs,
     source: utterance.source,
+    topic_id: utterance.topicId,
+    topic_index: utterance.topicIndex,
     source_group_id: utterance.sourceGroupId,
     asr_provider: utterance.asrProvider,
     asr_model: utterance.asrModel,
