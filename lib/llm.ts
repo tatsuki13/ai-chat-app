@@ -201,7 +201,128 @@ const SYSTEM_FINAL_MINUTES_FROM_STRUCTURED = [
   "同じutteranceが複数sub-slotに関係しても根拠発言カードには1回だけ表示されます。本文ではsourceUtteranceIdsにより、各発話がどのsectionを支えるか追跡可能にしてください。",
   "すべてのnarrative fieldで、sourceUtteranceIdsには実際に文章化した意味を直接支える発話だけを含めてください。",
   "出力は指定されたJSON構造のみとし、JSON以外の文章を出力しないでください。",
+  "",
+  "Return exactly this top-level JSON shape. Do not add title, recordType, generatedAt, themes, themeId, or any other top-level key.",
+  '{"overall_summary":{"core_values":[{"text":"...","sourceUtteranceIds":["..."],"sourceAspectIds":["..."]}],"cross_theme_connections":[{"text":"...","sourceUtteranceIds":["..."],"sourceAspectIds":["..."],"relatedThemes":["current_life_values","future_life_continuity"]}],"undecided_things":[{"text":"...","sourceUtteranceIds":["..."],"sourceAspectIds":["..."]}]},"narratives":{"current_life_values":{"currentThought":null,"background":null,"conditions":[],"uncertainties":[],"tensions":[],"confirmationNeeded":[]},"future_life_continuity":{"currentThought":null,"background":null,"conditions":[],"uncertainties":[],"tensions":[],"confirmationNeeded":[]},"selfhood":{"currentThought":null,"background":null,"conditions":[],"uncertainties":[],"tensions":[],"confirmationNeeded":[]},"care_support":{"currentThought":null,"background":null,"conditions":[],"uncertainties":[],"tensions":[],"confirmationNeeded":[]},"family_communication":{"currentThought":null,"background":null,"conditions":[],"uncertainties":[],"tensions":[],"confirmationNeeded":[]},"proxy_decision_support":{"currentThought":null,"background":null,"conditions":[],"uncertainties":[],"tensions":[],"confirmationNeeded":[]}}}',
 ].join("\n");
+
+const FINAL_MINUTES_THEME_IDS = [
+  "current_life_values",
+  "future_life_continuity",
+  "selfhood",
+  "care_support",
+  "family_communication",
+  "proxy_decision_support",
+] as const;
+
+const groundedTextSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["text", "sourceUtteranceIds", "sourceAspectIds"],
+  properties: {
+    text: { type: "string" },
+    sourceUtteranceIds: {
+      type: "array",
+      items: { type: "string" },
+    },
+    sourceAspectIds: {
+      type: "array",
+      items: { type: "string" },
+    },
+  },
+} as const;
+
+const groundedTextOrNullSchema = {
+  anyOf: [groundedTextSchema, { type: "null" }],
+} as const;
+
+const narrativeSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "currentThought",
+    "background",
+    "conditions",
+    "uncertainties",
+    "tensions",
+    "confirmationNeeded",
+  ],
+  properties: {
+    currentThought: groundedTextOrNullSchema,
+    background: groundedTextOrNullSchema,
+    conditions: { type: "array", items: groundedTextSchema },
+    uncertainties: { type: "array", items: groundedTextSchema },
+    tensions: { type: "array", items: groundedTextSchema },
+    confirmationNeeded: { type: "array", items: groundedTextSchema },
+  },
+} as const;
+
+const finalMinutesResponseFormat = {
+  type: "json_schema",
+  json_schema: {
+    name: "final_minutes_narratives",
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["overall_summary", "narratives"],
+      properties: {
+        overall_summary: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "core_values",
+            "cross_theme_connections",
+            "undecided_things",
+          ],
+          properties: {
+            core_values: { type: "array", items: groundedTextSchema },
+            cross_theme_connections: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: [
+                  "text",
+                  "sourceUtteranceIds",
+                  "sourceAspectIds",
+                  "relatedThemes",
+                ],
+                properties: {
+                  text: { type: "string" },
+                  sourceUtteranceIds: {
+                    type: "array",
+                    items: { type: "string" },
+                  },
+                  sourceAspectIds: {
+                    type: "array",
+                    items: { type: "string" },
+                  },
+                  relatedThemes: {
+                    type: "array",
+                    items: {
+                      type: "string",
+                      enum: [...FINAL_MINUTES_THEME_IDS],
+                    },
+                  },
+                },
+              },
+            },
+            undecided_things: { type: "array", items: groundedTextSchema },
+          },
+        },
+        narratives: {
+          type: "object",
+          additionalProperties: false,
+          required: [...FINAL_MINUTES_THEME_IDS],
+          properties: Object.fromEntries(
+            FINAL_MINUTES_THEME_IDS.map((themeId) => [themeId, narrativeSchema]),
+          ),
+        },
+      },
+    },
+  },
+} as const;
 
 const SYSTEM_SLOT_CONTROL_DEBUG = [
   "あなたはACP対話ログから、開発確認用にサブスロットの状態を意味判定するAIです。",
@@ -1465,7 +1586,7 @@ export async function generateFinalMinutes(
     SYSTEM_FINAL_MINUTES_FROM_STRUCTURED,
     buildStructuredMinutesPayload(fallback),
     {},
-    { type: "json_object" },
+    finalMinutesResponseFormat,
     {
       model: getMinutesOpenAIModel(),
       timeoutMs: Number(process.env.FINAL_MINUTES_OPENAI_TIMEOUT_MS || 90000),
@@ -1475,16 +1596,16 @@ export async function generateFinalMinutes(
     source: "fallback",
     llmSucceeded: false,
   };
-  const llmReturnedNarratives = hasNarrativeObject(result.narratives);
+  const llmMatchedSchema = hasFinalMinutesResponseSchema(result);
   const validatedMinutes =
-    requestMeta.source === "openai" && llmReturnedNarratives
+    requestMeta.source === "openai" && llmMatchedSchema
       ? validateACPMinutes({
           ...baseMinutes,
           overall_summary: result.overall_summary,
           narratives: result.narratives,
         }, fallback.json.acp_minutes_llm_input) ?? baseMinutes
       : baseMinutes;
-  const narrativeStatus = getNarrativeGenerationStatus(requestMeta, llmReturnedNarratives);
+  const narrativeStatus = getNarrativeGenerationStatus(requestMeta, llmMatchedSchema);
   const markdown = renderACPMinutesMarkdown(
     validatedMinutes,
     fallback.json.generated_at,
@@ -1524,14 +1645,14 @@ type NarrativeGenerationStatus =
 
 function getNarrativeGenerationStatus(
   meta: JsonRequestMeta,
-  llmReturnedNarratives: boolean,
+  llmMatchedSchema: boolean,
 ): NarrativeGenerationStatus {
-  if (meta.source === "openai" && llmReturnedNarratives) return "success";
+  if (meta.source === "openai" && llmMatchedSchema) return "success";
   if (meta.failureReason === "parse_error") return "parse_error";
   if (meta.failureReason === "api_error" || meta.failureReason === "missing_api_key") {
     return "api_error";
   }
-  if (meta.source === "openai" && !llmReturnedNarratives) return "no_supported_content";
+  if (meta.source === "openai" && !llmMatchedSchema) return "no_supported_content";
   return "fallback";
 }
 
@@ -1552,14 +1673,14 @@ function buildFinalMinutesNarrativeDebug(input: {
     llmSucceeded: input.requestMeta.source === "openai",
     rawResponseAvailable: Boolean(input.requestMeta.rawResponse),
     parseSucceeded: input.requestMeta.source === "openai",
-    schemaSucceeded: hasNarrativeObject(input.rawResponse.narratives),
+    schemaSucceeded: hasFinalMinutesResponseSchema(input.rawResponse),
     fallbackUsed: input.fallbackUsed,
     failureReason: input.requestMeta.failureReason,
     errorMessage: input.requestMeta.errorMessage,
     rawResponse: input.requestMeta.rawResponse,
     parsedResponse: parsedRawResponse,
     normalizedNarratives: input.normalizedMinutes?.narratives ?? null,
-    themes: themes.map((theme) => ({
+    themeChecks: themes.map((theme) => ({
       themeId: theme.theme_id,
       inputEvidenceCount: theme.aspects.reduce((count, aspect) => count + aspect.evidence.length, 0),
       inputEvidenceIds: uniqueStringsForDebug(
@@ -1590,6 +1711,25 @@ function hasGeneratedSection(
 
 function uniqueStringsForDebug(values: string[]) {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function hasFinalMinutesResponseSchema(value: {
+  overall_summary?: unknown;
+  narratives?: unknown;
+}) {
+  return hasOverallSummaryObject(value.overall_summary) &&
+    hasNarrativeObject(value.narratives);
+}
+
+function hasOverallSummaryObject(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+
+  return (
+    Array.isArray(record.core_values) &&
+    Array.isArray(record.cross_theme_connections) &&
+    Array.isArray(record.undecided_things)
+  );
 }
 
 function hasNarrativeObject(value: unknown) {

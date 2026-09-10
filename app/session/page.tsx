@@ -584,7 +584,9 @@ function SessionPageClient() {
 
         if (requestedSessionId) {
           try {
-            await discardUnusedSession(pendingAutoSessionId);
+            if (pendingAutoSessionId !== requestedSessionId) {
+              await discardUnusedSession(pendingAutoSessionId);
+            }
             const restored = await fetchSessionDetail(requestedSessionId);
             if (!ignore) {
               window.localStorage.removeItem(STORAGE_KEY);
@@ -2689,11 +2691,14 @@ function SessionPageClient() {
 
     try {
       stopVoiceAudioInput();
-      await discardUnusedSession(sessionRef.current?.id);
-      const created = await startSession(nextId);
-      window.localStorage.setItem(STORAGE_KEY, created.id);
-      sessionRef.current = created;
-      setSession(created);
+      const updated = await updateSessionParticipantCode(session.id, nextId);
+      const updatedSession = {
+        ...session,
+        ...updated,
+      };
+      markSessionUsed(session.id);
+      sessionRef.current = updatedSession;
+      setSession(updatedSession);
       setUtterances([]);
       setUtteranceTotal(0);
       setDraft("");
@@ -2709,7 +2714,7 @@ function SessionPageClient() {
       setRemoteMicStatuses(emptyFixedRemoteMicStatus().roles);
       setIsEditingId(false);
       setIdDraft("");
-      router.replace("/session");
+      router.replace(`/session?sessionId=${encodeURIComponent(updatedSession.id)}`);
       setStatusText("保存済み");
     } catch (error) {
       const message =
@@ -4892,6 +4897,20 @@ async function startSession(participantCode?: string): Promise<SessionInfo> {
   }
 
   const data = await postJson<{ session: SessionInfo }>("/api/session/start", body);
+
+  return data.session;
+}
+
+async function updateSessionParticipantCode(
+  sessionId: string,
+  participantCode: string,
+): Promise<SessionInfo> {
+  const data = await patchJson<{ session: SessionInfo }>(
+    `/api/session/${encodeURIComponent(sessionId)}`,
+    {
+      participant_code: participantCode,
+    },
+  );
 
   return data.session;
 }

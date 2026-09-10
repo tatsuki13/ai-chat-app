@@ -654,7 +654,7 @@ export type FinalMinutesResult = {
       failureReason?: string;
       errorMessage?: string;
       rawResponse?: string;
-      themes: Array<{
+      themeChecks: Array<{
         themeId: string;
         inputEvidenceCount: number;
         inputEvidenceIds: string[];
@@ -713,15 +713,15 @@ export type ACPAspectEvidence = {
 
 export type ACPGeneratedSummary = {
   text: string;
-  source_aspects: string[];
-  source_utterance_ids: string[];
+  sourceAspectIds?: string[];
+  sourceUtteranceIds: string[];
 };
 
 export type ACPGeneratedConnection = {
   text: string;
-  source_aspects: string[];
-  related_themes: string[];
-  source_utterance_ids: string[];
+  sourceAspectIds?: string[];
+  relatedThemes?: string[];
+  sourceUtteranceIds: string[];
 };
 
 export type GroundedMinutesText = {
@@ -808,7 +808,7 @@ export type ACPMinutes = {
   overall_summary: {
     core_values: ACPGeneratedSummary[];
     cross_theme_connections: ACPGeneratedConnection[];
-    undecided_things: string[];
+    undecided_things: GroundedMinutesText[];
   };
   narratives?: Partial<Record<keyof ACPMinutes["themes"], ACPThemeNarrative>>;
   narrative_debug?: {
@@ -1993,7 +1993,10 @@ export function validateACPMinutes(
     overall_summary: {
       core_values: normalizeGeneratedSummaries(candidate.overall_summary.core_values, evidenceIndex),
       cross_theme_connections: normalizeGeneratedConnections(candidate.overall_summary.cross_theme_connections, evidenceIndex),
-      undecided_things: normalizeStringArray(candidate.overall_summary.undecided_things),
+      undecided_things: normalizeGeneratedSummaries(
+        candidate.overall_summary.undecided_things,
+        evidenceIndex,
+      ),
     },
     narratives,
     narrative_debug: {
@@ -2019,7 +2022,7 @@ export function renderACPMinutesMarkdown(minutes: ACPMinutes, generatedAt?: stri
   appendMinutesSection(lines, "本人の考えの概要", [
     ...minutes.overall_summary.core_values.map((item) => item.text),
     ...minutes.overall_summary.cross_theme_connections.map((item) => item.text),
-    ...minutes.overall_summary.undecided_things,
+    ...minutes.overall_summary.undecided_things.map((item) => item.text),
   ]);
   appendMinutesSection(lines, minutes.themes.current_life_values.title, [
     ...prefixValues("今、暮らしを支えているもの", minutes.themes.current_life_values.life_supports),
@@ -2131,7 +2134,8 @@ function buildConservativeOverallSummary(input: ACPMinutesLLMInput): ACPMinutes[
         aspect.aspect_id === "not_decided" ||
         aspect.evidence.some((evidence) => evidence.certainty === "迷いあり" || evidence.certainty === "条件付き"),
       )
-      .flatMap((aspect) => aspect.evidence.map(formatACPAspectForMinutes)),
+      .map((aspect) => buildGroundedTextFromAspects(theme, [aspect.aspect_id]))
+      .filter((item): item is GroundedMinutesText => Boolean(item)),
   );
 
   return {
@@ -2139,20 +2143,20 @@ function buildConservativeOverallSummary(input: ACPMinutesLLMInput): ACPMinutes[
       selfContinuationAspects.length >= 2
         ? [{
             text: "できることは、できるだけ自分で続けたいという思いが複数のテーマで確認されています。",
-            source_aspects: selfContinuationAspects,
-            source_utterance_ids: getSourceUtteranceIdsForAspects(input, selfContinuationAspects),
+            sourceAspectIds: selfContinuationAspects,
+            sourceUtteranceIds: getSourceUtteranceIdsForAspects(input, selfContinuationAspects),
           }]
         : [],
     cross_theme_connections:
       selfContinuationAspects.length >= 2 && relatedThemes.length >= 2
         ? [{
             text: "自分で続けたいという思いが、暮らしの継続、自分らしさ、支援の希望にまたがって表れています。",
-            source_aspects: selfContinuationAspects,
-            related_themes: relatedThemes,
-            source_utterance_ids: getSourceUtteranceIdsForAspects(input, selfContinuationAspects),
+            sourceAspectIds: selfContinuationAspects,
+            relatedThemes,
+            sourceUtteranceIds: getSourceUtteranceIdsForAspects(input, selfContinuationAspects),
           }]
         : [],
-    undecided_things: uniqueStrings(undecided),
+    undecided_things: dedupeGroundedTexts(undecided),
   };
 }
 
@@ -2633,14 +2637,14 @@ function normalizeGeneratedSummaries(
       if (!item || typeof item !== "object") return null;
       const record = item as Record<string, unknown>;
       const text = normalizeString(record.text);
-      const sourceAspects = normalizeStringArray(record.source_aspects);
-      const sourceUtteranceIds = normalizeStringArray(record.source_utterance_ids);
+      const sourceAspectIds = normalizeStringArray(record.sourceAspectIds);
+      const sourceUtteranceIds = normalizeStringArray(record.sourceUtteranceIds);
       const validSourceUtteranceIds = filterKnownEvidenceIds(sourceUtteranceIds, evidenceIndex);
-      return text && sourceAspects.length >= 2 && validSourceUtteranceIds.length > 0
+      return text && validSourceUtteranceIds.length > 0
         ? {
             text,
-            source_aspects: sourceAspects,
-            source_utterance_ids: validSourceUtteranceIds,
+            ...(sourceAspectIds.length > 0 ? { sourceAspectIds } : {}),
+            sourceUtteranceIds: validSourceUtteranceIds,
           }
         : null;
     })
@@ -2657,16 +2661,16 @@ function normalizeGeneratedConnections(
       if (!item || typeof item !== "object") return null;
       const record = item as Record<string, unknown>;
       const text = normalizeString(record.text);
-      const sourceAspects = normalizeStringArray(record.source_aspects);
-      const relatedThemes = normalizeStringArray(record.related_themes);
-      const sourceUtteranceIds = normalizeStringArray(record.source_utterance_ids);
+      const sourceAspectIds = normalizeStringArray(record.sourceAspectIds);
+      const relatedThemes = normalizeStringArray(record.relatedThemes);
+      const sourceUtteranceIds = normalizeStringArray(record.sourceUtteranceIds);
       const validSourceUtteranceIds = filterKnownEvidenceIds(sourceUtteranceIds, evidenceIndex);
-      return text && sourceAspects.length >= 2 && relatedThemes.length >= 2 && validSourceUtteranceIds.length > 0
+      return text && validSourceUtteranceIds.length > 0
         ? {
             text,
-            source_aspects: sourceAspects,
-            related_themes: relatedThemes,
-            source_utterance_ids: validSourceUtteranceIds,
+            ...(sourceAspectIds.length > 0 ? { sourceAspectIds } : {}),
+            ...(relatedThemes.length > 0 ? { relatedThemes } : {}),
+            sourceUtteranceIds: validSourceUtteranceIds,
           }
         : null;
     })
@@ -2679,6 +2683,17 @@ function filterKnownEvidenceIds(
 ) {
   if (!evidenceIndex) return ids;
   return ids.filter((id) => evidenceIndex.has(id));
+}
+
+function dedupeGroundedTexts(items: GroundedMinutesText[]) {
+  const seen = new Set<string>();
+
+  return items.filter((item) => {
+    const key = `${item.text}:${item.sourceUtteranceIds.join(",")}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function appendMinutesSection(lines: string[], title: string, values: string[]) {
