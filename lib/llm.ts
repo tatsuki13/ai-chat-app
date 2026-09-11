@@ -152,16 +152,20 @@ const SYSTEM_CLASSIFY_SLOT_UTTERANCES = [
 ].join("\n");
 
 const SYSTEM_AI_QUESTION_WITH_SLOT_UPDATES = [
-  "You support an ACP dialogue in Japanese. Return only JSON.",
-  "For one AI question button press, produce both slot update candidates and the next action in a single response.",
-  "Use unprocessed_utterances only for slot_updates. recent_context is only background for natural question wording and must not become new evidence.",
-  "The application validates completion, responseState, reasonCode, canAskAgain, isDeferred, evidence, speaker consent, and state transitions.",
-  "Prefer the elder person's own words. Do not confirm the elder's preference from caregiver-only speech.",
-  "Do not overwrite meaningful existing state with mere acknowledgements or progress utterances.",
-  "Choose exactly one next_action. Use ask_question only when one current-topic sub-slot can still be asked about. Use advance_topic when no askable item remains.",
-  "The question must be short, natural Japanese, easy for an older adult, non-leading, and ask only one thing.",
-  "Do not repeat previous_ai_questions or ask again about declined, explicit_none, not_considered, or unable_to_verbalize items.",
-  '{"slot_updates":[{"mainSlotId":"...","subSlotId":"...","relevantMentionPresent":true,"responsePresent":true,"specificContentPresent":true,"reasonPresent":false,"conditionPresent":false,"examplePresent":false,"ambiguityPresent":false,"conflictPresent":false,"responseMeaning":"preference_expressed | explicit_none | not_considered | unable_to_verbalize | declined | other_response | unknown","evidenceType":"direct_elder_statement | elder_confirmation | caregiver_report_with_elder_confirmation | caregiver_report_only | shared_statement | unknown","evidenceUtteranceIds":["..."],"classificationNote":"optional"}],"unmatchedUtteranceIds":["..."],"next_action":{"type":"ask_question | advance_topic","target_sub_slot_id":"... | null","question":"... | null","reason":"..."}}',
+  "あなたは日本語のACP対話を支援するAIです。指定されたJSONのみを返してください。",
+  "AI質問ボタン1回につき、slot update候補と次のアクションを1つのレスポンスで同時に生成してください。",
+  "slot_updatesの根拠にはunprocessed_utterancesのみを使ってください。recent_contextは自然な質問表現の背景としてだけ使い、新しい根拠にしてはいけません。",
+  "アプリ側ではcompletion、responseState、reasonCode、canAskAgain、isDeferred、evidence、本人同意、状態遷移を検証します。",
+  "本人の言葉を優先してください。介護者だけの発言から本人の希望を確定しないでください。",
+  "意味のある既存状態を、相づちや進行発話だけで上書きしないでください。",
+  "next_actionは必ず1つだけ選んでください。現在テーマ内で質問可能なsub-slotが残っている場合だけask_questionを使い、質問可能な項目がない場合はadvance_topicを使ってください。",
+  "ask_questionの場合、AIは単発の質問だけを投げず、人間の話題提示者のように、直前の会話を短く受け止めてから質問してください。",
+  "next_action.transition_phraseには、recent_contextで明確に確認できる発言内容だけを使った短い受け止め、必要最小限の要約、または自然な話題のつなぎを入れてください。",
+  "transition_phraseはslot evidenceではありません。新しい事実、推測、評価、助言、医療・介護上の解釈、本人が言っていない価値観を追加しないでください。",
+  "transition_phraseは質問文にせず、日本語で最大2文、長くしすぎず、毎回同じ定型文を繰り返さないでください。",
+  "questionは短く、自然な日本語で、高齢者にも答えやすく、誘導的でなく、1つのことだけを尋ねてください。チェックリストの項目確認のような硬い言い方は避けてください。",
+  "previous_ai_questionsと同じ質問を繰り返さないでください。declined、explicit_none、not_considered、unable_to_verbalizeとして扱われた項目を再質問しないでください。",
+  '{"slot_updates":[{"mainSlotId":"...","subSlotId":"...","relevantMentionPresent":true,"responsePresent":true,"specificContentPresent":true,"reasonPresent":false,"conditionPresent":false,"examplePresent":false,"ambiguityPresent":false,"conflictPresent":false,"responseMeaning":"preference_expressed | explicit_none | not_considered | unable_to_verbalize | declined | other_response | unknown","evidenceType":"direct_elder_statement | elder_confirmation | caregiver_report_with_elder_confirmation | caregiver_report_only | shared_statement | unknown","evidenceUtteranceIds":["..."],"classificationNote":"optional"}],"unmatchedUtteranceIds":["..."],"next_action":{"type":"ask_question | advance_topic","target_sub_slot_id":"... | null","transition_phrase":"... | null","question":"... | null","reason":"..."}}',
 ].join("\n");
 
 
@@ -391,6 +395,7 @@ type AiQuestionWithSlotUpdatesResult = {
   next_action?: {
     type?: "ask_question" | "advance_topic";
     target_sub_slot_id?: string | null;
+    transition_phrase?: string | null;
     question?: string | null;
     reason?: string | null;
   };
@@ -653,6 +658,7 @@ export async function updateSlotsAndGenerateNextQuestionAction(
       next_action: {
         type: fallbackActionType,
         target_sub_slot_id: fallbackCandidate?.subSlotId ?? null,
+        transition_phrase: fallbackQuestion.transition_phrase,
         question: fallbackQuestion.question,
         reason: fallbackQuestion.reason,
       },
@@ -896,7 +902,7 @@ function normalizeCombinedNextQuestionAction(input: {
 
   return {
     question,
-    transition_phrase: "",
+    transition_phrase: normalizeQuestionTransitionPhrase(action.transition_phrase),
     target_slot: input.currentTopic.slot_name,
     targetMainSlotId: input.currentTopic.id,
     targetSubSlotId: input.selectedCandidate.subSlotId,
@@ -913,6 +919,18 @@ function looksLikeMultipleQuestions(question: string) {
   if (questionMarks > 1) return true;
 
   return /、.*(?:ですか|でしょうか).*(?:ですか|でしょうか)/.test(question);
+}
+
+function normalizeQuestionTransitionPhrase(value: unknown) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) return "";
+  if (/[?？]/.test(text)) return "";
+
+  const compact = text.replace(/\s+/g, " ");
+  const limited = Array.from(compact).slice(0, 120).join("");
+  if (/[。.!！]$/.test(limited)) return limited;
+
+  return `${limited}。`;
 }
 
 function applySlotClassifications(input: {
@@ -2801,7 +2819,7 @@ function fallbackNextQuestion(
         followUpSubSlot.label,
         selectedCandidate?.questionPurpose ?? "elicit_preference",
       ),
-      transition_phrase: recentText ? "今のお話に関連して、" : "",
+      transition_phrase: "",
       target_slot: preferredSlot,
       targetMainSlotId: preferredTopic.id,
       targetSubSlotId: followUpSubSlot.id,
@@ -2836,7 +2854,7 @@ function fallbackNextQuestion(
 
   return {
     question: FALLBACK_QUESTIONS[targetSlot],
-    transition_phrase: recentText ? "今のお話に関連して、" : "",
+    transition_phrase: "",
     target_slot: targetSlot,
     reason: "直近の会話と未充足スロットの状態から、自然につながりやすい確認項目として選びました。",
     sensitivity: getSlotSensitivity(targetSlot),
@@ -2892,7 +2910,7 @@ function questionForSubSlotFollowUp(label: string, purpose: QuestionPurpose) {
     return "そのことで関わってほしい人や、伝えておきたい相手はいますか。";
   }
 
-  return `今のお話に関連して、「${label}」についてもう少し聞いてもよいですか。`;
+  return `「${label}」について、もう少し聞いてもよいですか。`;
 }
 
 function resolveTopic(value: string | undefined) {

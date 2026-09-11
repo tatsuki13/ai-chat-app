@@ -2029,12 +2029,19 @@ function SessionPageClient() {
       }
 
       if (data.suggestion?.question) {
-        setPromptPanel(createQuestionPromptPanel(data.suggestion, "AIからの質問"));
+        const fullQuestionText = buildQuestionText(data.suggestion);
+        setPromptPanel(
+          createQuestionPromptPanel(
+            data.suggestion,
+            "AIからの質問",
+            fullQuestionText,
+          ),
+        );
         setStatusText("保存済み");
         void playSpokenContent({
           contentType: "question",
           topicId: actionTopicId,
-          text: data.suggestion.question,
+          text: fullQuestionText,
           preparedAudioUsed: false,
         });
         return;
@@ -5158,8 +5165,9 @@ function toUserFacingError(error: string) {
 function createQuestionPromptPanel(
   suggestion: NextQuestionResponse["suggestion"],
   title: string,
+  bodyOverride?: string,
 ): PromptPanelState {
-  const body = joinPrompt(suggestion.transition_phrase, suggestion.question);
+  const body = bodyOverride ?? buildQuestionText(suggestion);
 
   if (suggestion.no_relevant_followup || !body) {
     return {
@@ -5176,10 +5184,18 @@ function createQuestionPromptPanel(
   };
 }
 
+function buildQuestionText(
+  suggestion: Pick<NextQuestionResponse["suggestion"], "transition_phrase" | "question">,
+) {
+  return joinPrompt(suggestion.transition_phrase, suggestion.question);
+}
+
 function joinPrompt(transition: string, question: string | null) {
   if (!question) return "";
-  if (!transition) return question;
-  return `${transition}${question}`;
+  const normalizedQuestion = question.trim();
+  const normalizedTransition = transition.trim();
+  if (!normalizedTransition) return normalizedQuestion;
+  return `${normalizedTransition}\n\n${normalizedQuestion}`;
 }
 
 function formatDateTime(value: string) {

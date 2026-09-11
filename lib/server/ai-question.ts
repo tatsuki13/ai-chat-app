@@ -211,11 +211,16 @@ export async function generateAiQuestionForTopic(input: {
       return response;
     }
 
+    const presentedQuestionText = joinQuestionPrompt(
+      result.transition_phrase,
+      result.question,
+    );
+
     await logAIIntervention({
       sessionId: input.sessionId,
       participantCode: slotUpdate.participantCode ?? null,
       type: "NEXT_QUESTION",
-      content: result.question,
+      content: presentedQuestionText,
       topicId: topic.id,
       requestedAt,
       generatedAt,
@@ -223,6 +228,8 @@ export async function generateAiQuestionForTopic(input: {
         requestId: input.requestId,
         currentTopic: topic.slot_name,
         currentTopicTitle: input.currentTopicTitle ?? topic.title,
+        transitionPhrase: result.transition_phrase,
+        question: result.question,
         targetSlot: result.target_slot,
         targetMainSlotId: result.targetMainSlotId,
         targetSubSlotId: result.targetSubSlotId,
@@ -251,7 +258,7 @@ export async function generateAiQuestionForTopic(input: {
       slot_classification_debug: slotUpdate.slotClassificationDebug,
       suggestion: {
         suggestion_type: "next_question",
-        content: result.question,
+        content: presentedQuestionText,
         question: result.question,
         transition_phrase: result.transition_phrase,
         target_slot: result.target_slot,
@@ -582,7 +589,7 @@ async function completeAiQuestionRequest(input: {
       model: input.model,
       generatedText:
         input.nextAction === "ask_question"
-          ? asRecord(input.response.suggestion)?.question?.toString() ?? null
+          ? asRecord(input.response.suggestion)?.content?.toString() ?? null
           : null,
       metadata: toPrismaJson({
         requestId: input.requestId,
@@ -648,6 +655,15 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function joinQuestionPrompt(transitionPhrase: string, question: string | null) {
+  const normalizedQuestion = question?.trim() ?? "";
+  if (!normalizedQuestion) return "";
+  const normalizedTransition = transitionPhrase.trim();
+  if (!normalizedTransition) return normalizedQuestion;
+
+  return `${normalizedTransition}\n\n${normalizedQuestion}`;
 }
 
 function toPrismaJson(value: Record<string, unknown>) {
