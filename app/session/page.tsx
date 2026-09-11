@@ -113,10 +113,12 @@ type RemoteMicConnectionStatus =
   | "disconnected";
 type RemoteMicRoleStatus = {
   status: RemoteMicConnectionStatus;
+  ready: boolean;
+  readyReason?: string | null;
   lastHeartbeatAt?: string | null;
   muted?: boolean;
-  transmitting?: boolean;
-  micPhase?: "listening" | "suppressed" | "reconnecting" | "error";
+  realtimeConnected?: boolean;
+  captureState?: "idle" | "listening" | "suppressed" | "reconnecting" | "error";
   reconnectAttempt?: number;
   reconnectReason?: string | null;
 };
@@ -136,10 +138,14 @@ type FixedRemoteMicActiveState = {
   roles: Record<
     SpeakerRole,
     {
-      connectedAt: number | null;
-      lastSeenAt: number | null;
+      connectedAt: string | null;
+      lastSeenAt: string | null;
       muted: boolean;
-      transmitting: boolean;
+      realtimeConnected: boolean;
+      captureState: "idle" | "listening" | "suppressed" | "reconnecting" | "error";
+      reconnectAttempt: number | null;
+      reconnectReason: string | null;
+      updatedAt: string | null;
     }
   >;
 };
@@ -456,8 +462,8 @@ function SessionPageClient() {
   const [remoteMicStatuses, setRemoteMicStatuses] = useState<
     Record<SpeakerRole, RemoteMicRoleStatus>
   >({
-    caregiver: { status: "disconnected" },
-    elder: { status: "disconnected" },
+    caregiver: { status: "disconnected", ready: false, readyReason: "heartbeat_stale" },
+    elder: { status: "disconnected", ready: false, readyReason: "heartbeat_stale" },
   });
   const [remoteMicConnecting, setRemoteMicConnecting] = useState(false);
   const [developerSlotStates, setDeveloperSlotStates] = useState<SlotState[]>([]);
@@ -490,8 +496,8 @@ function SessionPageClient() {
     caregiver: null,
   });
   const remoteMicStatusesRef = useRef<Record<SpeakerRole, RemoteMicRoleStatus>>({
-    elder: { status: "disconnected" },
-    caregiver: { status: "disconnected" },
+    elder: { status: "disconnected", ready: false, readyReason: "heartbeat_stale" },
+    caregiver: { status: "disconnected", ready: false, readyReason: "heartbeat_stale" },
   });
   const sessionSyncInFlightRef = useRef(false);
   const pendingCommitPromiseRef = useRef<Promise<void> | null>(null);
@@ -571,9 +577,9 @@ function SessionPageClient() {
   const remoteMicrophonesConnected =
     remoteMicStatuses.elder.status === "connected" &&
     remoteMicStatuses.caregiver.status === "connected";
-  const remoteMicrophonesTransmitting =
-    remoteMicStatuses.elder.transmitting === true &&
-    remoteMicStatuses.caregiver.transmitting === true;
+  const remoteMicrophonesReady =
+    remoteMicStatuses.elder.ready === true &&
+    remoteMicStatuses.caregiver.ready === true;
 
   useEffect(() => {
     let ignore = false;
@@ -1672,15 +1678,23 @@ function SessionPageClient() {
     if (event.sessionId !== sessionRef.current?.id) return;
 
     setRemoteMicStatuses((current) => ({
-      ...current,
-      [event.role]: {
-        ...current[event.role],
-        status: event.type === "mic.reconnect_failed" ? "disconnected" : "connected",
-        micPhase:
-          event.type === "mic.reconnecting"
-            ? "reconnecting"
+        ...current,
+        [event.role]: {
+          ...current[event.role],
+          status: event.type === "mic.reconnect_failed" ? "disconnected" : "connected",
+          ready: event.type === "mic.reconnected",
+          readyReason:
+            event.type === "mic.reconnected"
+              ? null
+              : event.type === "mic.reconnecting"
+                ? "capture_not_listening"
+                : "realtime_not_connected",
+          realtimeConnected: event.type === "mic.reconnected",
+          captureState:
+            event.type === "mic.reconnecting"
+              ? "reconnecting"
             : event.type === "mic.reconnected"
-              ? event.micPhase
+              ? event.captureState
               : "error",
         reconnectAttempt:
           event.type === "mic.reconnecting" ? event.attempt : undefined,
@@ -2616,16 +2630,20 @@ function SessionPageClient() {
     setIdError("");
 
     try {
-      const micStatus = await activateFixedRemoteMics(session.id);
+      const micStatus = await fetchFixedRemoteMicStatus(session.id);
       setRemoteMicStatuses(micStatus.roles);
       if (
         micStatus.roles.elder.status !== "connected" ||
         micStatus.roles.caregiver.status !== "connected" ||
-        micStatus.roles.elder.micPhase === "error" ||
-        micStatus.roles.caregiver.micPhase === "error"
+        micStatus.roles.elder.ready !== true ||
+        micStatus.roles.caregiver.ready !== true ||
+        micStatus.roles.elder.captureState === "error" ||
+        micStatus.roles.caregiver.captureState === "error"
       ) {
         const missingRoles = (["elder", "caregiver"] as const).filter(
-          (role) => micStatus.roles[role].status !== "connected",
+          (role) =>
+            micStatus.roles[role].status !== "connected" ||
+            micStatus.roles[role].ready !== true,
         );
         setStatusText("マイク未接続");
         showRemoteMicControlError(
@@ -3343,7 +3361,7 @@ async function completeSession() {
               hasParticipantCode={hasParticipantCode}
               isEditingParticipantCode={isEditingId}
               microphonesConnected={remoteMicrophonesConnected}
-              microphonesTransmitting={remoteMicrophonesTransmitting}
+              microphonesReady={remoteMicrophonesReady}
               statuses={remoteMicStatuses}
               onEditParticipantCode={startEditingId}
             />
@@ -3423,7 +3441,7 @@ function DialogueSetupGuide(props: {
   hasParticipantCode: boolean;
   isEditingParticipantCode: boolean;
   microphonesConnected: boolean;
-  microphonesTransmitting: boolean;
+  microphonesReady: boolean;
   statuses: Record<SpeakerRole, RemoteMicRoleStatus>;
   onEditParticipantCode: () => void;
 }) {
@@ -3431,13 +3449,13 @@ function DialogueSetupGuide(props: {
     ? 0
     : !props.microphonesConnected
       ? 1
-      : !props.microphonesTransmitting
+      : !props.microphonesReady
         ? 2
         : 3;
   const elderConnected = props.statuses.elder.status === "connected";
   const caregiverConnected = props.statuses.caregiver.status === "connected";
-  const elderTransmitting = props.statuses.elder.transmitting === true;
-  const caregiverTransmitting = props.statuses.caregiver.transmitting === true;
+  const elderReady = props.statuses.elder.ready === true;
+  const caregiverReady = props.statuses.caregiver.ready === true;
   const nextAction =
     currentStep === 0
       ? "まず参加者IDを設定してください。"
@@ -3463,13 +3481,13 @@ function DialogueSetupGuide(props: {
     },
     {
       label: "マイク開始",
-      detail: `本人 ${elderTransmitting ? "送信中" : "停止中"} / 介護者 ${
-        caregiverTransmitting ? "送信中" : "停止中"
+      detail: `本人 ${elderReady ? "ready" : remoteMicReasonLabel(props.statuses.elder)} / 介護者 ${
+        caregiverReady ? "ready" : remoteMicReasonLabel(props.statuses.caregiver)
       }`,
     },
     {
       label: "対話開始",
-      detail: props.microphonesTransmitting ? "開始できます" : "待機中",
+      detail: props.microphonesReady ? "開始できます" : "待機中",
     },
   ];
 
@@ -3637,13 +3655,26 @@ function RemoteMicrophoneStatus(props: {
 }
 
 function remoteMicActivityLabel(roleStatus: RemoteMicRoleStatus) {
-  if (roleStatus.micPhase === "reconnecting") {
+  if (roleStatus.captureState === "reconnecting") {
     return `再接続中${roleStatus.reconnectAttempt ? ` ${roleStatus.reconnectAttempt}/5` : ""}`;
   }
-  if (roleStatus.micPhase === "error") return "手動確認が必要";
-  if (roleStatus.micPhase === "suppressed") return "AI音声中ミュート";
-  if (roleStatus.micPhase === "listening") return "送信中";
-  return roleStatus.transmitting ? "送信中" : "ミュート";
+  if (roleStatus.captureState === "error") return "手動確認が必要";
+  if (roleStatus.captureState === "suppressed") return "AI音声中ミュート";
+  if (roleStatus.captureState === "listening") return "送信中";
+  return remoteMicReasonLabel(roleStatus);
+}
+
+function remoteMicReasonLabel(roleStatus: RemoteMicRoleStatus) {
+  switch (roleStatus.readyReason) {
+    case "heartbeat_stale":
+      return "未接続";
+    case "realtime_not_connected":
+      return "Realtime未接続";
+    case "capture_not_listening":
+      return roleStatus.captureState === "suppressed" ? "AI音声中" : "待機中";
+    default:
+      return "待機中";
+  }
 }
 
 function remoteMicStatusLabel(status: RemoteMicConnectionStatus) {
@@ -3683,12 +3714,38 @@ async function activateFixedRemoteMics(sessionId: string) {
   };
 }
 
+async function fetchFixedRemoteMicStatus(sessionId: string) {
+  const response = await fetch(
+    `/api/remote-mic/fixed/active?sessionId=${encodeURIComponent(sessionId)}`,
+    { cache: "no-store" },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Fixed remote microphone status failed: ${response.status}`);
+  }
+
+  const data = (await response.json()) as FixedRemoteMicActiveResponse;
+  const now = Date.now();
+
+  if (!data.active) {
+    return emptyFixedRemoteMicStatus();
+  }
+
+  return {
+    dialogueStartedAt: data.active.dialogueStartedAt,
+    roles: {
+      elder: toFixedRemoteMicStatus(data.active.roles.elder, now),
+      caregiver: toFixedRemoteMicStatus(data.active.roles.caregiver, now),
+    },
+  };
+}
+
 function emptyFixedRemoteMicStatus() {
   return {
     dialogueStartedAt: null,
     roles: {
-      elder: { status: "disconnected" },
-      caregiver: { status: "disconnected" },
+      elder: { status: "disconnected", ready: false, readyReason: "heartbeat_stale" },
+      caregiver: { status: "disconnected", ready: false, readyReason: "heartbeat_stale" },
     },
   } satisfies {
     dialogueStartedAt: string | null;
@@ -3700,16 +3757,27 @@ function toFixedRemoteMicStatus(
   roleState: FixedRemoteMicActiveState["roles"][SpeakerRole],
   now: number,
 ): RemoteMicRoleStatus {
+  const lastSeenAt = roleState.lastSeenAt ? new Date(roleState.lastSeenAt).getTime() : null;
   const connected =
-    roleState.lastSeenAt !== null && now - roleState.lastSeenAt <= 45_000;
+    lastSeenAt !== null && Number.isFinite(lastSeenAt) && now - lastSeenAt <= 45_000;
+  const readyReason = !connected
+    ? "heartbeat_stale"
+    : !roleState.realtimeConnected
+      ? "realtime_not_connected"
+      : roleState.captureState !== "listening"
+        ? "capture_not_listening"
+        : null;
 
   return {
     status: connected ? "connected" : "disconnected",
-    lastHeartbeatAt: roleState.lastSeenAt
-      ? new Date(roleState.lastSeenAt).toISOString()
-      : null,
+    ready: readyReason === null,
+    readyReason,
+    lastHeartbeatAt: roleState.lastSeenAt,
     muted: roleState.muted,
-    transmitting: roleState.transmitting,
+    realtimeConnected: roleState.realtimeConnected,
+    captureState: roleState.captureState,
+    reconnectAttempt: roleState.reconnectAttempt ?? undefined,
+    reconnectReason: roleState.reconnectReason,
   };
 }
 

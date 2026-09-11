@@ -15,6 +15,12 @@ type MicPhase =
   | "reconnecting"
   | "error"
   | "stopped";
+type RemoteMicCaptureState =
+  | "idle"
+  | "listening"
+  | "suppressed"
+  | "reconnecting"
+  | "error";
 type ReconnectReason =
   | "peer_failed"
   | "peer_closed"
@@ -54,7 +60,12 @@ type AiSpeechStateResponse = {
   state: {
     active?: boolean | null;
     playbackId?: string | null;
+    contentType?: "topic" | "question" | null;
     revision?: number | null;
+    startedAt?: string | null;
+    expectedEndAt?: string | null;
+    endedAt?: string | null;
+    releaseAfter?: string | null;
   } | null;
 };
 type RealtimeTranscriptSaveResponse = {
@@ -70,6 +81,7 @@ type RealtimeTranscriptSaveResponse = {
 const CLIENT_VERSION = "remote-mic-client-2026-09-04-openai-realtime";
 const SESSION_CHECK_TIMEOUT_MS = 8_000;
 const HEARTBEAT_MS = 15_000;
+const AI_SPEECH_STATE_POLL_MS = 1_000;
 const PARTIAL_BROADCAST_INTERVAL_MS = 75;
 const FINAL_SAVE_RETRY_MS = 2000;
 const FINAL_SAVE_TIMEOUT_MS = 5_000;
@@ -227,7 +239,6 @@ export default function RemoteMicClient(props: {
           if (
             !data.active ||
             data.active.sessionId !== remoteMic.sessionId ||
-            data.active.participantCode !== remoteMic.participantCode ||
             data.active.endedAt
           ) {
             sessionEndedRef.current = true;
@@ -242,6 +253,7 @@ export default function RemoteMicClient(props: {
             current
               ? {
                   ...current,
+                  participantCode: data.active?.participantCode ?? null,
                   dialogueStartedAt: data.active?.dialogueStartedAt ?? null,
                 }
               : current,
@@ -279,6 +291,64 @@ export default function RemoteMicClient(props: {
       source.close();
     };
   }, [remoteMic?.sessionId, remoteMic?.role]);
+
+  useEffect(() => {
+    if (!remoteMic?.sessionId || micState !== "streaming") return;
+
+    let stopped = false;
+    async function pollAiSpeechState() {
+      const current = remoteMicRef.current;
+      if (!current || stopped || micStateRef.current !== "streaming") return;
+
+      const data = await fetchAiSpeechState(current.sessionId).catch((error) => {
+        console.warn("[remote-mic ai speech poll failed]", {
+          sessionId: current.sessionId,
+          role: current.role,
+          error,
+        });
+        return null;
+      });
+      const state = data?.state;
+      const revision =
+        typeof state?.revision === "number" && Number.isFinite(state.revision)
+          ? state.revision
+          : null;
+      if (!state || revision === null || revision <= latestAiSpeechRevisionRef.current) {
+        return;
+      }
+
+      handleAiSpeechStateEvent({
+        type: "ai_speech_snapshot",
+        sessionId: current.sessionId,
+        active: Boolean(state.active),
+        playbackId: state.playbackId ?? null,
+        activePlaybackId: state.active ? state.playbackId ?? null : null,
+        contentType: state.contentType ?? null,
+        revision,
+        startedAt: state.startedAt ?? null,
+        expectedEndAt: state.expectedEndAt ?? null,
+        endedAt: state.endedAt ?? null,
+        releaseAfter: state.releaseAfter ?? null,
+        speechPhase: state.active
+          ? "playing"
+          : state.releaseAfter && Date.now() <= new Date(state.releaseAfter).getTime()
+            ? "echo-guard"
+            : "idle",
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    void pollAiSpeechState();
+    const timerId = window.setInterval(
+      () => void pollAiSpeechState(),
+      AI_SPEECH_STATE_POLL_MS,
+    );
+
+    return () => {
+      stopped = true;
+      window.clearInterval(timerId);
+    };
+  }, [remoteMic?.sessionId, micState]);
 
   function setMicPhaseValue(nextPhase: MicPhase) {
     micPhaseRef.current = nextPhase;
@@ -375,7 +445,14 @@ export default function RemoteMicClient(props: {
 
     const current = remoteMicRef.current;
     if (current) {
-      void setFixedMicMuted(true, current).catch((error) => {
+      void updateFixedMicState(
+        {
+          muted: true,
+          realtimeConnected: true,
+          captureState: "suppressed",
+        },
+        current,
+      ).catch((error) => {
         console.warn("[remote-mic fixed mute notification failed]", {
           sessionId: current.sessionId,
           role: current.role,
@@ -475,7 +552,14 @@ export default function RemoteMicClient(props: {
 
       const current = remoteMicRef.current;
       if (current) {
-        void setFixedMicMuted(false, current).catch((error) => {
+        void updateFixedMicState(
+          {
+            muted: false,
+            realtimeConnected: true,
+            captureState: "listening",
+          },
+          current,
+        ).catch((error) => {
           console.warn("[remote-mic fixed mute notification failed]", {
             sessionId: current.sessionId,
             role: current.role,
@@ -529,6 +613,16 @@ export default function RemoteMicClient(props: {
       setMicPhaseValue("error");
       setConnectionLabel("手動確認が必要です");
       setError("Realtime接続を復旧できませんでした。スマートフォンの通信状態を確認してください。");
+      void updateFixedMicState(
+        {
+          muted: true,
+          realtimeConnected: false,
+          captureState: "error",
+          reconnectAttempt: attempt - 1,
+          reconnectReason: reason,
+        },
+        targetRemoteMic,
+      ).catch(() => undefined);
       void publishRemoteMicRealtimeEvent({
         type: "mic.reconnect_failed",
         sessionId: targetRemoteMic.sessionId,
@@ -541,6 +635,15 @@ export default function RemoteMicClient(props: {
 
     setMicPhaseValue("reconnecting");
     setConnectionLabel(`再接続中 (${attempt}/5)`);
+    void updateFixedMicState(
+      {
+        realtimeConnected: false,
+        captureState: "reconnecting",
+        reconnectAttempt: attempt,
+        reconnectReason: reason,
+      },
+      targetRemoteMic,
+    ).catch(() => undefined);
     void publishRemoteMicRealtimeEvent({
       type: "mic.reconnecting",
       sessionId: targetRemoteMic.sessionId,
@@ -575,12 +678,22 @@ export default function RemoteMicClient(props: {
       setMicState("streaming");
       setConnectionLabel("接続済み");
       setServerLabel(phase === "suppressed" ? "AI音声中のため一時ミュート" : "文字起こし中");
+      await updateFixedMicState(
+        {
+          muted: phase === "suppressed",
+          realtimeConnected: true,
+          captureState: phase,
+          reconnectAttempt: null,
+          reconnectReason: null,
+        },
+        targetRemoteMic,
+      );
       void publishRemoteMicRealtimeEvent({
         type: "mic.reconnected",
         sessionId: targetRemoteMic.sessionId,
         role: targetRemoteMic.role,
         streamId: streamIdRef.current,
-        micPhase: phase,
+        captureState: phase,
       }).catch(() => undefined);
     } catch (error) {
       console.warn("[remote-mic reconnect failed]", {
@@ -596,6 +709,16 @@ export default function RemoteMicClient(props: {
         setMicPhaseValue("error");
         setConnectionLabel("権限確認が必要です");
         setError(error instanceof Error ? error.message : "マイク権限を確認してください。");
+        void updateFixedMicState(
+          {
+            muted: true,
+            realtimeConnected: false,
+            captureState: "error",
+            reconnectAttempt: reconnectAttemptRef.current,
+            reconnectReason: reason,
+          },
+          targetRemoteMic,
+        ).catch(() => undefined);
         void publishRemoteMicRealtimeEvent({
           type: "mic.reconnect_failed",
           sessionId: targetRemoteMic.sessionId,
@@ -983,7 +1106,6 @@ export default function RemoteMicClient(props: {
     setMicState("requesting");
     setMicPhaseValue("connecting");
 
-    let unmuted = false;
     try {
       if (!isHttpsTsNetUrl(window.location.href)) {
         throw new Error(
@@ -999,8 +1121,6 @@ export default function RemoteMicClient(props: {
         );
       }
 
-      await setFixedMicMuted(captureBlockedRef.current, targetRemoteMic);
-      unmuted = !captureBlockedRef.current;
       await openRealtimeConnection(targetRemoteMic, {
         reconnecting: false,
         reuseLiveStream: false,
@@ -1016,6 +1136,16 @@ export default function RemoteMicClient(props: {
           : "文字起こし中",
       );
       setMicPhaseValue(captureBlockedRef.current ? "suppressed" : "listening");
+      await updateFixedMicState(
+        {
+          muted: captureBlockedRef.current,
+          realtimeConnected: true,
+          captureState: captureBlockedRef.current ? "suppressed" : "listening",
+          reconnectAttempt: null,
+          reconnectReason: null,
+        },
+        targetRemoteMic,
+      );
     } catch (startError) {
       if (isPermissionError(startError)) {
         setPermissionLabel("拒否");
@@ -1026,9 +1156,14 @@ export default function RemoteMicClient(props: {
           : "マイクを開始できませんでした。",
       );
       await stopRealtimeConnection();
-      if (unmuted) {
-        await setFixedMicMuted(true, targetRemoteMic).catch(() => undefined);
-      }
+      await updateFixedMicState(
+        {
+          muted: true,
+          realtimeConnected: false,
+          captureState: isPermissionError(startError) ? "error" : "idle",
+        },
+        targetRemoteMic,
+      ).catch(() => undefined);
       setMicState("idle");
       setMicPhaseValue(isPermissionError(startError) ? "error" : "disconnected");
       setConnectionLabel("未接続");
@@ -1411,7 +1546,13 @@ export default function RemoteMicClient(props: {
     setMicPhaseValue("stopped");
 
     if (notifyServer) {
-      await setFixedMicMuted(true).catch(() => undefined);
+      await updateFixedMicState({
+        muted: true,
+        realtimeConnected: false,
+        captureState: "idle",
+        reconnectAttempt: null,
+        reconnectReason: null,
+      }).catch(() => undefined);
       setServerLabel("停止中");
     }
   }
@@ -1427,8 +1568,14 @@ export default function RemoteMicClient(props: {
     await closeRealtimeTransport(true);
   }
 
-  async function setFixedMicMuted(
-    muted: boolean,
+  async function updateFixedMicState(
+    state: {
+      muted?: boolean;
+      realtimeConnected?: boolean;
+      captureState?: RemoteMicCaptureState;
+      reconnectAttempt?: number | null;
+      reconnectReason?: string | null;
+    },
     targetRemoteMic = remoteMicRef.current,
   ) {
     if (!targetRemoteMic) return;
@@ -1439,7 +1586,7 @@ export default function RemoteMicClient(props: {
       body: JSON.stringify({
         sessionId: targetRemoteMic.sessionId,
         role: targetRemoteMic.role,
-        muted,
+        ...state,
       }),
     });
 
@@ -1449,7 +1596,7 @@ export default function RemoteMicClient(props: {
 
     const data = (await response.json()) as {
       dialogueStartedAt: string | null;
-      muted: boolean;
+      roleState: unknown;
     };
     setRemoteMic((current) =>
       current

@@ -5,9 +5,9 @@ import {
   setFixedRemoteMicActiveSession,
 } from "../../../../../lib/remote-mic/active-session-db";
 import {
-  clearActiveFixedRemoteMicSession,
-  setActiveFixedRemoteMicSession,
-} from "../../../../../lib/remote-mic/fixed-session";
+  clearFixedRemoteMicRoleStates,
+  getFixedRemoteMicRoleStates,
+} from "../../../../../lib/remote-mic/fixed-role-state-db";
 
 export const runtime = "nodejs";
 
@@ -24,9 +24,9 @@ export async function GET(request: Request) {
     return NextResponse.json({ active: null });
   }
 
-  const state = setActiveFixedRemoteMicSession(active);
+  const roles = await getFixedRemoteMicRoleStates(active.sessionId);
 
-  return NextResponse.json({ active: serializeState(state) });
+  return NextResponse.json({ active: serializeState(active, roles) });
 }
 
 export async function POST(request: Request) {
@@ -45,29 +45,30 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: result.error }, { status: result.status });
   }
 
-  const state = setActiveFixedRemoteMicSession(result.active);
+  const roles = await getFixedRemoteMicRoleStates(result.active.sessionId);
 
-  return NextResponse.json({ active: serializeState(state) });
+  return NextResponse.json({ active: serializeState(result.active, roles) });
 }
 
 export async function DELETE(request: Request) {
   const params = new URL(request.url).searchParams;
   const sessionId = params.get("sessionId") ?? undefined;
   await clearFixedRemoteMicActiveSession(sessionId);
-  clearActiveFixedRemoteMicSession(sessionId);
+  await clearFixedRemoteMicRoleStates(sessionId);
 
   return NextResponse.json({ ok: true });
 }
 
 function serializeState(
-  state: ReturnType<typeof setActiveFixedRemoteMicSession>,
+  state: NonNullable<Awaited<ReturnType<typeof getFixedRemoteMicActiveSession>>>,
+  roles: Awaited<ReturnType<typeof getFixedRemoteMicRoleStates>>,
 ) {
   return {
     sessionId: state.sessionId,
     participantCode: state.participantCode,
     endedAt: state.endedAt,
     dialogueStartedAt: state.dialogueStartedAt,
-    roles: state.roles,
+    roles,
   };
 }
 

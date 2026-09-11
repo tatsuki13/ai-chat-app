@@ -4,7 +4,6 @@ import { getAiSpeechState } from "../../../../../lib/ai/speech-state";
 import { prisma } from "../../../../../lib/prisma";
 import { getFixedRemoteMicActiveSession } from "../../../../../lib/remote-mic/active-session-db";
 import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
-import { setActiveFixedRemoteMicSession } from "../../../../../lib/remote-mic/fixed-session";
 import { UTTERANCE_ANALYSIS_VERSION } from "../../../../../lib/server/utterance-metadata";
 import {
   createUtteranceTiming,
@@ -67,7 +66,6 @@ export async function POST(request: Request) {
     if (!active || active.sessionId !== input.sessionId || active.endedAt) {
       return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
     }
-    setActiveFixedRemoteMicSession(active);
 
     return await withTranscriptDecisionLock(input.sessionId, async () => {
       const existing = await findExistingRealtimeUtterance(input);

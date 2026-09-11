@@ -2,10 +2,9 @@ import { NextResponse } from "next/server";
 import { prisma } from "../../../../../lib/prisma";
 import { getFixedRemoteMicActiveSession } from "../../../../../lib/remote-mic/active-session-db";
 import {
-  getActiveFixedRemoteMicSession,
-  setActiveFixedRemoteMicSession,
-  updateFixedRemoteMicRole,
-} from "../../../../../lib/remote-mic/fixed-session";
+  parseRemoteMicCaptureState,
+  upsertFixedRemoteMicRoleState,
+} from "../../../../../lib/remote-mic/fixed-role-state-db";
 import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
 
 export const runtime = "nodejs";
@@ -15,10 +14,29 @@ export async function POST(request: Request) {
     role?: unknown;
     sessionId?: unknown;
     muted?: unknown;
+    realtimeConnected?: unknown;
+    captureState?: unknown;
+    reconnectAttempt?: unknown;
+    reconnectReason?: unknown;
   } | null;
   const role = parseRemoteMicRole(requiredString(body?.role));
   const sessionId = requiredString(body?.sessionId);
-  const muted = body?.muted !== false;
+  const muted = typeof body?.muted === "boolean" ? body.muted : undefined;
+  const realtimeConnected =
+    typeof body?.realtimeConnected === "boolean" ? body.realtimeConnected : undefined;
+  const captureState = parseRemoteMicCaptureState(body?.captureState);
+  const reconnectAttempt =
+    typeof body?.reconnectAttempt === "number" && Number.isFinite(body.reconnectAttempt)
+      ? body.reconnectAttempt
+      : body?.reconnectAttempt === null
+        ? null
+        : undefined;
+  const reconnectReason =
+    typeof body?.reconnectReason === "string"
+      ? body.reconnectReason
+      : body?.reconnectReason === null
+        ? null
+      : undefined;
 
   if (!role || !sessionId) {
     return NextResponse.json(
@@ -27,27 +45,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const runtimeActive = getActiveFixedRemoteMicSession();
-  let active:
-    | {
-        sessionId: string;
-        participantCode: string | null;
-        endedAt: string | null;
-        dialogueStartedAt: string | null;
-      }
-    | null = null;
-
-  try {
-    active = await getFixedRemoteMicActiveSession();
-  } catch (error) {
-    console.warn("[remote-mic fixed mute db lookup failed]", {
-      role,
-      sessionId,
-      muted,
-      error,
-    });
-    active = runtimeActive;
-  }
+  const active = await getFixedRemoteMicActiveSession();
 
   if (!active || active.sessionId !== sessionId) {
     return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
@@ -87,21 +85,19 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Session is not active" }, { status: 409 });
   }
 
-  const nextActive = setActiveFixedRemoteMicSession({
+  const roleState = await upsertFixedRemoteMicRoleState({
     sessionId: session.id,
-    participantCode: session.participantCode,
-    endedAt: session.endedAt?.toISOString() ?? null,
-    dialogueStartedAt: session.dialogueStartedAt?.toISOString() ?? null,
-  });
-  updateFixedRemoteMicRole(role, {
+    role,
     muted,
-    transmitting: !muted,
-    connectedAt: Date.now(),
+    realtimeConnected,
+    captureState: captureState ?? undefined,
+    reconnectAttempt,
+    reconnectReason,
   });
 
   return NextResponse.json({
-    dialogueStartedAt: nextActive.dialogueStartedAt,
-    muted,
+    dialogueStartedAt: session.dialogueStartedAt?.toISOString() ?? null,
+    roleState,
   });
 }
 

@@ -6,7 +6,7 @@ import {
 } from "../../../../lib/acp-mvp";
 import { prisma } from "../../../../lib/prisma";
 import { clearFixedRemoteMicActiveSession } from "../../../../lib/remote-mic/active-session-db";
-import { clearActiveFixedRemoteMicSession } from "../../../../lib/remote-mic/fixed-session";
+import { clearFixedRemoteMicRoleStates } from "../../../../lib/remote-mic/fixed-role-state-db";
 
 export const runtime = "nodejs";
 
@@ -345,10 +345,10 @@ export async function DELETE(_request: Request, context: RouteContext) {
     }
 
     await clearFixedRemoteMicActiveSession(id);
+    await clearFixedRemoteMicRoleStates(id);
     await prisma.session.delete({
       where: { id },
     });
-    clearActiveFixedRemoteMicSession(id);
 
     return NextResponse.json({ discarded: true });
   } catch (error) {

@@ -2,10 +2,6 @@ import { NextResponse } from "next/server";
 import { getFixedRemoteMicActiveSession } from "../../../../../lib/remote-mic/active-session-db";
 import { parseRemoteMicRole } from "../../../../../lib/remote-mic/config";
 import {
-  getActiveFixedRemoteMicSession,
-  setActiveFixedRemoteMicSession,
-} from "../../../../../lib/remote-mic/fixed-session";
-import {
   getRealtimeTranscribeModel,
   getRealtimeTranscribePrompt,
   getRealtimeVadSilenceMs,
@@ -29,39 +25,9 @@ export async function POST(request: Request) {
     );
   }
 
-  let active:
-    | {
-        sessionId: string;
-        participantCode: string | null;
-        endedAt: string | null;
-        dialogueStartedAt: string | null;
-      }
-    | null = null;
-
-  try {
-    active = await getFixedRemoteMicActiveSession();
-  } catch (error) {
-    console.warn("[remote-mic realtime active session db lookup failed]", {
-      sessionId,
-      role,
-      error,
-    });
-    active = getActiveFixedRemoteMicSession();
-  }
+  const active = await getFixedRemoteMicActiveSession();
 
   if (!active || active.sessionId !== sessionId || active.endedAt) {
-    return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
-  }
-  if (!active.dialogueStartedAt) {
-    return NextResponse.json(
-      { error: "dialogue has not started" },
-      { status: 409 },
-    );
-  }
-
-  setActiveFixedRemoteMicSession(active);
-  const runtimeActive = getActiveFixedRemoteMicSession();
-  if (!runtimeActive || runtimeActive.sessionId !== sessionId) {
     return NextResponse.json({ error: "active session mismatch" }, { status: 409 });
   }
 

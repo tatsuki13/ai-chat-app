@@ -29,6 +29,7 @@ model Session {
   aiSpeechState           AISpeechState?
   slotProcessingStates    SlotProcessingState[]
   remoteMicActiveSessions RemoteMicActiveSession[]
+  remoteMicRoleStates     RemoteMicRoleState[]
   subSlotStates           SlotSubState[]
   slotStates              SlotState[]
   utterances              SessionUtterance[]
@@ -269,4 +270,28 @@ model RemoteMicActiveSession {
   @@index([sessionId])
   @@index([updatedAt])
   @@map("remote_mic_active_sessions")
+}
+
+model RemoteMicRoleState {
+  id                String    @id @default(cuid())
+  sessionId         String    @map("session_id")
+  role              String
+  connectedAt       DateTime? @map("connected_at")
+  lastSeenAt        DateTime? @map("last_seen_at")
+  realtimeConnected Boolean   @default(false) @map("realtime_connected")
+  captureState      String    @default("idle") @map("capture_state")
+  muted             Boolean   @default(true)
+  reconnectAttempt  Int?      @map("reconnect_attempt")
+  reconnectReason   String?   @map("reconnect_reason")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  session           Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, role])
+  @@index([sessionId])
+  @@index([role])
+  @@index([lastSeenAt])
+  @@index([realtimeConnected])
+  @@index([captureState])
+  @@index([updatedAt])
+  @@map("remote_mic_role_states")
 }

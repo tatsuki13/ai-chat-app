@@ -201,16 +201,16 @@ function parseRemoteMicRealtimeEvent(
   if (type === "mic.reconnected") {
     const role = body.role;
     const streamId = requiredString(body.streamId);
-    const micPhase = body.micPhase;
+    const captureState = body.captureState;
     if (
       !isRemoteMicRole(role) ||
       !streamId ||
-      (micPhase !== "listening" && micPhase !== "suppressed")
+      (captureState !== "listening" && captureState !== "suppressed")
     ) {
       return null;
     }
 
-    return { type, sessionId, role, streamId, micPhase };
+    return { type, sessionId, role, streamId, captureState };
   }
 
   if (type === "mic.reconnect_failed") {

@@ -1,7 +1,7 @@
 export type RemoteMicRole = "elder" | "caregiver";
 export type RemoteMicSpeechContentType = "topic" | "question";
 
-export const REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS = 1_500;
+export const REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS = 3_000;
 export const REMOTE_MIC_CONTROL_ACK_RETRY_COUNT = 1;
 export const REMOTE_MIC_CONTROL_ACK_POLL_MS = 50;
 
@@ -102,7 +102,7 @@ export type RemoteMicConnectionEvent =
       sessionId: string;
       role: RemoteMicRole;
       streamId: string;
-      micPhase: "listening" | "suppressed";
+      captureState: "listening" | "suppressed";
     }
   | {
       type: "mic.reconnect_failed";

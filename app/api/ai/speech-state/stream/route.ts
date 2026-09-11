@@ -3,7 +3,8 @@ import {
   getAiSpeechState,
   subscribeAiSpeechEvents,
 } from "../../../../../lib/ai/speech-state";
-import { getActiveFixedRemoteMicSession } from "../../../../../lib/remote-mic/fixed-session";
+import { getFixedRemoteMicActiveSession } from "../../../../../lib/remote-mic/active-session-db";
+import { getFixedRemoteMicRoleStates } from "../../../../../lib/remote-mic/fixed-role-state-db";
 
 export const runtime = "nodejs";
 
@@ -32,7 +33,11 @@ export async function GET(request: Request) {
           error,
         });
       }
-      const activeMicState = getActiveFixedRemoteMicSession();
+      const activeMicState = await getFixedRemoteMicActiveSession();
+      const roles =
+        activeMicState?.sessionId === sessionId
+          ? await getFixedRemoteMicRoleStates(sessionId)
+          : null;
       send({
         type: "ai_speech_snapshot",
         sessionId,
@@ -53,10 +58,7 @@ export async function GET(request: Request) {
             : state?.releaseAfter && Date.now() <= state.releaseAfter.getTime()
               ? "echo-guard"
               : "idle",
-        roles:
-          activeMicState?.sessionId === sessionId
-            ? activeMicState.roles
-            : null,
+        roles,
         timestamp: new Date().toISOString(),
       });
 
