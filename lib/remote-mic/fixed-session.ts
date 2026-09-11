@@ -34,11 +34,7 @@ export function setActiveFixedRemoteMicSession(input: {
   const store = getRemoteMicRuntimeStore();
   const activeState = store.activeState as FixedRemoteMicState | null;
 
-  if (
-    !activeState ||
-    activeState.sessionId !== input.sessionId ||
-    activeState.participantCode !== input.participantCode
-  ) {
+  if (!activeState || activeState.sessionId !== input.sessionId) {
     const nextState = {
       ...input,
       updatedAt: Date.now(),
