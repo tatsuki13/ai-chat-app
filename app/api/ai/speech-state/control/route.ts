@@ -36,7 +36,6 @@ function parseRemoteMicRealtimeEvent(
     typeof body?.revision === "number" && Number.isFinite(body.revision)
       ? body.revision
       : null;
-  const timestamp = optionalString(body?.timestamp) ?? new Date().toISOString();
 
   if (!sessionId) return null;
 
@@ -78,34 +77,6 @@ function parseRemoteMicRealtimeEvent(
     };
   }
 
-  if (type === "mic.speech_started" || type === "mic.speech_finalized") {
-    const role = body.role;
-    const streamId = requiredString(body.streamId);
-    const transcriptId = requiredString(body.transcriptId);
-    const captureEpoch =
-      typeof body.captureEpoch === "number" && Number.isFinite(body.captureEpoch)
-        ? body.captureEpoch
-        : null;
-    if (
-      !isRemoteMicRole(role) ||
-      !streamId ||
-      !transcriptId ||
-      captureEpoch === null
-    ) {
-      return null;
-    }
-
-    return {
-      type,
-      sessionId,
-      role,
-      streamId,
-      transcriptId,
-      captureEpoch,
-      timestamp,
-    };
-  }
-
   if (type === "transcript.discarded") {
     const role = body.role;
     const streamId = requiredString(body.streamId);
@@ -122,57 +93,6 @@ function parseRemoteMicRealtimeEvent(
       streamId,
       transcriptId,
       reason,
-    };
-  }
-
-  if (type === "mic.capture_state") {
-    const role = body.role;
-    const playbackId = requiredString(body.playbackId);
-    const captureState = body.captureState;
-    if (
-      !isRemoteMicRole(role) ||
-      !playbackId ||
-      revision === null ||
-      (captureState !== "suppressed" && captureState !== "resumed")
-    ) {
-      return null;
-    }
-
-    return {
-      type,
-      sessionId,
-      role,
-      playbackId,
-      revision,
-      captureState,
-      timestamp,
-    };
-  }
-
-  if (type === "mic.capture_error") {
-    const role = body.role;
-    const playbackId = requiredString(body.playbackId);
-    const captureState = body.captureState;
-    const reason = requiredString(body.reason);
-    if (
-      !isRemoteMicRole(role) ||
-      !playbackId ||
-      revision === null ||
-      (captureState !== "suppressed" && captureState !== "resumed") ||
-      !reason
-    ) {
-      return null;
-    }
-
-    return {
-      type,
-      sessionId,
-      role,
-      playbackId,
-      revision,
-      captureState,
-      reason,
-      timestamp,
     };
   }
 

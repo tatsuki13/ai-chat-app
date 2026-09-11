@@ -1,10 +1,6 @@
 export type RemoteMicRole = "elder" | "caregiver";
 export type RemoteMicSpeechContentType = "topic" | "question";
 
-export const REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS = 3_000;
-export const REMOTE_MIC_CONTROL_ACK_RETRY_COUNT = 1;
-export const REMOTE_MIC_CONTROL_ACK_POLL_MS = 50;
-
 export type LiveTranscriptEvent = {
   type: "transcript.partial" | "transcript.final";
   sessionId: string;
@@ -20,26 +16,6 @@ export type LiveTranscriptEvent = {
   eventId?: string;
   model?: string;
 };
-
-export type RemoteMicSpeechEvent =
-  | {
-      type: "mic.speech_started";
-      sessionId: string;
-      role: RemoteMicRole;
-      streamId: string;
-      transcriptId: string;
-      captureEpoch: number;
-      timestamp: string;
-    }
-  | {
-      type: "mic.speech_finalized";
-      sessionId: string;
-      role: RemoteMicRole;
-      streamId: string;
-      transcriptId: string;
-      captureEpoch: number;
-      timestamp: string;
-    };
 
 export type TranscriptDiscardedEvent = {
   type: "transcript.discarded";
@@ -64,27 +40,6 @@ export type AiSpeechStateEvent = {
   releaseAfter?: string | null;
   speechPhase?: "idle" | "playing" | "echo-guard";
   sessionEnded?: boolean;
-  timestamp: string;
-};
-
-export type RemoteMicCaptureStateAckEvent = {
-  type: "mic.capture_state";
-  sessionId: string;
-  role: RemoteMicRole;
-  playbackId: string;
-  revision: number;
-  captureState: "suppressed" | "resumed";
-  timestamp: string;
-};
-
-export type RemoteMicCaptureStateErrorEvent = {
-  type: "mic.capture_error";
-  sessionId: string;
-  role: RemoteMicRole;
-  playbackId: string;
-  revision: number;
-  captureState: "suppressed" | "resumed";
-  reason: string;
   timestamp: string;
 };
 
@@ -114,11 +69,8 @@ export type RemoteMicConnectionEvent =
 
 export type RemoteMicRealtimeEvent =
   | LiveTranscriptEvent
-  | RemoteMicSpeechEvent
   | TranscriptDiscardedEvent
   | AiSpeechStateEvent
-  | RemoteMicCaptureStateAckEvent
-  | RemoteMicCaptureStateErrorEvent
   | RemoteMicConnectionEvent;
 
 export function createLiveTranscriptKey(event: {

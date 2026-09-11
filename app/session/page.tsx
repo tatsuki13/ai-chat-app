@@ -25,9 +25,6 @@ import {
 } from "./audio-input-service";
 import {
   createLiveTranscriptKey,
-  REMOTE_MIC_CONTROL_ACK_POLL_MS,
-  REMOTE_MIC_CONTROL_ACK_RETRY_COUNT,
-  REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS,
   type LiveTranscriptEvent,
   type RemoteMicRealtimeEvent,
 } from "../../lib/remote-mic/control-events";
@@ -63,19 +60,21 @@ type ActivePlaybackControl = {
   contentType: "topic" | "question";
   phase: SpeechPhase;
   revision: number | null;
-  suppressedRoles: Set<SpeakerRole>;
-  resumedRoles: Set<SpeakerRole>;
-  captureFailures: Partial<
-    Record<
-      SpeakerRole,
-      {
-        captureState: "suppressed" | "resumed";
-        reason: string;
-        timestamp: string;
-      }
-    >
-  >;
 };
+type RemoteMicControlIssueReason =
+  | "heartbeat_stale"
+  | "realtime_disconnected"
+  | "capture_suppress_failed"
+  | "capture_resume_failed"
+  | "capture_suppress_pending"
+  | "capture_resume_pending"
+  | "state_update_failed"
+  | "session_mismatch";
+type RemoteMicControlNotice = {
+  title: string;
+  roles: SpeakerRole[];
+  reason: RemoteMicControlIssueReason;
+} | null;
 type LiveTranscript = {
   key: string;
   sessionId: string;
@@ -381,6 +380,8 @@ const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const PROMPT_ERROR_RESTORE_DELAY_MS = 3000;
 const AI_SPEECH_RELEASE_DELAY_MS = 500;
 const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45_000;
+const REMOTE_MIC_CONTROL_STATE_TIMEOUT_MS = 8_000;
+const REMOTE_MIC_CONTROL_STATE_POLL_MS = 250;
 const BROWSER_SPEECH_ENABLED =
   process.env.NEXT_PUBLIC_BROWSER_SPEECH_ENABLED !== "false";
 const REMOTE_MIC_SESSION_SYNC_MS = 3_000;
@@ -479,9 +480,8 @@ function SessionPageClient() {
   const [activePlaybackControl, setActivePlaybackControl] =
     useState<ActivePlaybackControl | null>(null);
   const [liveTranscripts, setLiveTranscripts] = useState<Record<string, LiveTranscript>>({});
-  const [humanSpeechActive, setHumanSpeechActive] = useState<
-    Record<SpeakerRole, string | null>
-  >({ elder: null, caregiver: null });
+  const [remoteMicControlNotice, setRemoteMicControlNotice] =
+    useState<RemoteMicControlNotice>(null);
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const idInputRef = useRef<HTMLInputElement | null>(null);
@@ -493,10 +493,6 @@ function SessionPageClient() {
   const sessionRef = useRef<SessionInfo | null>(null);
   const utterancesRef = useRef<Utterance[]>([]);
   const liveTranscriptsRef = useRef<Record<string, LiveTranscript>>({});
-  const humanSpeechActiveRef = useRef<Record<SpeakerRole, string | null>>({
-    elder: null,
-    caregiver: null,
-  });
   const remoteMicStatusesRef = useRef<Record<SpeakerRole, RemoteMicRoleStatus>>({
     elder: { status: "disconnected", ready: false, readyReason: "heartbeat_stale" },
     caregiver: { status: "disconnected", ready: false, readyReason: "heartbeat_stale" },
@@ -710,10 +706,6 @@ function SessionPageClient() {
   useEffect(() => {
     liveTranscriptsRef.current = liveTranscripts;
   }, [liveTranscripts]);
-
-  useEffect(() => {
-    humanSpeechActiveRef.current = humanSpeechActive;
-  }, [humanSpeechActive]);
 
   useEffect(() => {
     remoteMicStatusesRef.current = remoteMicStatuses;
@@ -1508,26 +1500,8 @@ function SessionPageClient() {
       return;
     }
 
-    if (
-      event.type === "mic.speech_started" ||
-      event.type === "mic.speech_finalized"
-    ) {
-      applyRemoteMicSpeechEvent(event);
-      return;
-    }
-
     if (event.type === "transcript.discarded") {
       discardLiveTranscriptEvent(event);
-      return;
-    }
-
-    if (event.type === "mic.capture_state") {
-      applyRemoteMicCaptureStateAck(event);
-      return;
-    }
-
-    if (event.type === "mic.capture_error") {
-      applyRemoteMicCaptureStateError(event);
       return;
     }
 
@@ -1574,25 +1548,6 @@ function SessionPageClient() {
     });
   }
 
-  function applyRemoteMicSpeechEvent(
-    event: Extract<
-      RemoteMicRealtimeEvent,
-      { type: "mic.speech_started" | "mic.speech_finalized" }
-    >,
-  ) {
-    if (event.sessionId !== sessionRef.current?.id) return;
-    const key = createLiveTranscriptKey(event);
-
-    setHumanSpeechActive((current) => {
-      if (event.type === "mic.speech_started") {
-        return { ...current, [event.role]: key };
-      }
-      if (current[event.role] !== key) return current;
-
-      return { ...current, [event.role]: null };
-    });
-  }
-
   function discardLiveTranscriptEvent(
     event: Extract<RemoteMicRealtimeEvent, { type: "transcript.discarded" }>,
   ) {
@@ -1604,70 +1559,6 @@ function SessionPageClient() {
       const next = { ...current };
       delete next[key];
       return next;
-    });
-    setHumanSpeechActive((current) =>
-      current[event.role] === key ? { ...current, [event.role]: null } : current,
-    );
-  }
-
-  function applyRemoteMicCaptureStateAck(
-    event: Extract<RemoteMicRealtimeEvent, { type: "mic.capture_state" }>,
-  ) {
-    if (event.sessionId !== sessionRef.current?.id) return;
-
-    updatePlaybackControlValue((current) => {
-      if (
-        !current ||
-        current.playbackId !== event.playbackId ||
-        current.revision !== event.revision
-      ) {
-        return current;
-      }
-
-      const suppressedRoles = new Set(current.suppressedRoles);
-      const resumedRoles = new Set(current.resumedRoles);
-      const captureFailures = { ...current.captureFailures };
-      if (event.captureState === "suppressed") {
-        suppressedRoles.add(event.role);
-      } else {
-        resumedRoles.add(event.role);
-      }
-      delete captureFailures[event.role];
-
-      return {
-        ...current,
-        suppressedRoles,
-        resumedRoles,
-        captureFailures,
-      };
-    });
-  }
-
-  function applyRemoteMicCaptureStateError(
-    event: Extract<RemoteMicRealtimeEvent, { type: "mic.capture_error" }>,
-  ) {
-    if (event.sessionId !== sessionRef.current?.id) return;
-
-    updatePlaybackControlValue((current) => {
-      if (
-        !current ||
-        current.playbackId !== event.playbackId ||
-        current.revision !== event.revision
-      ) {
-        return current;
-      }
-
-      return {
-        ...current,
-        captureFailures: {
-          ...current.captureFailures,
-          [event.role]: {
-            captureState: event.captureState,
-            reason: event.reason,
-            timestamp: event.timestamp,
-          },
-        },
-      };
     });
   }
 
@@ -1722,116 +1613,48 @@ function SessionPageClient() {
         : current,
     );
   }
-  async function waitForHumanSpeechToSettle() {
-    const deadline = Date.now() + REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS;
-
-    while (Date.now() <= deadline) {
-      const activeRoles = getActiveHumanSpeechRoles();
-      if (activeRoles.length === 0) return true;
-
-      await sleep(REMOTE_MIC_CONTROL_ACK_POLL_MS);
-    }
-
-    return false;
-  }
-
-  function getActiveHumanSpeechRoles(): SpeakerRole[] {
-    return (["elder", "caregiver"] as const).filter(
-      (role) => humanSpeechActiveRef.current[role] !== null,
-    );
-  }
-
   function getConnectedRemoteMicRoles(): SpeakerRole[] {
     return (["elder", "caregiver"] as const).filter(
       (role) => remoteMicStatusesRef.current[role]?.status === "connected",
     );
   }
 
-  async function waitForRemoteMicCaptureAcks(input: {
-    playbackId: string;
-    revision: number;
-    captureState: "suppressed" | "resumed";
+  async function waitForRemoteMicCaptureState(input: {
+    sessionId: string;
+    captureState: "suppressed" | "listening";
     targetRoles: SpeakerRole[];
-  }) {
-    if (input.targetRoles.length === 0) return true;
+  }): Promise<{ ok: true } | { ok: false; roles: SpeakerRole[]; reason: RemoteMicControlIssueReason }> {
+    if (input.targetRoles.length === 0) return { ok: true };
 
-    const getAckedRoles = () => {
-      const current = activePlaybackControlRef.current;
-      if (
-        !current ||
-        current.playbackId !== input.playbackId ||
-        current.revision !== input.revision
-      ) {
-        return new Set<SpeakerRole>();
+    const deadline = Date.now() + REMOTE_MIC_CONTROL_STATE_TIMEOUT_MS;
+    let latestStatuses = remoteMicStatusesRef.current;
+
+    while (Date.now() <= deadline) {
+      try {
+        const status = await fetchFixedRemoteMicStatus(input.sessionId);
+        latestStatuses = status.roles;
+        setRemoteMicStatuses(status.roles);
+      } catch (error) {
+        console.warn("[remote-mic shared state refresh failed]", {
+          sessionId: input.sessionId,
+          captureState: input.captureState,
+          error,
+        });
+        return {
+          ok: false,
+          roles: input.targetRoles,
+          reason: "state_update_failed",
+        };
       }
 
-      return input.captureState === "suppressed"
-        ? current.suppressedRoles
-        : current.resumedRoles;
-    };
-    const getFailedRoles = () => {
-      const current = activePlaybackControlRef.current;
-      if (
-        !current ||
-        current.playbackId !== input.playbackId ||
-        current.revision !== input.revision
-      ) {
-        return [];
-      }
+      const issue = getRemoteMicControlIssue(latestStatuses, input);
+      if (!issue) return { ok: true };
+      if (isTerminalRemoteMicControlIssue(issue.reason)) return issue;
 
-      return input.targetRoles.filter((role) => {
-        const failure = current.captureFailures[role];
-        return failure?.captureState === input.captureState;
-      });
-    };
-
-    for (let attempt = 0; attempt <= REMOTE_MIC_CONTROL_ACK_RETRY_COUNT; attempt += 1) {
-      const deadline = Date.now() + REMOTE_MIC_CONTROL_ACK_TIMEOUT_MS;
-      while (Date.now() <= deadline) {
-        const ackedRoles = getAckedRoles();
-        if (input.targetRoles.every((role) => ackedRoles.has(role))) {
-          return true;
-        }
-        const failedRoles = getFailedRoles();
-        if (failedRoles.length > 0) {
-          const disconnectedRoles = input.targetRoles.filter(
-            (role) => remoteMicStatusesRef.current[role]?.status !== "connected",
-          );
-          console.warn("[remote-mic capture state ack failed]", {
-            sessionId: sessionRef.current?.id ?? null,
-            playbackId: input.playbackId,
-            revision: input.revision,
-            captureState: input.captureState,
-            ackedRoles: Array.from(ackedRoles),
-            failedRoles,
-            disconnectedRoles,
-          });
-          return false;
-        }
-
-        await sleep(REMOTE_MIC_CONTROL_ACK_POLL_MS);
-      }
-
-      const ackedRoles = getAckedRoles();
-      const missingRoles = input.targetRoles.filter((role) => !ackedRoles.has(role));
-      const disconnectedRoles = input.targetRoles.filter(
-        (role) => remoteMicStatusesRef.current[role]?.status !== "connected",
-      );
-      const failedRoles = getFailedRoles();
-      console.warn("[remote-mic capture state ack timeout]", {
-        sessionId: sessionRef.current?.id ?? null,
-        playbackId: input.playbackId,
-        revision: input.revision,
-        captureState: input.captureState,
-        attempt,
-        ackedRoles: Array.from(ackedRoles),
-        missingRoles,
-        disconnectedRoles,
-        failedRoles,
-      });
+      await sleep(REMOTE_MIC_CONTROL_STATE_POLL_MS);
     }
 
-    return false;
+    return getRemoteMicControlIssue(latestStatuses, input) ?? { ok: true };
   }
 
   async function refreshPersistedConversation(sessionId: string) {
@@ -1852,16 +1675,14 @@ function SessionPageClient() {
   }
   function showRemoteMicControlError(
     title: string,
-    missingRoles: SpeakerRole[],
+    roles: SpeakerRole[],
+    reason: RemoteMicControlIssueReason,
   ) {
-    const roleLabels = missingRoles.map((role) => speakerLabel(role)).join("、");
     setStatusText("マイク制御エラー");
-    showTemporaryErrorPrompt({
+    setRemoteMicControlNotice({
       title,
-      body: roleLabels
-        ? `未応答: ${roleLabels}。スマートフォン側のマイク画面と接続状態を確認してください。`
-        : "スマートフォン側のマイク状態を確認してください。",
-      tone: "error",
+      roles,
+      reason,
     });
   }
 
@@ -1903,24 +1724,10 @@ function SessionPageClient() {
       contentType: input.contentType,
       phase: "preparing-mute",
       revision: null,
-      suppressedRoles: new Set(),
-      resumedRoles: new Set(),
-      captureFailures: {},
     });
 
     try {
-      const humanSpeechSettled = await waitForHumanSpeechToSettle();
-      if (!humanSpeechSettled) {
-        const activeRoles = getActiveHumanSpeechRoles();
-        playbackErrorCode = `remote_mic_human_speech_active:${activeRoles.join(",")}`;
-        showRemoteMicControlError(
-          "発話中のためAI読み上げを開始できません",
-          activeRoles,
-        );
-        setPlaybackPhase(playbackId, "error");
-        return;
-      }
-
+      setRemoteMicControlNotice(null);
       const startResponse = await updateAiSpeechState({
         sessionId: currentSession.id,
         action: "start",
@@ -1934,18 +1741,18 @@ function SessionPageClient() {
       }
       setPlaybackPhase(playbackId, "preparing-mute", prepareRevision);
       ackTargetRoles = getConnectedRemoteMicRoles();
-      const suppressed = await waitForRemoteMicCaptureAcks({
-        playbackId,
-        revision: prepareRevision,
+      const suppressed = await waitForRemoteMicCaptureState({
+        sessionId: currentSession.id,
         captureState: "suppressed",
         targetRoles: ackTargetRoles,
       });
-      if (!suppressed) {
+      if (suppressed.ok === false) {
         playbackStatus = "not_started";
-        playbackErrorCode = "remote_mic_suppressed_ack_timeout";
+        playbackErrorCode = suppressed.reason;
         showRemoteMicControlError(
           "スマートフォンマイクの一時停止を確認できませんでした",
-          ackTargetRoles,
+          suppressed.roles,
+          suppressed.reason,
         );
         setPlaybackPhase(playbackId, "error");
         return;
@@ -2001,6 +1808,7 @@ function SessionPageClient() {
           showRemoteMicControlError(
             "スマートフォンマイクの復帰指示に失敗しました",
             ["elder", "caregiver"],
+            "state_update_failed",
           );
           await logAiSpeechPlayback({
             sessionId: currentSession.id,
@@ -2020,20 +1828,21 @@ function SessionPageClient() {
           aiSpeechPlaybackRef.current = null;
           return;
         }
-        const resumed = await waitForRemoteMicCaptureAcks({
-          playbackId,
-          revision: releaseRevision,
-          captureState: "resumed",
+        const resumed = await waitForRemoteMicCaptureState({
+          sessionId: currentSession.id,
+          captureState: "listening",
           targetRoles: ackTargetRoles,
         });
-        if (!resumed) {
-          playbackErrorCode = playbackErrorCode ?? "remote_mic_resumed_ack_timeout";
+        if (resumed.ok === false) {
+          playbackErrorCode = playbackErrorCode ?? resumed.reason;
           showRemoteMicControlError(
             "スマートフォンマイクの復帰を確認できませんでした",
-            ackTargetRoles,
+            resumed.roles,
+            resumed.reason,
           );
         } else {
           micsResumedAt = new Date().toISOString();
+          setRemoteMicControlNotice(null);
         }
 
         await logAiSpeechPlayback({
@@ -2648,9 +2457,15 @@ function SessionPageClient() {
             micStatus.roles[role].ready !== true,
         );
         setStatusText("マイク未接続");
+        const controlRoles: SpeakerRole[] =
+          missingRoles.length > 0 ? missingRoles : ["elder", "caregiver"];
         showRemoteMicControlError(
           "両方のスマートフォンマイク接続を確認してください",
-          missingRoles.length > 0 ? missingRoles : ["elder", "caregiver"],
+          controlRoles,
+          getRemoteMicControlIssue(micStatus.roles, {
+            captureState: "listening",
+            targetRoles: controlRoles,
+          })?.reason ?? "heartbeat_stale",
         );
         return;
       }
@@ -3371,6 +3186,7 @@ async function completeSession() {
             <RemoteMicrophonePanel
               sessionId={session?.id ?? ""}
               statuses={remoteMicStatuses}
+              notice={remoteMicControlNotice}
               connecting={remoteMicConnecting}
               onConnect={handleConnectRemoteMics}
             />
@@ -3580,6 +3396,7 @@ function DialogueSetupGuide(props: {
 function RemoteMicrophonePanel(props: {
   sessionId: string;
   statuses: Record<SpeakerRole, RemoteMicRoleStatus>;
+  notice: RemoteMicControlNotice;
   connecting: boolean;
   onConnect: () => void;
 }) {
@@ -3605,6 +3422,17 @@ function RemoteMicrophonePanel(props: {
           {props.connecting ? "確認中" : "接続確認"}
         </button>
       </div>
+
+      {props.notice ? (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+          <div className="text-[11px] font-black text-amber-900">
+            {props.notice.title}
+          </div>
+          <div className="mt-1 text-[11px] font-bold leading-relaxed text-amber-900">
+            {formatRemoteMicControlNotice(props.notice)}
+          </div>
+        </div>
+      ) : null}
 
       <div className="mt-3 space-y-3">
         <RemoteMicrophoneStatus
@@ -3781,6 +3609,85 @@ function toFixedRemoteMicStatus(
     reconnectAttempt: roleState.reconnectAttempt ?? undefined,
     reconnectReason: roleState.reconnectReason,
   };
+}
+
+function getRemoteMicControlIssue(
+  statuses: Record<SpeakerRole, RemoteMicRoleStatus>,
+  input: {
+    captureState: "suppressed" | "listening";
+    targetRoles: SpeakerRole[];
+  },
+): { ok: false; roles: SpeakerRole[]; reason: RemoteMicControlIssueReason } | null {
+  for (const role of input.targetRoles) {
+    const status = statuses[role];
+    if (status.status !== "connected") {
+      return { ok: false, roles: [role], reason: "heartbeat_stale" };
+    }
+    if (status.realtimeConnected !== true) {
+      return { ok: false, roles: [role], reason: "realtime_disconnected" };
+    }
+    if (status.captureState === "error") {
+      return {
+        ok: false,
+        roles: [role],
+        reason:
+          input.captureState === "suppressed"
+            ? "capture_suppress_failed"
+            : "capture_resume_failed",
+      };
+    }
+    if (status.captureState !== input.captureState) {
+      return {
+        ok: false,
+        roles: [role],
+        reason:
+          input.captureState === "suppressed"
+            ? "capture_suppress_pending"
+            : "capture_resume_pending",
+      };
+    }
+  }
+
+  return null;
+}
+
+function isTerminalRemoteMicControlIssue(reason: RemoteMicControlIssueReason) {
+  return (
+    reason === "heartbeat_stale" ||
+    reason === "realtime_disconnected" ||
+    reason === "capture_suppress_failed" ||
+    reason === "capture_resume_failed" ||
+    reason === "state_update_failed" ||
+    reason === "session_mismatch"
+  );
+}
+
+function formatRemoteMicControlNotice(notice: NonNullable<RemoteMicControlNotice>) {
+  const roleLabels = notice.roles.map((role) => speakerLabel(role)).join("、");
+  return `${roleLabels || "スマートフォンマイク"}: ${remoteMicControlReasonLabel(
+    notice.reason,
+  )}`;
+}
+
+function remoteMicControlReasonLabel(reason: RemoteMicControlIssueReason) {
+  switch (reason) {
+    case "heartbeat_stale":
+      return "スマホ側の接続確認が途切れています。";
+    case "realtime_disconnected":
+      return "OpenAI Realtimeへの接続が切れています。";
+    case "capture_suppress_failed":
+      return "AI音声前のマイク一時停止に失敗しました。";
+    case "capture_resume_failed":
+      return "AI音声後のマイク復帰に失敗しました。";
+    case "state_update_failed":
+      return "共有マイク状態を確認できませんでした。";
+    case "session_mismatch":
+      return "スマホ側が別のセッションを参照しています。";
+    case "capture_suppress_pending":
+      return "AI音声前のマイク一時停止を確認中です。";
+    case "capture_resume_pending":
+      return "AI音声後のマイク復帰を確認中です。";
+  }
 }
 
 function LevelBar(props: { value: number; tone: "emerald" | "sky" }) {

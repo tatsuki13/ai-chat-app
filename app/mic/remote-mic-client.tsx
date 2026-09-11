@@ -424,12 +424,17 @@ export default function RemoteMicClient(props: {
         playbackId: event.playbackId,
         revision: event.revision,
       });
-      await publishMicCaptureStateError({
-        playbackId: event.playbackId,
-        revision: event.revision,
-        captureState: "suppressed",
-        reason: "gain_unavailable",
-      }).catch(() => undefined);
+      const current = remoteMicRef.current;
+      if (current) {
+        await updateFixedMicState(
+          {
+            muted: true,
+            realtimeConnected: true,
+            captureState: "error",
+          },
+          current,
+        ).catch(() => undefined);
+      }
       return;
     }
     setAiSpeechLabel("AI読み上げ中・認識一時停止");
@@ -437,15 +442,9 @@ export default function RemoteMicClient(props: {
       setMicPhaseValue("suppressed");
       setServerLabel("AI音声中のため一時ミュート");
     }
-    await publishMicCaptureStateAck({
-      playbackId: event.playbackId,
-      revision: event.revision,
-      captureState: "suppressed",
-    });
-
     const current = remoteMicRef.current;
     if (current) {
-      void updateFixedMicState(
+      await updateFixedMicState(
         {
           muted: true,
           realtimeConnected: true,
@@ -529,12 +528,17 @@ export default function RemoteMicClient(props: {
           playbackId,
           revision: event.revision,
         });
-        await publishMicCaptureStateError({
-          playbackId,
-          revision: event.revision,
-          captureState: "resumed",
-          reason: "gain_unavailable",
-        }).catch(() => undefined);
+        const current = remoteMicRef.current;
+        if (current) {
+          await updateFixedMicState(
+            {
+              muted: true,
+              realtimeConnected: true,
+              captureState: "error",
+            },
+            current,
+          ).catch(() => undefined);
+        }
         return;
       }
       captureBlockedRef.current = false;
@@ -544,15 +548,9 @@ export default function RemoteMicClient(props: {
         setMicPhaseValue("listening");
         setServerLabel("文字起こし中");
       }
-      await publishMicCaptureStateAck({
-        playbackId,
-        revision: event.revision,
-        captureState: "resumed",
-      });
-
       const current = remoteMicRef.current;
       if (current) {
-        void updateFixedMicState(
+        await updateFixedMicState(
           {
             muted: false,
             realtimeConnected: true,
@@ -1207,15 +1205,6 @@ export default function RemoteMicClient(props: {
         transcriptId,
         speechStartedAt,
       );
-      void publishRemoteMicRealtimeEvent({
-        type: "mic.speech_started",
-        sessionId: session.sessionId,
-        role: session.role,
-        streamId,
-        transcriptId,
-        captureEpoch: connectionCaptureEpoch,
-        timestamp: new Date().toISOString(),
-      }).catch(() => undefined);
       return;
     }
 
@@ -1608,46 +1597,6 @@ export default function RemoteMicClient(props: {
     );
   }
 
-  async function publishMicCaptureStateAck(input: {
-    playbackId: string;
-    revision: number;
-    captureState: "suppressed" | "resumed";
-  }) {
-    const current = remoteMicRef.current;
-    if (!current) return;
-
-    await publishRemoteMicRealtimeEvent({
-      type: "mic.capture_state",
-      sessionId: current.sessionId,
-      role: current.role,
-      playbackId: input.playbackId,
-      revision: input.revision,
-      captureState: input.captureState,
-      timestamp: new Date().toISOString(),
-    });
-  }
-
-  async function publishMicCaptureStateError(input: {
-    playbackId: string;
-    revision: number;
-    captureState: "suppressed" | "resumed";
-    reason: string;
-  }) {
-    const current = remoteMicRef.current;
-    if (!current) return;
-
-    await publishRemoteMicRealtimeEvent({
-      type: "mic.capture_error",
-      sessionId: current.sessionId,
-      role: current.role,
-      playbackId: input.playbackId,
-      revision: input.revision,
-      captureState: input.captureState,
-      reason: input.reason,
-      timestamp: new Date().toISOString(),
-    });
-  }
-
   async function publishRemoteMicRealtimeEvent(event: RemoteMicRealtimeEvent) {
     await fetch("/api/ai/speech-state/control", {
       method: "POST",
@@ -1890,15 +1839,6 @@ export default function RemoteMicClient(props: {
       finalizedAt: pending.finalizedAt ?? input.finalizedAt ?? new Date().toISOString(),
       eventId: input.eventId,
     });
-    void publishRemoteMicRealtimeEvent({
-      type: "mic.speech_finalized",
-      sessionId: current.sessionId,
-      role: current.role,
-      streamId: pending.streamId,
-      transcriptId: pending.transcriptId,
-      captureEpoch: pending.captureEpoch,
-      timestamp: pending.finalizedAt ?? input.finalizedAt ?? new Date().toISOString(),
-    }).catch(() => undefined);
     pendingFinalByTranscriptRef.current.delete(finalQueueKey);
   }
 
