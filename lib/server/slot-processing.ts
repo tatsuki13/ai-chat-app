@@ -101,6 +101,7 @@ export async function updateSlotsForTopic(input: {
 
     return {
       outcome: topicUtterances.length === 0 ? "no_utterances" : "already_current",
+      participantCode: context.session.participantCode,
       slotStates: context.slotStates,
       subSlotStates: context.subSlotStates,
       slotControl,
@@ -259,6 +260,7 @@ export async function updateSlotsForTopic(input: {
 
     return {
       outcome: "updated" as SlotUpdateOutcome,
+      participantCode: context.session.participantCode,
       slotStates: bundle.slotStates,
       subSlotStates: bundle.subSlotStates,
       slotControl,
@@ -273,40 +275,14 @@ export async function updateSlotsForTopic(input: {
         .filter(Boolean) as string[],
     };
   } catch (error) {
-    await Promise.all([
-      prisma.slotProcessingState.update({
-        where: {
-          sessionId_topicId: {
-            sessionId: input.sessionId,
-            topicId: topic.id,
-          },
-        },
-        data: {
-          processingStatus: "failed",
-          processingFinishedAt: new Date(),
-          lastError: error instanceof Error ? error.message : String(error),
-          retryCount: { increment: 1 },
-        },
-      }),
-      prisma.aIProcessingState.upsert({
-        where: { sessionId: input.sessionId },
-        create: {
-          sessionId: input.sessionId,
-          participantCode: context.session.participantCode,
-          processingStatus: "failed",
-          processingStartedAt: requestedAt,
-          processingFinishedAt: new Date(),
-          lastError: error instanceof Error ? error.message : String(error),
-          retryCount: 1,
-        },
-        update: {
-          processingStatus: "failed",
-          processingFinishedAt: new Date(),
-          lastError: error instanceof Error ? error.message : String(error),
-          retryCount: { increment: 1 },
-        },
-      }),
-    ]);
+    await recordSlotProcessingFailure({
+      sessionId: input.sessionId,
+      participantCode: context.session.participantCode,
+      topicId: topic.id,
+      requestedAt,
+      error,
+      stage: "update_slots",
+    });
 
     throw error;
   }
@@ -371,29 +347,57 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
         rangeEndUtteranceId: rangeEndUtterance.id,
       });
       const refreshedContext = await getSessionContext(input.sessionId);
-      const slotControl = buildSlotControlDebugState({
-        slots: refreshedContext.slotStates,
+      if (!completedState) {
+        const slotControl = buildSlotControlDebugState({
+          slots: refreshedContext.slotStates,
+          currentTopic: topic.slot_name,
+          subSlotStates: refreshedContext.subSlotStates,
+        });
+
+        return {
+          outcome: "in_progress" as SlotUpdateOutcome,
+          participantCode: refreshedContext.session.participantCode,
+          slotStates: refreshedContext.slotStates,
+          subSlotStates: refreshedContext.subSlotStates,
+          slotControl,
+          slotClassificationDebug: null,
+          processingState: toProcessingStateResponse(existingState),
+          topicProcessingState: toProcessingStateResponse(existingState),
+          processedThroughUtteranceId: existingState.lastProcessedUtteranceId,
+          processedUtteranceIds: [] as string[],
+          nextQuestion: null,
+          nextActionDebug: null,
+        };
+      }
+
+      const bundle = await updateSlotsAndGenerateNextQuestionAction({
+        ...refreshedContext,
         currentTopic: topic.slot_name,
-        subSlotStates: refreshedContext.subSlotStates,
+        currentTopicTitle: input.currentTopicTitle ?? topic.title,
+        utterancesToClassify: [],
+        aiQuestionHistory: input.aiQuestionHistory,
+        currentTopicQuestionCount: input.currentTopicQuestionCount,
+      });
+      const slotControl = buildSlotControlDebugState({
+        slots: bundle.slotStates,
+        currentTopic: topic.slot_name,
+        subSlotStates: bundle.subSlotStates,
+        classificationDebug: bundle.debug.summary,
       });
 
       return {
-        outcome: completedState ? "already_current" : "in_progress",
-        slotStates: refreshedContext.slotStates,
-        subSlotStates: refreshedContext.subSlotStates,
+        outcome: "already_current" as SlotUpdateOutcome,
+        participantCode: refreshedContext.session.participantCode,
+        slotStates: bundle.slotStates,
+        subSlotStates: bundle.subSlotStates,
         slotControl,
-        slotClassificationDebug: null,
-        processingState: completedState
-          ? toProcessingStateResponse(completedState)
-          : toProcessingStateResponse(existingState),
-        topicProcessingState: completedState
-          ? toProcessingStateResponse(completedState)
-          : toProcessingStateResponse(existingState),
-        processedThroughUtteranceId:
-          completedState?.lastProcessedUtteranceId ?? existingState.lastProcessedUtteranceId,
+        slotClassificationDebug: bundle.debug,
+        processingState: toProcessingStateResponse(completedState),
+        topicProcessingState: toProcessingStateResponse(completedState),
+        processedThroughUtteranceId: completedState.lastProcessedUtteranceId,
         processedUtteranceIds: [] as string[],
-        nextQuestion: null,
-        nextActionDebug: null,
+        nextQuestion: bundle.nextQuestion,
+        nextActionDebug: bundle.nextActionDebug,
       };
     }
   }
@@ -523,6 +527,7 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
       outcome: processedThroughUtteranceId
         ? "updated"
         : ("already_current" as SlotUpdateOutcome),
+      participantCode: context.session.participantCode,
       slotStates: bundle.slotStates,
       subSlotStates: bundle.subSlotStates,
       slotControl,
@@ -539,39 +544,13 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
       nextActionDebug: bundle.nextActionDebug,
     };
   } catch (error) {
-    if (rangeEndUtterance?.id) {
-      await prisma.slotProcessingState.update({
-        where: {
-          sessionId_topicId: {
-            sessionId: input.sessionId,
-            topicId: topic.id,
-          },
-        },
-        data: {
-          processingStatus: "failed",
-          processingFinishedAt: new Date(),
-          lastError: error instanceof Error ? error.message : String(error),
-          retryCount: { increment: 1 },
-        },
-      });
-    }
-    await prisma.aIProcessingState.upsert({
-      where: { sessionId: input.sessionId },
-      create: {
-        sessionId: input.sessionId,
-        participantCode: context.session.participantCode,
-        processingStatus: "failed",
-        processingStartedAt: requestedAt,
-        processingFinishedAt: new Date(),
-        lastError: error instanceof Error ? error.message : String(error),
-        retryCount: 1,
-      },
-      update: {
-        processingStatus: "failed",
-        processingFinishedAt: new Date(),
-        lastError: error instanceof Error ? error.message : String(error),
-        retryCount: { increment: 1 },
-      },
+    await recordSlotProcessingFailure({
+      sessionId: input.sessionId,
+      participantCode: context.session.participantCode,
+      topicId: topic.id,
+      requestedAt,
+      error,
+      stage: "generate_question",
     });
 
     throw error;
@@ -650,6 +629,65 @@ async function waitForSlotProcessingRange(input: {
   return null;
 }
 
+async function recordSlotProcessingFailure(input: {
+  sessionId: string;
+  participantCode: string | null;
+  topicId: string;
+  requestedAt: Date;
+  error: unknown;
+  stage: "update_slots" | "generate_question";
+}) {
+  const message = input.error instanceof Error ? input.error.message : String(input.error);
+
+  await Promise.allSettled([
+    prisma.slotProcessingState.update({
+      where: {
+        sessionId_topicId: {
+          sessionId: input.sessionId,
+          topicId: input.topicId,
+        },
+      },
+      data: {
+        processingStatus: "failed",
+        processingFinishedAt: new Date(),
+        lastError: message,
+        retryCount: { increment: 1 },
+      },
+    }),
+    prisma.aIProcessingState.upsert({
+      where: { sessionId: input.sessionId },
+      create: {
+        sessionId: input.sessionId,
+        participantCode: input.participantCode,
+        processingStatus: "failed",
+        processingStartedAt: input.requestedAt,
+        processingFinishedAt: new Date(),
+        lastError: message,
+        retryCount: 1,
+      },
+      update: {
+        processingStatus: "failed",
+        processingFinishedAt: new Date(),
+        lastError: message,
+        retryCount: { increment: 1 },
+      },
+    }),
+  ]).then((results) => {
+    const failed = results.filter((result) => result.status === "rejected");
+    if (failed.length === 0) return;
+
+    console.warn("[slot processing failure-state save failed]", {
+      sessionId: input.sessionId,
+      topicId: input.topicId,
+      stage: input.stage,
+      originalError: getErrorLogDetails(input.error),
+      failureSaveErrors: failed.map((result) =>
+        getErrorLogDetails((result as PromiseRejectedResult).reason),
+      ),
+    });
+  });
+}
+
 function toProcessingStateResponse(state: {
   processingStatus: string;
   lastProcessedUtteranceId: string | null;
@@ -676,4 +714,15 @@ function parseOptionalDate(value: string | null | undefined) {
   if (!value) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getErrorLogDetails(error: unknown) {
+  return {
+    name: error instanceof Error ? error.name : null,
+    code:
+      error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : null,
+    message: error instanceof Error ? error.message : String(error),
+  };
 }

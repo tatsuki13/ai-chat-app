@@ -362,9 +362,11 @@ type AiQuestionResponse = {
   } | null;
   no_relevant_followup?: boolean;
   reason?: string;
+  error_code?: string;
   in_progress?: boolean;
   slot_update_outcome?: "updated" | "already_current" | "no_utterances" | "in_progress";
   slot_states?: SlotState[];
+  sub_slot_states?: DeveloperSubSlotState[];
   slot_control?: SlotControlDebugState | null;
   slot_classification_debug?: SlotClassificationDebugDetails | null;
 };
@@ -2203,11 +2205,7 @@ function SessionPageClient() {
         return;
       }
 
-      if (data.failed) {
-        throw new Error(data.error ?? "ai_question_request_failed");
-      }
-
-      if (data.in_progress) {
+      if (data.in_progress || data.error_code === "processing_conflict") {
         setStatusText("準備中");
         setPromptPanel({
           title: "質問準備中",
@@ -2215,6 +2213,10 @@ function SessionPageClient() {
           tone: "status",
         });
         return;
+      }
+
+      if (data.failed) {
+        throw new Error(data.error ?? "ai_question_request_failed");
       }
 
       if (data.suggestion?.question) {

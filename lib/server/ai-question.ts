@@ -8,6 +8,7 @@ import { generateQuestionAndUpdateSlotsForTopic } from "./slot-processing";
 
 const AI_QUESTION_ACTION_TYPE = "AI_QUESTION_REQUEST";
 const AI_QUESTION_PROCESSING_TIMEOUT_MS = 90_000;
+const AI_QUESTION_HISTORY_LIMIT = 8;
 
 type AiQuestionRequestStatus = "processing" | "completed" | "failed";
 
@@ -18,6 +19,7 @@ export async function generateAiQuestionForTopic(input: {
   currentTopic?: string | null;
   currentTopicTitle?: string | null;
 }) {
+  const timingStartedAt = Date.now();
   const requestedAt = new Date();
   const topic = resolveDiscussionTopic(
     input.currentTopicId ?? input.currentTopic ?? undefined,
@@ -31,6 +33,7 @@ export async function generateAiQuestionForTopic(input: {
     requestedAt,
     model,
   });
+  const claimMs = Date.now() - timingStartedAt;
 
   if (requestState.status === "completed" && requestState.result) {
     return {
@@ -72,11 +75,14 @@ export async function generateAiQuestionForTopic(input: {
   }
 
   try {
+    const historyStartedAt = Date.now();
     const aiQuestionHistory = await loadQuestionHistory(
       input.sessionId,
       topic.id,
       topic.slot_name,
     );
+    const historyMs = Date.now() - historyStartedAt;
+    const combinedStartedAt = Date.now();
     const slotUpdate = await generateQuestionAndUpdateSlotsForTopic({
       sessionId: input.sessionId,
       topicId: topic.id,
@@ -85,6 +91,7 @@ export async function generateAiQuestionForTopic(input: {
       currentTopicQuestionCount: aiQuestionHistory.length,
       aiQuestionHistory,
     });
+    const combinedMs = Date.now() - combinedStartedAt;
 
     if (slotUpdate.outcome === "in_progress") {
       const result = {
@@ -92,11 +99,13 @@ export async function generateAiQuestionForTopic(input: {
         request_status: "failed",
         failed: true,
         error: "slot_processing_in_progress",
+        error_code: "processing_conflict",
         processing: slotUpdate.processingState,
         topic_processing: slotUpdate.topicProcessingState ?? slotUpdate.processingState,
         in_progress: false,
         slot_update_outcome: slotUpdate.outcome,
         slot_states: slotUpdate.slotStates,
+        sub_slot_states: slotUpdate.subSlotStates,
         slot_control: slotUpdate.slotControl,
         slot_classification_debug: slotUpdate.slotClassificationDebug,
         suggestion: null,
@@ -106,6 +115,18 @@ export async function generateAiQuestionForTopic(input: {
         requestId: input.requestId,
         error: "slot_processing_in_progress",
         model,
+      });
+      logAiQuestionTiming({
+        requestId: input.requestId,
+        sessionId: input.sessionId,
+        topicId: topic.id,
+        claimMs,
+        historyMs,
+        combinedMs,
+        totalMs: Date.now() - timingStartedAt,
+        outcome: "slot_processing_in_progress",
+        questionHistoryCount: aiQuestionHistory.length,
+        processedUtteranceCount: slotUpdate.processedUtteranceIds.length,
       });
       return result;
     }
@@ -118,11 +139,6 @@ export async function generateAiQuestionForTopic(input: {
     if (!result) {
       throw new Error("ai_question_combined_result_missing");
     }
-    const session = await prisma.session.findUnique({
-      where: { id: input.sessionId },
-      select: { participantCode: true },
-    });
-
     if (!result.question || result.no_relevant_followup) {
       const recommendationId = randomUUID();
 
@@ -136,6 +152,7 @@ export async function generateAiQuestionForTopic(input: {
         reason: result.reason,
         slot_update_outcome: slotUpdate.outcome,
         slot_states: slotUpdate.slotStates,
+        sub_slot_states: slotUpdate.subSlotStates,
         slot_control: slotUpdate.slotControl,
         slot_classification_debug: slotUpdate.slotClassificationDebug,
         suggestion: {
@@ -179,12 +196,24 @@ export async function generateAiQuestionForTopic(input: {
         processedUtteranceIds: slotUpdate.processedUtteranceIds,
       });
 
+      logAiQuestionTiming({
+        requestId: input.requestId,
+        sessionId: input.sessionId,
+        topicId: topic.id,
+        claimMs,
+        historyMs,
+        combinedMs,
+        totalMs: Date.now() - timingStartedAt,
+        outcome: "advance_topic",
+        questionHistoryCount: aiQuestionHistory.length,
+        processedUtteranceCount: slotUpdate.processedUtteranceIds.length,
+      });
       return response;
     }
 
     await logAIIntervention({
       sessionId: input.sessionId,
-      participantCode: session?.participantCode ?? null,
+      participantCode: slotUpdate.participantCode ?? null,
       type: "NEXT_QUESTION",
       content: result.question,
       topicId: topic.id,
@@ -217,6 +246,7 @@ export async function generateAiQuestionForTopic(input: {
       reason: result.reason,
       slot_update_outcome: slotUpdate.outcome,
       slot_states: slotUpdate.slotStates,
+      sub_slot_states: slotUpdate.subSlotStates,
       slot_control: slotUpdate.slotControl,
       slot_classification_debug: slotUpdate.slotClassificationDebug,
       suggestion: {
@@ -248,12 +278,33 @@ export async function generateAiQuestionForTopic(input: {
       processedUtteranceIds: slotUpdate.processedUtteranceIds,
     });
 
+    logAiQuestionTiming({
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      topicId: topic.id,
+      claimMs,
+      historyMs,
+      combinedMs,
+      totalMs: Date.now() - timingStartedAt,
+      outcome: "ask_question",
+      questionHistoryCount: aiQuestionHistory.length,
+      processedUtteranceCount: slotUpdate.processedUtteranceIds.length,
+    });
     return response;
   } catch (error) {
     await failAiQuestionRequest({
       requestId: input.requestId,
       error,
       model,
+    });
+    console.warn("[ai question timing]", {
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      topicId: topic.id,
+      claimMs,
+      totalMs: Date.now() - timingStartedAt,
+      outcome: "failed",
+      error: getErrorLogDetails(error),
     });
     throw error;
   }
@@ -274,8 +325,8 @@ async function loadQuestionHistory(
         { metadata: { path: ["targetMainSlotId"], equals: topicId } },
       ],
     },
-    orderBy: { generatedAt: "asc" },
-    take: 50,
+    orderBy: { generatedAt: "desc" },
+    take: AI_QUESTION_HISTORY_LIMIT,
     select: {
       content: true,
       topicId: true,
@@ -284,7 +335,7 @@ async function loadQuestionHistory(
     },
   });
 
-  return logs.map((log) => {
+  return logs.reverse().map((log) => {
     const metadata =
       log.metadata && typeof log.metadata === "object" && !Array.isArray(log.metadata)
         ? (log.metadata as Record<string, unknown>)
@@ -376,27 +427,6 @@ async function claimAiQuestionRequest(input: {
       });
 
       if (activeSameTopicRequest) {
-        await tx.aIActionEvent.create({
-          data: {
-            id: input.requestId,
-            sessionId: input.sessionId,
-            actionType: AI_QUESTION_ACTION_TYPE,
-            currentTopicId: input.topicId,
-            currentTopicTitle: input.topicTitle,
-            result: "failed",
-            model: input.model,
-            metadata: toPrismaJson({
-              requestId: input.requestId,
-              status: "failed",
-              topicId: input.topicId,
-              requestedAt: input.requestedAt.toISOString(),
-              failedAt: input.requestedAt.toISOString(),
-              error: "duplicate_ai_question_request_in_progress",
-              activeRequestId: activeSameTopicRequest.id,
-              model: input.model,
-            }),
-          },
-        });
         console.info("[ai question request joined active processing]", {
           requestId: input.requestId,
           activeRequestId: activeSameTopicRequest.id,
@@ -405,7 +435,7 @@ async function claimAiQuestionRequest(input: {
           activeCreatedAt: activeSameTopicRequest.createdAt.toISOString(),
         });
         return {
-          status: "failed" as const,
+          status: "processing" as const,
           error: "duplicate_ai_question_request_in_progress",
         };
       }
@@ -622,6 +652,43 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function toPrismaJson(value: Record<string, unknown>) {
   return toJsonValue(value) as Prisma.InputJsonValue;
+}
+
+function logAiQuestionTiming(input: {
+  requestId: string;
+  sessionId: string;
+  topicId: string;
+  claimMs: number;
+  historyMs: number;
+  combinedMs: number;
+  totalMs: number;
+  outcome: string;
+  questionHistoryCount: number;
+  processedUtteranceCount: number;
+}) {
+  console.info("[ai question timing]", {
+    requestId: input.requestId,
+    sessionId: input.sessionId,
+    topicId: input.topicId,
+    claimMs: input.claimMs,
+    questionHistoryLoadMs: input.historyMs,
+    combinedSlotAndQuestionMs: input.combinedMs,
+    totalMs: input.totalMs,
+    outcome: input.outcome,
+    questionHistoryCount: input.questionHistoryCount,
+    processedUtteranceCount: input.processedUtteranceCount,
+  });
+}
+
+function getErrorLogDetails(error: unknown) {
+  return {
+    name: error instanceof Error ? error.name : null,
+    code:
+      error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : null,
+    message: error instanceof Error ? error.message : String(error),
+  };
 }
 
 function isUniqueConstraintError(error: unknown) {

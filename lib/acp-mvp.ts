@@ -13,16 +13,29 @@ export const DISCUSSION_TOPIC = {
     "生活の希望、介護や医療への考え、家族に伝えておきたいことを、無理のない範囲で話し合います。",
 };
 
+const TOPIC_OPENING_PROMPTS = {
+  current_life_values:
+    "今の暮らしを思い浮かべてみましょう。\n毎日の中で、大切にしていることや楽しみにしていることは何ですか。\n\nたとえば、\nいつするのか\nどこでするのか\n誰と過ごすのか\nどんなことをしているときか\nなぜそれが大切なのか\nなどを思い浮かべながら話してみてください。",
+  future_life_continuity:
+    "これから先の生活を想像してみましょう。\n今していることの中で、これからもできるだけ続けていきたいことはありますか。\n\nたとえば、\nどんなことを続けたいか\n誰と続けたいか\nどこで続けたいか\nどのくらい続けたいか\nなぜ続けたいと思うのか\nなどについて話してみてください。",
+  selfhood:
+    "少し先の自分の暮らしを想像してみましょう。\nこれからも自分らしく暮らすために、大切にしたいことや、できれば変えたくないことはありますか。\n\nたとえば、\nどのような暮らしをしたいか\nどこで過ごしたいか\n誰と関わっていたいか\n何を自分で続けたいか\nなぜそれが自分らしさにつながるのか\nなどを考えてみてください。",
+  care_support:
+    "もし将来、一人でできないことが増えて、誰かの手助けが必要になったときを想像してみましょう。\nそのとき、どのように手伝ってもらいたいですか。\n\nたとえば、\n何を手伝ってほしいか\n誰に手伝ってほしいか\nどこで手伝ってほしいか\nどこまでは自分でやりたいか\nどのような手伝い方なら安心できるか\nなどについて話してみてください。",
+  family_communication:
+    "これから先の暮らしで、家族に助けてもらったり、相談したりする場面を想像してみましょう。\n家族に今のうちに知っておいてほしいことや、伝えておきたいことはありますか。\n\nたとえば、\nどんなことを知っておいてほしいか\n誰に伝えておきたいか\nどのようなときに思い出してほしいか\nどのようにしてほしいか\nなぜそれを伝えておきたいのか\nなどについて話してみてください。",
+  proxy_decision_support:
+    "もし将来、自分の考えを伝えたり、医療や介護について自分で決めたりすることが難しくなったときを想像してみましょう。\nそのとき、お医者さんには、誰に相談してほしいですか。\n\nたとえば、\n誰に相談してほしいか\nなぜその人に相談してほしいのか\nどんなことを大切にして決めてほしいか\n誰と一緒に話し合ってほしいか\n自分のどんな考えや希望を覚えておいてほしいか\nなどについて話してみてください。",
+} as const;
+
 export const DISCUSSION_TOPICS = [
   {
     id: "current_life_values",
     level: 1,
     slot_name: "今の生活で大切にしていること",
     title: "今の生活で大切にしていること",
-    openingQuestion:
-      "今の暮らしの中で、大切にしていることや楽しみにしていることはありますか。",
-    opening_prompt:
-      "今の暮らしの中で、大切にしていることや楽しみにしていることはありますか。",
+    openingQuestion: TOPIC_OPENING_PROMPTS.current_life_values,
+    opening_prompt: TOPIC_OPENING_PROMPTS.current_life_values,
     aspects: [
       { id: "valued_routine", label: "大切にしている日課", priority: "core" },
       { id: "hobby_or_joy", label: "趣味や楽しみ", priority: "core" },
@@ -44,10 +57,8 @@ export const DISCUSSION_TOPICS = [
     level: 2,
     slot_name: "これからも続けたいこと",
     title: "これからも続けたいこと",
-    openingQuestion:
-      "これから先も、できるだけ続けていきたいことはありますか。",
-    opening_prompt:
-      "これから先も、できるだけ続けていきたいことはありますか。",
+    openingQuestion: TOPIC_OPENING_PROMPTS.future_life_continuity,
+    opening_prompt: TOPIC_OPENING_PROMPTS.future_life_continuity,
     aspects: [
       { id: "continued_activity", label: "続けたい活動", priority: "core" },
       { id: "continued_relationship", label: "続けたい人間関係", priority: "optional" },
@@ -70,10 +81,8 @@ export const DISCUSSION_TOPICS = [
     level: 2,
     slot_name: "自分らしく暮らすために大切なこと",
     title: "自分らしく暮らすために大切なこと",
-    openingQuestion:
-      "これからも自分らしく暮らすために、大切にしたいことは何ですか。",
-    opening_prompt:
-      "これからも自分らしく暮らすために、大切にしたいことは何ですか。",
+    openingQuestion: TOPIC_OPENING_PROMPTS.selfhood,
+    opening_prompt: TOPIC_OPENING_PROMPTS.selfhood,
     aspects: [
       { id: "self_determination", label: "自分で決めたいこと", priority: "core" },
       { id: "privacy", label: "プライバシー", priority: "optional" },
@@ -96,10 +105,8 @@ export const DISCUSSION_TOPICS = [
     level: 3,
     slot_name: "手助けが必要になったときの希望",
     title: "手助けが必要になったときの希望",
-    openingQuestion:
-      "将来、生活の中で手助けが必要になったとしたら、どのような助け方なら受け入れやすいと思いますか。",
-    opening_prompt:
-      "将来、生活の中で手助けが必要になったとしたら、どのような助け方なら受け入れやすいと思いますか。",
+    openingQuestion: TOPIC_OPENING_PROMPTS.care_support,
+    opening_prompt: TOPIC_OPENING_PROMPTS.care_support,
     aspects: [
       { id: "acceptable_support", label: "受け入れられる支援", priority: "core" },
       { id: "unacceptable_support", label: "受け入れにくい支援", priority: "core" },
@@ -119,10 +126,8 @@ export const DISCUSSION_TOPICS = [
     level: 3,
     slot_name: "家族に伝えておきたいこと",
     title: "家族に伝えておきたいこと",
-    openingQuestion:
-      "将来の暮らしや支援について、家族に伝えておきたいことはありますか。",
-    opening_prompt:
-      "将来の暮らしや支援について、家族に伝えておきたいことはありますか。",
+    openingQuestion: TOPIC_OPENING_PROMPTS.family_communication,
+    opening_prompt: TOPIC_OPENING_PROMPTS.family_communication,
     aspects: [
       { id: "request", label: "家族にお願いしたいこと", priority: "core" },
       { id: "burden_concern", label: "家族への負担の懸念", priority: "core" },
@@ -141,11 +146,9 @@ export const DISCUSSION_TOPICS = [
     id: "proxy_decision_support",
     level: 4,
     slot_name: "自分で決められないときに相談してほしい人",
-    title: "自分で決められないときに相談してほしい人",
-    openingQuestion:
-      "もし自分で医療や介護について決めることが難しくなったとき、誰に相談してほしいと思いますか。",
-    opening_prompt:
-      "もし自分で医療や介護について決めることが難しくなったとき、誰に相談してほしいと思いますか。",
+    title: "自分で決めることが難しくなったときに相談してほしい人",
+    openingQuestion: TOPIC_OPENING_PROMPTS.proxy_decision_support,
+    opening_prompt: TOPIC_OPENING_PROMPTS.proxy_decision_support,
     aspects: [
       { id: "trusted_person", label: "信頼できる人", priority: "core" },
       { id: "trust_reason", label: "信頼する理由", priority: "core" },
@@ -167,8 +170,7 @@ export const RESEARCH_THEMES = [
     id: "current_life_values",
     level: 1,
     title: "今の生活で大切にしていること",
-    openingQuestion:
-      "今の暮らしの中で、大切にしていることや楽しみにしていることはありますか。",
+    openingQuestion: TOPIC_OPENING_PROMPTS.current_life_values,
     sourceSlotNames: ["今の生活で大切にしていること"],
     aspects: [
       { id: "valued_routine", label: "大切にしている日課", priority: "core" },
@@ -187,8 +189,7 @@ export const RESEARCH_THEMES = [
     id: "future_life_continuity",
     level: 2,
     title: "これからも続けたいこと",
-    openingQuestion:
-      "これから先も、できるだけ続けていきたいことはありますか。",
+    openingQuestion: TOPIC_OPENING_PROMPTS.future_life_continuity,
     sourceSlotNames: ["これからも続けたいこと"],
     aspects: [
       { id: "continued_activity", label: "続けたい活動", priority: "core" },
@@ -208,8 +209,7 @@ export const RESEARCH_THEMES = [
     id: "selfhood",
     level: 2,
     title: "自分らしく暮らすために大切なこと",
-    openingQuestion:
-      "これからも自分らしく暮らすために、大切にしたいことは何ですか。",
+    openingQuestion: TOPIC_OPENING_PROMPTS.selfhood,
     sourceSlotNames: ["自分らしく暮らすために大切なこと"],
     aspects: [
       { id: "self_determination", label: "自分で決めたいこと", priority: "core" },
@@ -229,8 +229,7 @@ export const RESEARCH_THEMES = [
     id: "care_support",
     level: 3,
     title: "手助けが必要になったときの希望",
-    openingQuestion:
-      "将来、生活の中で手助けが必要になったとしたら、どのような助け方なら受け入れやすいと思いますか。",
+    openingQuestion: TOPIC_OPENING_PROMPTS.care_support,
     sourceSlotNames: ["手助けが必要になったときの希望"],
     aspects: [
       { id: "acceptable_support", label: "受け入れられる支援", priority: "core" },
@@ -247,8 +246,7 @@ export const RESEARCH_THEMES = [
     id: "family_communication",
     level: 3,
     title: "家族に伝えておきたいこと",
-    openingQuestion:
-      "将来の暮らしや支援について、家族に伝えておきたいことはありますか。",
+    openingQuestion: TOPIC_OPENING_PROMPTS.family_communication,
     sourceSlotNames: ["家族に伝えておきたいこと"],
     aspects: [
       { id: "request", label: "家族にお願いしたいこと", priority: "core" },
@@ -264,9 +262,8 @@ export const RESEARCH_THEMES = [
   {
     id: "proxy_decision_support",
     level: 4,
-    title: "自分で決められないときに相談してほしい人",
-    openingQuestion:
-      "もし自分で医療や介護について決めることが難しくなったとき、誰に相談してほしいと思いますか。",
+    title: "自分で決めることが難しくなったときに相談してほしい人",
+    openingQuestion: TOPIC_OPENING_PROMPTS.proxy_decision_support,
     sourceSlotNames: ["自分で決められないときに相談してほしい人"],
     aspects: [
       { id: "trusted_person", label: "信頼できる人", priority: "core" },
