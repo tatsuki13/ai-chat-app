@@ -61,6 +61,12 @@ type ActivePlaybackControl = {
   phase: SpeechPhase;
   revision: number | null;
 };
+type SpokenContentRequest = {
+  contentType: "topic" | "question";
+  topicId: string | null;
+  text: string;
+  preparedAudioUsed: boolean;
+};
 type RemoteMicControlIssueReason =
   | "heartbeat_stale"
   | "realtime_disconnected"
@@ -516,6 +522,7 @@ function SessionPageClient() {
     contentType: "topic" | "question";
   } | null>(null);
   const activePlaybackControlRef = useRef<ActivePlaybackControl | null>(null);
+  const pendingSpokenContentRef = useRef<SpokenContentRequest | null>(null);
   const nextQuestionInFlightRef = useRef<Promise<void> | null>(null);
   const topicTransitionInFlightRef = useRef<string | null>(null);
   const departedTopicSlotUpdateInFlightRef = useRef<Set<string>>(new Set());
@@ -1686,20 +1693,14 @@ function SessionPageClient() {
     });
   }
 
-  async function playSpokenContent(input: {
-    contentType: "topic" | "question";
-    topicId: string | null;
-    text: string;
-    preparedAudioUsed: boolean;
-  }) {
+  async function playSpokenContent(input: SpokenContentRequest) {
     const currentSession = sessionRef.current;
     const text = input.text.trim();
-    if (
-      !currentSession ||
-      !text ||
-      aiSpeechPlaybackRef.current ||
-      activePlaybackControlRef.current
-    ) {
+    if (!currentSession || !text) {
+      return;
+    }
+    if (aiSpeechPlaybackRef.current || activePlaybackControlRef.current) {
+      pendingSpokenContentRef.current = input;
       return;
     }
 
@@ -1825,7 +1826,9 @@ function SessionPageClient() {
             playbackErrorCode,
             preparedAudioUsed: input.preparedAudioUsed,
           });
+          setPlaybackControlValue(null);
           aiSpeechPlaybackRef.current = null;
+          schedulePendingSpokenContent(currentSession.id);
           return;
         }
         const resumed = await waitForRemoteMicCaptureState({
@@ -1866,6 +1869,15 @@ function SessionPageClient() {
       }
 
       aiSpeechPlaybackRef.current = null;
+      schedulePendingSpokenContent(currentSession.id);
+    }
+  }
+
+  function schedulePendingSpokenContent(sessionId: string) {
+    const pending = pendingSpokenContentRef.current;
+    pendingSpokenContentRef.current = null;
+    if (pending && sessionRef.current?.id === sessionId) {
+      window.setTimeout(() => void playSpokenContent(pending), 0);
     }
   }
 
@@ -1875,6 +1887,7 @@ function SessionPageClient() {
       window.speechSynthesis.cancel();
     }
     aiSpeechPlaybackRef.current = null;
+    pendingSpokenContentRef.current = null;
     setPlaybackControlValue(null);
 
     if (!activePlayback) return;
@@ -2443,6 +2456,7 @@ function SessionPageClient() {
       return;
     }
 
+    primeBrowserSpeech();
     setBusyAction("dialogue_start");
     setStatusText("開始中");
     setIdError("");
@@ -3076,7 +3090,7 @@ async function completeSession() {
 
               <div
                 ref={logScrollRef}
-                className="mt-2 h-[640px] overflow-y-auto rounded-md border border-dashed border-stone-300 bg-white px-3 py-3 lg:h-[720px]"
+                className="mt-2 h-[580px] overflow-y-auto rounded-md border border-dashed border-stone-300 bg-white px-3 py-3 lg:h-[660px]"
               >
                 {busyAction === "start" && visibleConversationEntries.length === 0 ? (
                   <EmptyState text="セッションを準備しています" />
@@ -4229,7 +4243,7 @@ function PromptPanel(props: {
 }) {
   if (!props.prompt) {
     return (
-      <div className="flex min-h-[180px] flex-col rounded-md border border-dashed border-stone-300 bg-white px-4 py-4 lg:h-[200px]">
+      <div className="flex min-h-[296px] flex-col rounded-md border border-dashed border-stone-300 bg-white px-4 py-4 lg:h-[316px]">
         <div className="text-[12px] font-black text-stone-500">AIからの質問</div>
         <p className="mt-2 text-[17px] font-black leading-relaxed text-stone-500">
           下の「AI質問生成」を押すと、ここに介護者が読み上げられる文が表示されます。「次の話題へ」では次テーマの話題提供に移ります。
@@ -4250,7 +4264,7 @@ function PromptPanel(props: {
           : "border-sky-300 bg-sky-50";
 
   return (
-    <div className={`flex min-h-[180px] flex-col overflow-hidden rounded-md border px-4 py-4 lg:h-[200px] ${toneClass}`}>
+    <div className={`flex min-h-[296px] flex-col overflow-hidden rounded-md border px-4 py-4 lg:h-[316px] ${toneClass}`}>
       <div className="space-y-1.5">
         <div className="w-fit rounded-full border border-emerald-100 bg-emerald-100 px-3 py-1 text-[12px] font-black text-emerald-800">
           話題 {props.topicIndex}/{props.topicCount}: {props.topicTitle}
@@ -4997,6 +5011,7 @@ function playBrowserSpeech(
     }
 
     window.speechSynthesis.cancel();
+    window.speechSynthesis.resume();
     let settled = false;
     let startedAt: string | null = null;
     let timeoutId: number;
@@ -5053,7 +5068,25 @@ function playBrowserSpeech(
       });
     }, AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS);
     window.speechSynthesis.speak(utterance);
+    window.setTimeout(() => window.speechSynthesis.resume(), 0);
   });
+}
+
+function primeBrowserSpeech() {
+  if (!BROWSER_SPEECH_ENABLED) return;
+  if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+    return;
+  }
+
+  try {
+    window.speechSynthesis.resume();
+    const utterance = new SpeechSynthesisUtterance(".");
+    utterance.lang = "ja-JP";
+    utterance.volume = 0;
+    utterance.rate = 1;
+    window.speechSynthesis.speak(utterance);
+  } catch {
+  }
 }
 
 async function discardUnusedSession(sessionId?: string | null) {
