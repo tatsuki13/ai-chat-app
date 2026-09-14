@@ -39,7 +39,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json(
       {
-        error: "Failed to generate next question",
+        error: errorDetails.userMessage,
         error_code: errorDetails.category,
       },
       { status: errorDetails.status },
@@ -75,6 +75,7 @@ function classifyAiQuestionError(error: unknown) {
       status: 409,
       category: "processing_conflict",
       stage: "request_claim",
+      userMessage: "Question generation is already in progress.",
       log,
     };
   }
@@ -84,6 +85,7 @@ function classifyAiQuestionError(error: unknown) {
       status: 500,
       category: "database_error",
       stage: "database",
+      userMessage: "Question generation could not be saved. Please try again.",
       log,
     };
   }
@@ -93,6 +95,7 @@ function classifyAiQuestionError(error: unknown) {
       status: 502,
       category: "llm_error",
       stage: "llm",
+      userMessage: "Question generation failed. Please try again.",
       log,
     };
   }
@@ -101,6 +104,7 @@ function classifyAiQuestionError(error: unknown) {
     status: 500,
     category: "question_generation_error",
     stage: "unknown",
+    userMessage: "Question generation failed. Please try again.",
     log,
   };
 }

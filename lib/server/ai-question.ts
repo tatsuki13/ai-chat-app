@@ -34,6 +34,13 @@ export async function generateAiQuestionForTopic(input: {
     model,
   });
   const claimMs = Date.now() - timingStartedAt;
+  logAiQuestionServerStage("request_claim_result", {
+    requestId: input.requestId,
+    sessionId: input.sessionId,
+    topicId: topic.id,
+    lockResult: requestState.status,
+    claimMs,
+  });
 
   if (requestState.status === "completed" && requestState.result) {
     return {
@@ -82,6 +89,13 @@ export async function generateAiQuestionForTopic(input: {
       topic.slot_name,
     );
     const historyMs = Date.now() - historyStartedAt;
+    logAiQuestionServerStage("history_loaded", {
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      topicId: topic.id,
+      questionHistoryCount: aiQuestionHistory.length,
+      historyMs,
+    });
     const combinedStartedAt = Date.now();
     const slotUpdate = await generateQuestionAndUpdateSlotsForTopic({
       sessionId: input.sessionId,
@@ -92,6 +106,18 @@ export async function generateAiQuestionForTopic(input: {
       aiQuestionHistory,
     });
     const combinedMs = Date.now() - combinedStartedAt;
+    logAiQuestionServerStage("combined_processing_result", {
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      topicId: topic.id,
+      outcome: slotUpdate.outcome,
+      combinedMs,
+      processedUtteranceCount: slotUpdate.processedUtteranceIds.length,
+      nextAction: slotUpdate.nextQuestion?.no_relevant_followup
+        ? "advance_topic"
+        : "ask_question",
+      selectedSubSlotId: slotUpdate.nextQuestion?.targetSubSlotId ?? null,
+    });
 
     if (slotUpdate.outcome === "in_progress") {
       const result = {
@@ -299,6 +325,13 @@ export async function generateAiQuestionForTopic(input: {
     });
     return response;
   } catch (error) {
+    logAiQuestionServerStage("failed", {
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      topicId: topic.id,
+      error: getErrorLogDetails(error),
+      stack: error instanceof Error ? error.stack : null,
+    });
     await failAiQuestionRequest({
       requestId: input.requestId,
       error,
@@ -434,6 +467,14 @@ async function claimAiQuestionRequest(input: {
       });
 
       if (activeSameTopicRequest) {
+        logAiQuestionServerStage("request_lock_busy", {
+          requestId: input.requestId,
+          activeRequestId: activeSameTopicRequest.id,
+          sessionId: input.sessionId,
+          topicId: input.topicId,
+          lockResult: "processing",
+          activeCreatedAt: activeSameTopicRequest.createdAt.toISOString(),
+        });
         console.info("[ai question request joined active processing]", {
           requestId: input.requestId,
           activeRequestId: activeSameTopicRequest.id,
@@ -481,6 +522,17 @@ async function claimAiQuestionRequest(input: {
             model: input.model,
           }),
         },
+      });
+      logAiQuestionServerStage("request_lock_claimed", {
+        requestId: input.requestId,
+        sessionId: input.sessionId,
+        topicId: input.topicId,
+        lockResult: "claimed",
+        dbOperation: "aIActionEvent.create",
+        dbSuccess: true,
+        slotRevisionAtRequest: slotState?.slotRevision ?? 0,
+        lastProcessedUtteranceIdAtRequest:
+          slotState?.lastProcessedUtteranceId ?? null,
       });
 
       console.info("[ai question request claimed]", {
@@ -582,26 +634,44 @@ async function completeAiQuestionRequest(input: {
   processedUtteranceIds: string[];
 }) {
   const completedAt = new Date();
-  await prisma.aIActionEvent.update({
-    where: { id: input.requestId },
-    data: {
-      result: "completed",
-      model: input.model,
-      generatedText:
-        input.nextAction === "ask_question"
-          ? asRecord(input.response.suggestion)?.content?.toString() ?? null
-          : null,
-      metadata: toPrismaJson({
-        requestId: input.requestId,
-        status: "completed",
-        completedAt: completedAt.toISOString(),
+  try {
+    await prisma.aIActionEvent.update({
+      where: { id: input.requestId },
+      data: {
+        result: "completed",
         model: input.model,
-        nextAction: input.nextAction,
-        processedUtteranceIds: input.processedUtteranceIds,
-        result: input.response,
-      }),
-    },
-  });
+        generatedText:
+          input.nextAction === "ask_question"
+            ? asRecord(input.response.suggestion)?.content?.toString() ?? null
+            : null,
+        metadata: toPrismaJson({
+          requestId: input.requestId,
+          status: "completed",
+          completedAt: completedAt.toISOString(),
+          model: input.model,
+          nextAction: input.nextAction,
+          processedUtteranceIds: input.processedUtteranceIds,
+          result: input.response,
+        }),
+      },
+    });
+    logAiQuestionServerStage("request_completion_saved", {
+      requestId: input.requestId,
+      dbOperation: "aIActionEvent.update",
+      dbSuccess: true,
+      nextAction: input.nextAction,
+      processedUtteranceCount: input.processedUtteranceIds.length,
+    });
+  } catch (error) {
+    logAiQuestionServerStage("request_completion_save_failed", {
+      requestId: input.requestId,
+      dbOperation: "aIActionEvent.update",
+      dbSuccess: false,
+      error: getErrorLogDetails(error),
+      stack: error instanceof Error ? error.stack : null,
+    });
+    throw error;
+  }
 
   console.info("[ai question request completed]", {
     requestId: input.requestId,
@@ -702,9 +772,19 @@ function getErrorLogDetails(error: unknown) {
     code:
       error && typeof error === "object" && "code" in error
         ? String((error as { code?: unknown }).code)
-        : null,
+      : null,
     message: error instanceof Error ? error.message : String(error),
   };
+}
+
+function logAiQuestionServerStage(stage: string, details: Record<string, unknown>) {
+  console.info(
+    `[ai question server stage] ${JSON.stringify({
+      ...details,
+      stage,
+      occurredAt: new Date().toISOString(),
+    })}`,
+  );
 }
 
 function isUniqueConstraintError(error: unknown) {

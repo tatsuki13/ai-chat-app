@@ -90,6 +90,7 @@ const NEXT_QUESTION_UNASSIGNED_UTTERANCE_COUNT = 16;
 const NEXT_QUESTION_ALREADY_ASKED_COUNT = 12;
 const DEFAULT_TOPIC_AI_QUESTION_LIMIT = 2;
 const INSUFFICIENT_TOPIC_AI_QUESTION_LIMIT = 3;
+const AI_QUESTION_LLM_MAX_ATTEMPTS = 2;
 
 type ExplicitNoneResponse = {
   slotName: AcpSlotName;
@@ -436,6 +437,16 @@ type JsonRequestMeta = {
   rawResponse?: string;
 };
 
+class AiQuestionValidationError extends Error {
+  constructor(
+    public readonly reason: string,
+    message = reason,
+  ) {
+    super(message);
+    this.name = "AiQuestionValidationError";
+  }
+}
+
 type SlotResponseMeaning =
   | "preference_expressed"
   | "explicit_none"
@@ -641,83 +652,276 @@ export async function updateSlotsAndGenerateNextQuestionAction(
         "追加で質問可能な項目がありません。",
       );
   const fallbackActionType = fallbackCandidate ? "ask_question" : "advance_topic";
+  const initialDecision = getNextQuestionCandidateDecision(fallbackContext);
 
-  const result = await requestJson<AiQuestionWithSlotUpdatesResult>(
-    SYSTEM_AI_QUESTION_WITH_SLOT_UPDATES,
-    buildAiQuestionWithSlotUpdatesPayload(
-      {
-        ...context,
-        currentTopic: currentTopic.slot_name,
-      },
+  logAiQuestionStage("candidate_selection", {
+    sessionId: context.sessionId,
+    topicId: currentTopic.id,
+    unprocessedUtteranceCount: utterancesToClassify.length,
+    questionHistoryCount: initialDecision.historyCount,
+    currentTopicQuestionCount: initialDecision.questionCount,
+    questionLimit: initialDecision.limit,
+    candidateCount: initialDecision.candidateCount,
+    selectedSubSlotId: initialDecision.selectedCandidate?.subSlotId ?? null,
+    limitReached: initialDecision.limitReached,
+  });
+
+  if (!fallbackCandidate) {
+    return buildCombinedQuestionBundle({
+      context,
       fallbackSubSlotStates,
       fallbackSlotStates,
-    ),
-    {
-      slot_updates: [],
-      unmatchedUtteranceIds: [],
-      next_action: {
-        type: fallbackActionType,
-        target_sub_slot_id: fallbackCandidate?.subSlotId ?? null,
-        transition_phrase: fallbackQuestion.transition_phrase,
-        question: fallbackQuestion.question,
+      utterancesToClassify,
+      nextQuestion: fallbackQuestion,
+      requestMeta: {
+        source: "fallback",
+        llmSucceeded: false,
+        errorMessage: initialDecision.limitReached
+          ? "question_limit_reached"
+          : "no_askable_question_candidate",
+      },
+      nextActionDebug: {
+        llmActionType: null,
+        llmTargetSubSlotId: null,
+        acceptedActionType: "advance_topic",
         reason: fallbackQuestion.reason,
       },
-    },
-    { type: "json_object" },
-    { throwOnFailure: true },
-  );
+    });
+  }
+
+  let lastValidationError: AiQuestionValidationError | null = null;
+
+  for (let attempt = 1; attempt <= AI_QUESTION_LLM_MAX_ATTEMPTS; attempt += 1) {
+    const retryInstruction = lastValidationError
+      ? {
+          retry_after_validation_failure: {
+            reason: lastValidationError.reason,
+            required_next_action_type: fallbackActionType,
+            required_target_sub_slot_id: fallbackCandidate.subSlotId,
+            instruction:
+              "Return exactly one short, non-repeated question for the required target_sub_slot_id. Do not include multiple questions.",
+          },
+        }
+      : {};
+
+    const result = await requestJson<AiQuestionWithSlotUpdatesResult>(
+      SYSTEM_AI_QUESTION_WITH_SLOT_UPDATES,
+      {
+        ...buildAiQuestionWithSlotUpdatesPayload(
+          {
+            ...context,
+            currentTopic: currentTopic.slot_name,
+          },
+          fallbackSubSlotStates,
+          fallbackSlotStates,
+        ),
+        ...retryInstruction,
+      },
+      {
+        slot_updates: [],
+        unmatchedUtteranceIds: [],
+        next_action: {
+          type: fallbackActionType,
+          target_sub_slot_id: fallbackCandidate.subSlotId,
+          transition_phrase: fallbackQuestion.transition_phrase,
+          question: fallbackQuestion.question,
+          reason: fallbackQuestion.reason,
+        },
+      },
+      { type: "json_object" },
+    );
+    const requestMeta = result.__requestMeta ?? {
+      source: "fallback",
+      llmSucceeded: false,
+    };
+    const applied = applySlotClassifications({
+      result: {
+        classifications: result.slot_updates ?? [],
+        unmatchedUtteranceIds: result.unmatchedUtteranceIds,
+        __requestMeta: requestMeta,
+      },
+      utterances: utterancesToClassify,
+      currentStates: fallbackSubSlotStates,
+      currentTopic: currentTopic.slot_name,
+      sessionId: context.sessionId,
+    });
+    const slotStates = deriveMainSlotStatesFromSubSlots(
+      context.slotStates,
+      applied.subSlotStates,
+      context.utterances,
+    );
+    const updatedContext = {
+      ...context,
+      currentTopic: currentTopic.slot_name,
+      slotStates,
+      subSlotStates: applied.subSlotStates,
+    };
+    const selectedAfterUpdate = selectNextQuestionCandidate(updatedContext);
+
+    try {
+      if (requestMeta.llmSucceeded !== true) {
+        throw new AiQuestionValidationError(
+          requestMeta.failureReason ?? "llm_generation_failed",
+          requestMeta.errorMessage ?? requestMeta.failureReason ?? "llm_generation_failed",
+        );
+      }
+
+      const nextQuestion = normalizeCombinedNextQuestionAction({
+        result,
+        context: updatedContext,
+        currentTopic,
+        selectedCandidate: selectedAfterUpdate,
+      });
+
+      logAiQuestionStage("llm_validation_succeeded", {
+        sessionId: context.sessionId,
+        topicId: currentTopic.id,
+        attempt,
+        llmSucceeded: requestMeta.llmSucceeded,
+        selectedSubSlotId: selectedAfterUpdate?.subSlotId ?? null,
+        actionType: result.next_action?.type ?? null,
+      });
+
+      return {
+        slotStates,
+        subSlotStates: applied.subSlotStates,
+        debug: {
+          ...applied.debug,
+          classifiedUtteranceIds: utterancesToClassify
+            .map((utterance) => utterance.id)
+            .filter(Boolean) as string[],
+          skippedClassification: utterancesToClassify.length === 0,
+        },
+        nextQuestion,
+        nextActionDebug: {
+          llmActionType: result.next_action?.type ?? null,
+          llmTargetSubSlotId:
+            typeof result.next_action?.target_sub_slot_id === "string"
+              ? result.next_action.target_sub_slot_id
+              : null,
+          acceptedActionType: nextQuestion.no_relevant_followup
+            ? "advance_topic"
+            : "ask_question",
+          reason: nextQuestion.reason,
+        },
+      };
+    } catch (error) {
+      lastValidationError =
+        error instanceof AiQuestionValidationError
+          ? error
+          : new AiQuestionValidationError(
+              error instanceof Error ? error.message : String(error),
+            );
+      logAiQuestionStage("llm_validation_failed", {
+        sessionId: context.sessionId,
+        topicId: currentTopic.id,
+        attempt,
+        llmSucceeded: requestMeta.llmSucceeded,
+        validationFailureReason: lastValidationError.reason,
+        selectedSubSlotId: selectedAfterUpdate?.subSlotId ?? null,
+        actionType: result.next_action?.type ?? null,
+      });
+
+      if (attempt >= AI_QUESTION_LLM_MAX_ATTEMPTS) {
+        const fallbackAfterValidation = selectedAfterUpdate
+          ? fallbackNextQuestion(
+              context.utterances,
+              slotStates,
+              currentTopic.slot_name,
+              applied.subSlotStates,
+              selectedAfterUpdate,
+            )
+          : noRelevantFollowUpResult(
+              currentTopic.slot_name as AcpSlotName,
+              "追加で質問可能な項目がありません。",
+            );
+
+        logAiQuestionStage("fallback_question_used", {
+          sessionId: context.sessionId,
+          topicId: currentTopic.id,
+          validationFailureReason: lastValidationError.reason,
+          selectedSubSlotId: selectedAfterUpdate?.subSlotId ?? null,
+          fallbackActionType: fallbackAfterValidation.no_relevant_followup
+            ? "advance_topic"
+            : "ask_question",
+        });
+
+        return {
+          slotStates,
+          subSlotStates: applied.subSlotStates,
+          debug: {
+            ...applied.debug,
+            classifiedUtteranceIds: utterancesToClassify
+              .map((utterance) => utterance.id)
+              .filter(Boolean) as string[],
+            skippedClassification: utterancesToClassify.length === 0,
+          },
+          nextQuestion: fallbackAfterValidation,
+          nextActionDebug: {
+            llmActionType: result.next_action?.type ?? null,
+            llmTargetSubSlotId:
+              typeof result.next_action?.target_sub_slot_id === "string"
+                ? result.next_action.target_sub_slot_id
+                : null,
+            acceptedActionType: fallbackAfterValidation.no_relevant_followup
+              ? "advance_topic"
+              : "ask_question",
+            reason: `fallback_after_validation_failure:${lastValidationError.reason}`,
+          },
+        };
+      }
+    }
+  }
+
+  throw new Error("ai_question_generation_unreachable");
+}
+
+function buildCombinedQuestionBundle(input: {
+  context: ConversationContext;
+  fallbackSubSlotStates: StoredSubSlotState[];
+  fallbackSlotStates: AcpSlotState[];
+  utterancesToClassify: ConversationUtterance[];
+  nextQuestion: NextQuestionResult;
+  requestMeta: JsonRequestMeta;
+  nextActionDebug: {
+    llmActionType: string | null;
+    llmTargetSubSlotId: string | null;
+    acceptedActionType: "ask_question" | "advance_topic";
+    reason: string;
+  };
+}): SlotStateBundle & {
+  nextQuestion: NextQuestionResult;
+  nextActionDebug: {
+    llmActionType: string | null;
+    llmTargetSubSlotId: string | null;
+    acceptedActionType: "ask_question" | "advance_topic";
+    reason: string;
+  };
+} {
   const applied = applySlotClassifications({
     result: {
-      classifications: result.slot_updates ?? [],
-      unmatchedUtteranceIds: result.unmatchedUtteranceIds,
-      __requestMeta: result.__requestMeta,
+      classifications: [],
+      unmatchedUtteranceIds: [],
+      __requestMeta: input.requestMeta,
     },
-    utterances: utterancesToClassify,
-    currentStates: fallbackSubSlotStates,
-    currentTopic: currentTopic.slot_name,
-    sessionId: context.sessionId,
-  });
-  const slotStates = deriveMainSlotStatesFromSubSlots(
-    context.slotStates,
-    applied.subSlotStates,
-    context.utterances,
-  );
-  const updatedContext = {
-    ...context,
-    currentTopic: currentTopic.slot_name,
-    slotStates,
-    subSlotStates: applied.subSlotStates,
-  };
-  const selectedAfterUpdate = selectNextQuestionCandidate(updatedContext);
-  const nextQuestion = normalizeCombinedNextQuestionAction({
-    result,
-    context: updatedContext,
-    currentTopic,
-    selectedCandidate: selectedAfterUpdate,
+    utterances: input.utterancesToClassify,
+    currentStates: input.fallbackSubSlotStates,
+    currentTopic: input.context.currentTopic,
+    sessionId: input.context.sessionId,
   });
 
   return {
-    slotStates,
+    slotStates: input.fallbackSlotStates,
     subSlotStates: applied.subSlotStates,
     debug: {
       ...applied.debug,
-      classifiedUtteranceIds: utterancesToClassify
+      classifiedUtteranceIds: input.utterancesToClassify
         .map((utterance) => utterance.id)
         .filter(Boolean) as string[],
-      skippedClassification: utterancesToClassify.length === 0,
+      skippedClassification: input.utterancesToClassify.length === 0,
     },
-    nextQuestion,
-    nextActionDebug: {
-      llmActionType: result.next_action?.type ?? null,
-      llmTargetSubSlotId:
-        typeof result.next_action?.target_sub_slot_id === "string"
-          ? result.next_action.target_sub_slot_id
-          : null,
-      acceptedActionType: nextQuestion.no_relevant_followup
-        ? "advance_topic"
-        : "ask_question",
-      reason: nextQuestion.reason,
-    },
+    nextQuestion: input.nextQuestion,
+    nextActionDebug: input.nextActionDebug,
   };
 }
 
@@ -875,29 +1079,31 @@ function normalizeCombinedNextQuestionAction(input: {
   }
 
   if (action?.type === "advance_topic") {
-    throw new Error("ai_next_action_advance_with_askable_candidate");
+    throw new AiQuestionValidationError(
+      "ai_next_action_advance_with_askable_candidate",
+    );
   }
 
   if (action?.type !== "ask_question") {
-    throw new Error("ai_next_action_invalid_type");
+    throw new AiQuestionValidationError("ai_next_action_invalid_type");
   }
 
   if (action.target_sub_slot_id !== input.selectedCandidate.subSlotId) {
-    throw new Error("ai_next_action_invalid_target");
+    throw new AiQuestionValidationError("ai_next_action_invalid_target");
   }
 
   const question = typeof action.question === "string" ? action.question.trim() : "";
   if (!question) {
-    throw new Error("ai_next_action_empty_question");
+    throw new AiQuestionValidationError("ai_next_action_empty_question");
   }
   if (isRepeatedQuestion(input.context.utterances, question, input.currentTopic.slot_name)) {
-    throw new Error("ai_next_action_repeated_question");
+    throw new AiQuestionValidationError("ai_next_action_repeated_question");
   }
   if (isRepeatedAIQuestion(input.context.aiQuestionHistory ?? [], question)) {
-    throw new Error("ai_next_action_repeated_ai_question");
+    throw new AiQuestionValidationError("ai_next_action_repeated_ai_question");
   }
   if (looksLikeMultipleQuestions(question)) {
-    throw new Error("ai_next_action_multiple_questions");
+    throw new AiQuestionValidationError("ai_next_action_multiple_questions");
   }
 
   return {
@@ -2175,6 +2381,25 @@ function attachJsonRequestMeta<T>(value: T, meta: JsonRequestMeta): T {
   return value;
 }
 
+function logAiQuestionStage(stage: string, details: Record<string, unknown>) {
+  const error = details.error;
+  const normalizedError =
+    error instanceof Error
+      ? {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+        }
+      : error;
+
+  console.info("[ai question generation stage]", {
+    ...details,
+    stage,
+    error: normalizedError,
+    occurredAt: new Date().toISOString(),
+  });
+}
+
 function describeLlmError(error: unknown) {
   if (!error || typeof error !== "object") {
     return { message: String(error) };
@@ -2360,6 +2585,12 @@ function buildRelevantAskableSubSlotsForQuestionPayload(
 }
 
 function selectNextQuestionCandidate(context: ConversationContext) {
+  const decision = getNextQuestionCandidateDecision(context);
+
+  return decision.selectedCandidate;
+}
+
+function getNextQuestionCandidateDecision(context: ConversationContext) {
   const currentTopic = resolveTopic(context.currentTopic);
   const slotControl = buildSlotControlDebugState({
     slots: filterAcpSlotStates(context.slotStates),
@@ -2384,10 +2615,21 @@ function selectNextQuestionCandidate(context: ConversationContext) {
   const limit = hasInsufficientCoreThought
     ? INSUFFICIENT_TOPIC_AI_QUESTION_LIMIT
     : DEFAULT_TOPIC_AI_QUESTION_LIMIT;
+  const questionCount = context.currentTopicQuestionCount ?? history.length;
 
-  if ((context.currentTopicQuestionCount ?? history.length) >= limit) return null;
+  if (questionCount >= limit) {
+    return {
+      currentTopic,
+      historyCount: history.length,
+      questionCount,
+      limit,
+      candidateCount: candidates.length,
+      selectedCandidate: null,
+      limitReached: true,
+    };
+  }
 
-  return candidates
+  const selectedCandidate = candidates
     .map((candidate) => ({
       candidate,
       score:
@@ -2397,6 +2639,16 @@ function selectNextQuestionCandidate(context: ConversationContext) {
     }))
     .filter(({ score }) => score > 0)
     .sort((left, right) => right.score - left.score)[0]?.candidate ?? null;
+
+  return {
+    currentTopic,
+    historyCount: history.length,
+    questionCount,
+    limit,
+    candidateCount: candidates.length,
+    selectedCandidate,
+    limitReached: false,
+  };
 }
 
 function filterQuestionHistoryForTopic(

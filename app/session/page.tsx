@@ -2102,6 +2102,9 @@ function SessionPageClient() {
       showTemporaryErrorPrompt({
         title: "AI支援を実行できません",
         body: "通信状態またはデータベース接続を確認してください。",
+        ...(error instanceof Error
+          ? { body: error.message }
+          : { body: "Question generation failed. Please try again." }),
         tone: "error",
       });
       console.warn("[ai question generation failed]", error);
