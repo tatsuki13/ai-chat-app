@@ -378,7 +378,10 @@ type AiQuestionResponse = {
 
 const STORAGE_KEY = "acp-hitl-pending-auto-session-id";
 const MAX_RENDERED_UTTERANCES = 30;
-const BASE_TOPIC_DURATION_MS = 5 * 60 * 1000;
+const TOTAL_DIALOGUE_DURATION_MS = 30 * 60 * 1000;
+const BASE_TOPIC_DURATION_MS = Math.floor(
+  TOTAL_DIALOGUE_DURATION_MS / DISCUSSION_TOPICS.length,
+);
 const DECISION_RATIO = 0.6;
 const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const TIMER_TICK_MS = 1000;
@@ -444,14 +447,19 @@ function SessionPageClient() {
   const [isEditingId, setIsEditingId] = useState(false);
   const [idDraft, setIdDraft] = useState("");
   const [idError, setIdError] = useState("");
-  const [topicBudgets, setTopicBudgets] = useState(createInitialTopicBudgets);
   const [topicStartedAt, setTopicStartedAt] = useState<number | null>(null);
   const [topicTimerSource, setTopicTimerSource] =
     useState<TopicTimerStartSource | null>(null);
   const [topicPausedMs, setTopicPausedMs] = useState(0);
+  const [totalActiveElapsedMs, setTotalActiveElapsedMs] = useState(0);
+  const [topicTargetMs, setTopicTargetMs] = useState(BASE_TOPIC_DURATION_MS);
   const [decisionPromptShownByTopic, setDecisionPromptShownByTopic] = useState<
     boolean[]
   >(() => DISCUSSION_TOPICS.map(() => false));
+  const [maxTimePromptShownByTopic, setMaxTimePromptShownByTopic] = useState<
+    boolean[]
+  >(() => DISCUSSION_TOPICS.map(() => false));
+  const [overallEndPromptShown, setOverallEndPromptShown] = useState(false);
   const [timerNow, setTimerNow] = useState(() => Date.now());
   const [transitionProposal, setTransitionProposal] =
     useState<TopicTransitionProposal | null>(null);
@@ -551,31 +559,45 @@ function SessionPageClient() {
   const isLastTopic = currentTopicIndex >= DISCUSSION_TOPICS.length - 1;
   const speechPhase = activePlaybackControl?.phase ?? "idle";
   const aiSpeechActive = speechPhase !== "idle";
-  const topicBudgetMs = topicBudgets[currentTopicIndex] ?? BASE_TOPIC_DURATION_MS;
+  const blocksConversationTimer = isConversationBlockingBusyAction(busyAction);
   const topicElapsedMs =
     topicStartedAt === null
       ? 0
       : Math.max(0, timerNow - topicStartedAt - topicPausedMs);
-  const topicRemainingSeconds = Math.ceil((topicBudgetMs - topicElapsedMs) / 1000);
-  const decisionAtMs = calculateTopicDecisionAtMs(topicBudgetMs);
-  const decisionTimeElapsed = topicElapsedMs >= decisionAtMs;
-  const maxTimeElapsed = topicElapsedMs >= topicBudgetMs;
-  const carryToNextTopicMs = calculateDistributedCarryPerTopicMs(
-    currentTopicIndex,
-    topicBudgetMs,
-    topicElapsedMs,
+  const totalElapsedWithCurrentMs = Math.min(
+    TOTAL_DIALOGUE_DURATION_MS,
+    totalActiveElapsedMs + topicElapsedMs,
   );
+  const totalRemainingMs = Math.max(
+    0,
+    TOTAL_DIALOGUE_DURATION_MS - totalElapsedWithCurrentMs,
+  );
+  const topicRemainingMs = Math.max(0, topicTargetMs - topicElapsedMs);
+  const totalRemainingSeconds = Math.ceil(totalRemainingMs / 1000);
+  const topicRemainingSeconds = Math.ceil(topicRemainingMs / 1000);
+  const decisionAtMs = calculateTopicDecisionAtMs(topicTargetMs);
+  const decisionTimeElapsed = topicElapsedMs >= decisionAtMs;
+  const maxTimeElapsed = topicElapsedMs >= topicTargetMs;
+  const totalTimeElapsed = totalRemainingMs <= 0;
   const topicProgress =
-    topicBudgetMs > 0
-      ? Math.min(1, topicElapsedMs / topicBudgetMs)
+    topicTargetMs > 0
+      ? Math.min(1, topicElapsedMs / topicTargetMs)
       : 1;
   const isConversationTimerRunning =
     Boolean(session) &&
     topicStartedAt !== null &&
     completionState === "active" &&
-    !busyAction &&
+    !blocksConversationTimer &&
     !transitionProposal &&
     !aiSpeechActive;
+  const timerPausedReason = getTimerPausedReason({
+    session,
+    topicStartedAt,
+    completionState,
+    busyAction,
+    transitionProposal,
+    aiSpeechActive,
+  });
   const remoteMicrophoneConnected =
     remoteMicStatuses.elder.status === "connected" ||
     remoteMicStatuses.caregiver.status === "connected";
@@ -958,27 +980,64 @@ function SessionPageClient() {
 
   useEffect(() => {
     if (!session || topicStartedAt === null) return;
-    if (completionState !== "active" || busyAction || transitionProposal) return;
-    if (topicElapsedMs < topicBudgetMs) return;
+    if (completionState !== "active") return;
+    if (blocksConversationTimer || transitionProposal) return;
+    if (overallEndPromptShown) return;
+    if (!totalTimeElapsed) return;
 
-    void forceAdvanceFromCurrentTopic();
+    setOverallEndPromptShown(true);
+    showEndConfirmation("Total active dialogue time has reached 30 minutes.");
   }, [
-    busyAction,
+    blocksConversationTimer,
     completionState,
-    currentTopicIndex,
-    isLastTopic,
-    nextTopic,
+    overallEndPromptShown,
     session,
-    topicBudgetMs,
-    topicElapsedMs,
     topicStartedAt,
+    totalTimeElapsed,
     transitionProposal,
   ]);
 
   useEffect(() => {
     if (!session || topicStartedAt === null) return;
     if (completionState !== "active") return;
-    if (busyAction || pushToTalkActive || transitionProposal) return;
+    if (blocksConversationTimer || transitionProposal) return;
+    if (totalTimeElapsed) return;
+    if (!maxTimeElapsed) return;
+    if (maxTimePromptShownByTopic[currentTopicIndex]) return;
+
+    setMaxTimePromptShownByTopic((current) =>
+      current.map((shown, index) =>
+        index === currentTopicIndex ? true : shown,
+      ),
+    );
+
+    if (isLastTopic) {
+      showEndConfirmation("The final topic target time has elapsed.");
+      return;
+    }
+
+    setTransitionProposal({
+      reason: "base_time_elapsed",
+      suggestedAt: Date.now(),
+      topicIndex: currentTopicIndex,
+    });
+  }, [
+    blocksConversationTimer,
+    completionState,
+    currentTopicIndex,
+    isLastTopic,
+    maxTimeElapsed,
+    maxTimePromptShownByTopic,
+    session,
+    topicStartedAt,
+    totalTimeElapsed,
+    transitionProposal,
+  ]);
+
+  useEffect(() => {
+    if (!session || topicStartedAt === null) return;
+    if (completionState !== "active") return;
+    if (blocksConversationTimer || pushToTalkActive || transitionProposal) return;
     if (maxTimeElapsed) return;
     if (timerNow < proposalCooldownUntil) return;
     if (decisionPromptShownByTopic[currentTopicIndex]) return;
@@ -1004,7 +1063,7 @@ function SessionPageClient() {
       ),
     );
   }, [
-    busyAction,
+    blocksConversationTimer,
     completionState,
     currentTopic.slot_name,
     currentTopicIndex,
@@ -2781,44 +2840,6 @@ function SessionPageClient() {
     setStatusText("終了確認");
   }
 
-  async function forceAdvanceFromCurrentTopic() {
-    if (!session || busyAction) return;
-
-    setTransitionProposal(null);
-
-    if (isLastTopic) {
-      showEndConfirmation(
-        "最後の話題の最大時間に達しました。必要であれば終了確認に進んでください。",
-      );
-      return;
-    }
-
-    if (!nextTopic) return;
-
-    setBusyAction("switch_topic");
-    setStatusText("話題切替中");
-
-    try {
-      await advanceToNextTopicNow({
-        sessionId: session.id,
-        fromTopic: currentTopic,
-        fromTopicIndex: currentTopicIndex,
-        toTopic: nextTopic,
-        reason: "max_time",
-        updateDepartedTopicSlots: true,
-      });
-    } catch {
-      setStatusText("保存エラー");
-      showTemporaryErrorPrompt({
-        title: "話題転換を実行できません",
-        body: "通信状態またはデータベース接続を確認してください。",
-        tone: "error",
-      });
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
 async function completeSession() {
     if (!session || completionState === "generating_minutes") return;
 
@@ -2859,13 +2880,16 @@ async function completeSession() {
     const now = Date.now();
 
     setCurrentTopicIndex(0);
-    setTopicBudgets(createInitialTopicBudgets());
     topicStartedAtRef.current = null;
     timerPausedStartedAtRef.current = null;
     timerRunningRef.current = false;
     setTopicPausedMs(0);
+    setTotalActiveElapsedMs(0);
+    setTopicTargetMs(calculateTopicTargetMs(0, 0));
     setTopicTimerSource(null);
     setDecisionPromptShownByTopic(DISCUSSION_TOPICS.map(() => false));
+    setMaxTimePromptShownByTopic(DISCUSSION_TOPICS.map(() => false));
+    setOverallEndPromptShown(false);
     setTransitionProposal(null);
     setProposalCooldownUntil(0);
     setCompletionState("active");
@@ -2890,6 +2914,7 @@ async function completeSession() {
     timerPausedStartedAtRef.current = null;
     timerRunningRef.current = true;
     setTopicPausedMs(0);
+    setTopicTargetMs(calculateTopicTargetMs(totalActiveElapsedMs, currentTopicIndex));
     setTopicTimerSource(source);
     setTopicStartedAt(startedAt);
     setTimerNow(Date.now());
@@ -2897,17 +2922,21 @@ async function completeSession() {
 
   function advanceTopic() {
     if (!nextTopic) return;
+    const nextTopicIndex = Math.min(
+      currentTopicIndex + 1,
+      DISCUSSION_TOPICS.length - 1,
+    );
+    const nextTotalActiveElapsedMs = Math.min(
+      TOTAL_DIALOGUE_DURATION_MS,
+      totalActiveElapsedMs + topicElapsedMs,
+    );
 
     setCurrentTopicIndex((current) =>
       Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
     );
-    setTopicBudgets((current) =>
-      calculateDistributedTopicBudgets(
-        current,
-        currentTopicIndex,
-        topicBudgetMs,
-        topicElapsedMs,
-      ),
+    setTotalActiveElapsedMs(nextTotalActiveElapsedMs);
+    setTopicTargetMs(
+      calculateTopicTargetMs(nextTotalActiveElapsedMs, nextTopicIndex),
     );
     topicStartedAtRef.current = null;
     timerPausedStartedAtRef.current = null;
@@ -3060,8 +3089,10 @@ async function completeSession() {
           <TopicTimer
             topicIndex={currentTopicIndex + 1}
             topicCount={DISCUSSION_TOPICS.length}
-            remainingSeconds={topicRemainingSeconds}
+            totalRemainingSeconds={totalRemainingSeconds}
+            topicRemainingSeconds={topicRemainingSeconds}
             progress={topicProgress}
+            pausedReason={timerPausedReason}
           />
         </div>
 
@@ -3223,10 +3254,12 @@ async function completeSession() {
               timerDebug={{
                 started: topicStartedAt !== null,
                 source: topicTimerSource,
-                budgetMs: topicBudgetMs,
+                totalElapsedMs: totalElapsedWithCurrentMs,
+                totalRemainingMs,
+                budgetMs: topicTargetMs,
                 elapsedMs: topicElapsedMs,
                 decisionAtMs,
-                carryToNextTopicMs,
+                pausedReason: timerPausedReason,
                 maxReached: maxTimeElapsed,
               }}
               aiPreparationStatus={aiProcessingStatus}
@@ -3735,10 +3768,12 @@ function DeveloperDialogueTopics(props: {
   timerDebug: {
     started: boolean;
     source: TopicTimerStartSource | null;
+    totalElapsedMs: number;
+    totalRemainingMs: number;
     budgetMs: number;
     elapsedMs: number;
     decisionAtMs: number;
-    carryToNextTopicMs: number;
+    pausedReason: string | null;
     maxReached: boolean;
   };
   aiPreparationStatus: string;
@@ -3853,10 +3888,12 @@ function DeveloperDialogueTopics(props: {
           <div>現在テーマID: {slotControl.currentTopicId}</div>
           <div>Timer: {props.timerDebug.started ? "started" : "not started"}</div>
           <div>Timer source: {props.timerDebug.source ?? "-"}</div>
-          <div>Current budget: {formatTimerSeconds(Math.floor(props.timerDebug.budgetMs / 1000))}</div>
+          <div>Total elapsed: {formatTimerSeconds(Math.floor(props.timerDebug.totalElapsedMs / 1000))}</div>
+          <div>Total remaining: {formatTimerSeconds(Math.floor(props.timerDebug.totalRemainingMs / 1000))}</div>
+          <div>Current target: {formatTimerSeconds(Math.floor(props.timerDebug.budgetMs / 1000))}</div>
           <div>Elapsed: {formatTimerSeconds(Math.floor(props.timerDebug.elapsedMs / 1000))}</div>
           <div>Decision threshold: {formatTimerSeconds(Math.floor(props.timerDebug.decisionAtMs / 1000))}</div>
-          <div>Carry to next topic: {formatTimerSeconds(Math.floor(props.timerDebug.carryToNextTopicMs / 1000))}</div>
+          <div>Paused reason: {props.timerDebug.pausedReason ?? "-"}</div>
           <div>Max reached: {props.timerDebug.maxReached ? "true" : "false"}</div>
           <div>AI preparation: {props.aiPreparationStatus}</div>
           <div>参照メインスロット: {slotControl.currentMainSlot}</div>
@@ -4291,22 +4328,28 @@ function PromptPanel(props: {
 function TopicTimer(props: {
   topicIndex: number;
   topicCount: number;
-  remainingSeconds: number;
+  totalRemainingSeconds: number;
+  topicRemainingSeconds: number;
   progress: number;
+  pausedReason: string | null;
 }) {
-  const isOvertime = props.remainingSeconds < 0;
-  const timerColor = isOvertime ? "#b45309" : "#047857";
+  const timerColor = props.pausedReason ? "#78716c" : "#047857";
   const progressDegrees = Math.round(props.progress * 360);
-  const formattedTime = formatTimerSeconds(Math.abs(props.remainingSeconds));
+  const formattedTotalTime = formatTimerSeconds(
+    Math.max(0, props.totalRemainingSeconds),
+  );
+  const formattedTopicTime = formatTimerSeconds(
+    Math.max(0, props.topicRemainingSeconds),
+  );
 
   return (
-    <div className="mx-auto flex aspect-square h-52 w-52 shrink-0 flex-col rounded-md border border-stone-200 bg-white p-4 shadow-md lg:mx-0 lg:h-[200px] lg:w-[200px]">
+    <div className="mx-auto flex h-52 w-52 shrink-0 flex-col rounded-md border border-stone-200 bg-white p-4 shadow-md lg:mx-0 lg:h-[200px] lg:w-[200px]">
       <div className="text-center text-[14px] font-black text-emerald-700">
         残り時間
       </div>
-      <div className="mt-3 flex min-h-0 flex-1 items-center justify-center">
+      <div className="mt-2 flex min-h-0 flex-1 items-center justify-center">
         <div
-          className="grid aspect-square h-full max-h-[136px] place-items-center rounded-full"
+          className="grid aspect-square h-full max-h-[108px] place-items-center rounded-full"
           style={{
             background: `conic-gradient(${timerColor} ${progressDegrees}deg, #d6d3d1 0deg)`,
           }}
@@ -4316,19 +4359,27 @@ function TopicTimer(props: {
               <div className="text-[11px] font-black leading-none text-stone-500">
                 {props.topicIndex}/{props.topicCount}
               </div>
-              <div
-                className={`mt-2 text-[32px] font-black leading-none ${
-                  isOvertime ? "text-amber-700" : "text-emerald-800"
-                }`}
-              >
-                {isOvertime ? `+${formattedTime}` : formattedTime}
+              <div className="mt-1 text-[24px] font-black leading-none text-emerald-800">
+                {formattedTopicTime}
               </div>
               <div className="mt-2 text-[11px] font-black leading-none text-stone-500">
-                {isOvertime ? "超過" : "残り"}
+                目安 残り
               </div>
             </div>
           </div>
         </div>
+      </div>
+      <div className="mt-2 space-y-1 text-[11px] font-bold leading-tight text-stone-600">
+        <div className="flex justify-between gap-2">
+          <span>対話全体</span>
+          <span className="font-black text-emerald-800">残り {formattedTotalTime}</span>
+        </div>
+        {props.pausedReason ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-center text-[10px] font-black text-amber-800">
+            <div>{props.pausedReason}</div>
+            <div>対話タイマーは停止中</div>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -5419,49 +5470,52 @@ function decideConversationAction(input: {
   return { type: "generate_question", reason: "終了前に不足確認を行います。" };
 }
 
-function calculateTopicCarryMs(topicBudgetMs: number, topicElapsedMs: number) {
-  return Math.max(0, topicBudgetMs - topicElapsedMs);
-}
-
-function calculateDistributedTopicBudgets(
-  currentBudgets: number[],
-  currentTopicIndex: number,
-  topicBudgetMs: number,
-  topicElapsedMs: number,
+function calculateTopicTargetMs(
+  totalActiveElapsedMs: number,
+  topicIndex: number,
 ) {
-  const remainingTopicCount = getRemainingTopicCount(currentTopicIndex);
-  if (remainingTopicCount === 0) return currentBudgets;
-
-  const carryPerTopicMs = calculateDistributedCarryPerTopicMs(
-    currentTopicIndex,
-    topicBudgetMs,
-    topicElapsedMs,
+  const remainingTopicCount = Math.max(1, DISCUSSION_TOPICS.length - topicIndex);
+  const remainingDialogueMs = Math.max(
+    0,
+    TOTAL_DIALOGUE_DURATION_MS - totalActiveElapsedMs,
   );
 
-  return currentBudgets.map((budget, index) =>
-    index > currentTopicIndex ? budget + carryPerTopicMs : budget,
-  );
-}
-
-function calculateDistributedCarryPerTopicMs(
-  currentTopicIndex: number,
-  topicBudgetMs: number,
-  topicElapsedMs: number,
-) {
-  const remainingTopicCount = getRemainingTopicCount(currentTopicIndex);
-  if (remainingTopicCount === 0) return 0;
-
-  return Math.floor(
-    calculateTopicCarryMs(topicBudgetMs, topicElapsedMs) / remainingTopicCount,
-  );
-}
-
-function getRemainingTopicCount(currentTopicIndex: number) {
-  return Math.max(0, DISCUSSION_TOPICS.length - currentTopicIndex - 1);
+  return Math.floor(remainingDialogueMs / remainingTopicCount);
 }
 
 function calculateTopicDecisionAtMs(topicBudgetMs: number) {
   return Math.floor(topicBudgetMs * DECISION_RATIO);
+}
+
+function isConversationBlockingBusyAction(
+  busyAction: ButtonType | "start" | "id" | "dialogue_start" | null,
+) {
+  return (
+    busyAction === "next_question" ||
+    busyAction === "switch_topic" ||
+    busyAction === "check_end" ||
+    busyAction === "dialogue_start"
+  );
+}
+
+function getTimerPausedReason(input: {
+  session: SessionInfo | null;
+  topicStartedAt: number | null;
+  completionState: SessionCompletionState;
+  busyAction: ButtonType | "start" | "id" | "dialogue_start" | null;
+  transitionProposal: TopicTransitionProposal | null;
+  aiSpeechActive: boolean;
+}) {
+  if (!input.session || input.topicStartedAt === null) return null;
+  if (input.completionState !== "active") return "Session is not active";
+  if (input.transitionProposal) return "Waiting for topic decision";
+  if (input.aiSpeechActive) return "AI voice is playing";
+  if (input.busyAction === "next_question") return "Preparing AI question";
+  if (input.busyAction === "switch_topic") return "Switching topic";
+  if (input.busyAction === "check_end") return "Checking session end";
+  if (input.busyAction === "dialogue_start") return "Starting dialogue";
+
+  return null;
 }
 
 function isTerminalSlotStatus(status: unknown) {
@@ -5510,10 +5564,6 @@ function escapeHtml(value: string) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
-}
-
-function createInitialTopicBudgets() {
-  return DISCUSSION_TOPICS.map(() => BASE_TOPIC_DURATION_MS);
 }
 
 function getElapsedSeconds(startedAt: number, now = Date.now()) {
