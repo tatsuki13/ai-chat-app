@@ -3090,44 +3090,48 @@ async function completeSession() {
           </div>
         </div>
 
-        <div className="mt-3 grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)_240px] lg:items-start">
-          <TopicTimer
-            topicIndex={currentTopicIndex + 1}
-            topicCount={DISCUSSION_TOPICS.length}
-            totalRemainingSeconds={totalRemainingSeconds}
-            topicRemainingSeconds={topicRemainingSeconds}
-            progress={topicProgress}
-            pausedReason={timerPausedReason}
-          />
-          <PromptPanel
-            prompt={promptPanel}
-            topicTitle={currentTopic.title}
-            topicIndex={currentTopicIndex + 1}
-            topicCount={DISCUSSION_TOPICS.length}
-            aiSpeechActive={aiSpeechActive}
-          />
-          <div className="grid grid-cols-1 gap-2">
-            <ActionButton
-              label={"AI\u8cea\u554f\u751f\u6210"}
-              tone="blue"
-              busy={busyAction === "next_question"}
-              disabled={!session || Boolean(busyAction)}
-              onClick={() => handleAction("next_question")}
+        <div className="relative mt-3">
+          <div className="mb-4 lg:absolute lg:left-[-332px] lg:top-0 lg:mb-0 lg:w-[316px]">
+            <TopicTimer
+              topicIndex={currentTopicIndex + 1}
+              topicCount={DISCUSSION_TOPICS.length}
+              totalRemainingSeconds={totalRemainingSeconds}
+              topicRemainingSeconds={topicRemainingSeconds}
+              progress={topicProgress}
+              pausedReason={timerPausedReason}
             />
-            <ActionButton
-              label={"\u6b21\u306e\u8a71\u984c\u3078"}
-              tone="emerald"
-              busy={busyAction === "switch_topic"}
-              disabled={!session || Boolean(busyAction)}
-              onClick={() => handleAction("switch_topic")}
+          </div>
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,860px)_240px] lg:items-start">
+            <PromptPanel
+              prompt={promptPanel}
+              topicTitle={currentTopic.title}
+              topicIndex={currentTopicIndex + 1}
+              topicCount={DISCUSSION_TOPICS.length}
+              aiSpeechActive={aiSpeechActive}
             />
-            <ActionButton
-              label={"\u5168\u4f53\u7d42\u4e86\u78ba\u8a8d"}
-              tone="amber"
-              busy={busyAction === "check_end"}
-              disabled={!session || Boolean(busyAction)}
-              onClick={() => handleAction("check_end")}
-            />
+            <div className="grid grid-cols-1 gap-2">
+              <ActionButton
+                label={"AI\u8cea\u554f\u751f\u6210"}
+                tone="blue"
+                busy={busyAction === "next_question"}
+                disabled={!session || Boolean(busyAction)}
+                onClick={() => handleAction("next_question")}
+              />
+              <ActionButton
+                label={"\u6b21\u306e\u8a71\u984c\u3078"}
+                tone="emerald"
+                busy={busyAction === "switch_topic"}
+                disabled={!session || Boolean(busyAction)}
+                onClick={() => handleAction("switch_topic")}
+              />
+              <ActionButton
+                label={"\u5168\u4f53\u7d42\u4e86\u78ba\u8a8d"}
+                tone="amber"
+                busy={busyAction === "check_end"}
+                disabled={!session || Boolean(busyAction)}
+                onClick={() => handleAction("check_end")}
+              />
+            </div>
           </div>
         </div>
 
@@ -3893,35 +3897,31 @@ function DeveloperDialogueTopics(props: {
       slots: props.slotStates,
       currentTopic: props.currentTopic,
     });
-  const classificationDebugRows = buildSlotClassificationDebugRows(
-    props.classificationDebugDetails,
-    slotControl,
-  );
   const filledCount = props.slotStates.filter(
     (slot) => isTerminalSlotStatus(slot.status),
   ).length;
   const summaryText = props.loading
-    ? "Loading"
+    ? "\u66f4\u65b0\u4e2d"
     : props.slotStates.length
-      ? `${filledCount}/${props.slotStates.length} filled`
-      : "No slots";
+      ? `${filledCount}/${props.slotStates.length}`
+      : "\u30b9\u30ed\u30c3\u30c8\u306a\u3057";
 
   return (
     <aside className="rounded-md border border-stone-300 bg-white shadow-sm">
       <details>
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 marker:hidden">
           <div>
-            <div className="text-[11px] font-black uppercase tracking-[0.08em] text-stone-500">
-              Dev Tool
+            <div className="text-[11px] font-black tracking-[0.08em] text-stone-500">
+              {"\u30c6\u30fc\u30de"}
             </div>
             <h2 className="mt-1 text-[14px] font-black leading-tight text-stone-950">
-              Topic Slots
+              {"\u30b9\u30ed\u30c3\u30c8\u72b6\u6cc1"}
             </h2>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[11px] font-bold text-stone-500">{summaryText}</span>
             <span className="rounded-md border border-stone-300 bg-stone-50 px-2 py-1 text-[11px] font-black text-stone-700">
-              Open
+              {"\u958b\u304f"}
             </span>
           </div>
         </summary>
@@ -3933,7 +3933,7 @@ function DeveloperDialogueTopics(props: {
               onClick={props.onRefresh}
               className="min-h-8 rounded-md border border-stone-300 bg-stone-50 px-2 text-[11px] font-black text-stone-700 active:scale-[0.99]"
             >
-              Update slots
+              {"\u66f4\u65b0"}
             </button>
           </div>
 
@@ -3957,9 +3957,6 @@ function DeveloperDialogueTopics(props: {
             <summary className="cursor-pointer text-[12px] font-black leading-snug text-stone-900">
               {mainSlot.isCurrentTopic ? "▼ " : "▶ "}
               {mainSlot.label}
-              <span className="ml-1 text-[10px] font-bold text-stone-500">
-                {slotStatusLabel(mainSlot.status)}
-              </span>
             </summary>
             <div className="mt-2 space-y-1.5">
               {mainSlot.subSlots.map((subSlot) => (
@@ -3967,16 +3964,14 @@ function DeveloperDialogueTopics(props: {
                   key={`${mainSlot.topicId}-${subSlot.id}`}
                   className="rounded-md bg-white px-2 py-1.5 text-[11px] leading-snug text-stone-700"
                 >
-                  <div className="mb-1 grid grid-cols-2 gap-x-2 gap-y-0.5 text-[10px] font-bold text-stone-500">
-                    <div>completion: {subSlot.completion ?? "-"}</div>
-                    <div>response: {subSlot.responseState ?? "-"}</div>
-                    <div>reason: {subSlot.reasonCode ?? "-"}</div>
-                    <div>depth: {subSlot.depth ?? "-"}</div>
-                  </div>
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="font-black text-stone-900">{subSlot.label}</span>
-                    <StatusPill status={subSlot.status} />
-                    {subSlot.inDeferredQueue ? <MiniPill text="保留" tone="amber" /> : null}
+                    {subSlot.status === "unanswered" ? (
+                      <MiniPill text="未回答" tone="stone" />
+                    ) : null}
+                    {subSlot.inDeferredQueue || subSlot.status === "deferred" ? (
+                      <MiniPill text="保留" tone="amber" />
+                    ) : null}
                     {subSlot.canAskAgain ? <MiniPill text="再質問可" tone="stone" /> : null}
                   </div>
                 </div>
@@ -3985,92 +3980,6 @@ function DeveloperDialogueTopics(props: {
           </details>
         ))}
       </div>
-
-      <details className="mt-3 rounded-md border border-stone-200 bg-stone-50 px-2 py-2">
-        <summary className="cursor-pointer text-[11px] font-black text-stone-700">
-          制御確認
-        </summary>
-        <div className="mt-2 space-y-1 text-[10px] font-bold leading-relaxed text-stone-600">
-          <div>現在テーマID: {slotControl.currentTopicId}</div>
-          <div>Timer: {props.timerDebug.started ? "started" : "not started"}</div>
-          <div>Timer source: {props.timerDebug.source ?? "-"}</div>
-          <div>Total elapsed: {formatTimerSeconds(Math.floor(props.timerDebug.totalElapsedMs / 1000))}</div>
-          <div>Total remaining: {formatTimerSeconds(Math.floor(props.timerDebug.totalRemainingMs / 1000))}</div>
-          <div>Current target: {formatTimerSeconds(Math.floor(props.timerDebug.budgetMs / 1000))}</div>
-          <div>Elapsed: {formatTimerSeconds(Math.floor(props.timerDebug.elapsedMs / 1000))}</div>
-          <div>Decision threshold: {formatTimerSeconds(Math.floor(props.timerDebug.decisionAtMs / 1000))}</div>
-          <div>Paused reason: {props.timerDebug.pausedReason ?? "-"}</div>
-          <div>Max reached: {props.timerDebug.maxReached ? "true" : "false"}</div>
-          <div>AI preparation: {props.aiPreparationStatus}</div>
-          <div>参照メインスロット: {slotControl.currentMainSlot}</div>
-          <div>
-            参照サブスロット:{" "}
-            {slotControl.referencedSubSlots.length
-              ? slotControl.referencedSubSlots.join(" / ")
-              : "-"}
-          </div>
-          <div>全スロット参照: {slotControl.allSlotReferenceUsed ? "あり" : "なし"}</div>
-          <div>保留キュー: {slotControl.deferredSlotQueue.length}件</div>
-          <div>終了前確認対象: {slotControl.beforeSessionEndTargets.length}件</div>
-          <div>
-            LLM classification source: {slotControl.classificationDebug?.source ?? "-"}
-          </div>
-          <div>
-            LLM succeeded: {slotControl.classificationDebug?.llmSucceeded ? "true" : "false"}
-          </div>
-          <div>Candidate count: {slotControl.classificationDebug?.candidateCount ?? slotControl.classificationDebug?.llmCandidateCount ?? "-"}</div>
-          <div>Accepted count: {slotControl.classificationDebug?.acceptedCount ?? "-"}</div>
-          <div>Rejected count: {slotControl.classificationDebug?.rejectedCount ?? "-"}</div>
-          <div>
-            Rejected reasons:{" "}
-            {slotControl.classificationDebug?.rejectionReasons
-              ? JSON.stringify(slotControl.classificationDebug.rejectionReasons)
-              : "-"}
-          </div>
-          <div>{slotControl.selectionReason}</div>
-        </div>
-      </details>
-
-      {classificationDebugRows.length ? (
-        <details className="mt-3 rounded-md border border-stone-200 bg-white px-2 py-2">
-          <summary className="cursor-pointer text-[11px] font-black text-stone-700">
-            Classification candidates
-          </summary>
-          <div className="mt-2 space-y-2">
-            {classificationDebugRows.map((row) => (
-              <div
-                key={row.key}
-                className="rounded-md border border-stone-200 bg-stone-50 px-2 py-1.5 text-[10px] font-bold leading-relaxed text-stone-600"
-              >
-                <div className="flex flex-wrap items-center gap-1.5 text-stone-800">
-                  <span className="font-black">
-                    {row.mainSlotId || "-"} / {row.subSlotId || "-"}
-                  </span>
-                  <MiniPill
-                    text={row.status}
-                    tone={row.status === "accepted" ? "stone" : "amber"}
-                  />
-                </div>
-                {row.rejectionReason ? (
-                  <div>rejection: {row.rejectionReason}</div>
-                ) : null}
-                <div>
-                  evidence:{" "}
-                  {row.evidenceUtteranceIds.length
-                    ? row.evidenceUtteranceIds.join(", ")
-                    : "-"}
-                </div>
-                <div className="grid grid-cols-2 gap-x-2 gap-y-0.5">
-                  <div>completion: {row.completion ?? "-"}</div>
-                  <div>response: {row.responseState ?? "-"}</div>
-                  <div>reason: {row.reasonCode ?? "-"}</div>
-                  <div>depth: {row.depth ?? "-"}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </details>
-      ) : null}
         </div>
       </details>
     </aside>
@@ -4449,13 +4358,13 @@ function TopicTimer(props: {
   );
 
   return (
-    <div className="mx-auto flex h-52 w-52 shrink-0 flex-col rounded-md border border-stone-200 bg-white p-4 shadow-md lg:mx-0 lg:h-[200px] lg:w-[200px]">
+    <div className="mx-auto flex h-[296px] w-[296px] shrink-0 flex-col rounded-md border border-stone-200 bg-white p-5 shadow-md lg:mx-0 lg:h-[316px] lg:w-[316px]">
       <div className="text-center text-[14px] font-black text-emerald-700">
         残り時間
       </div>
       <div className="mt-2 flex min-h-0 flex-1 items-center justify-center">
         <div
-          className="grid aspect-square h-full max-h-[108px] place-items-center rounded-full"
+          className="grid aspect-square h-full max-h-[172px] place-items-center rounded-full"
           style={{
             background: `conic-gradient(${timerColor} ${progressDegrees}deg, #d6d3d1 0deg)`,
           }}
@@ -4465,7 +4374,7 @@ function TopicTimer(props: {
               <div className="text-[11px] font-black leading-none text-stone-500">
                 {props.topicIndex}/{props.topicCount}
               </div>
-              <div className="mt-1 text-[24px] font-black leading-none text-emerald-800">
+              <div className="mt-1 text-[32px] font-black leading-none text-emerald-800">
                 {formattedTopicTime}
               </div>
               <div className="mt-2 text-[11px] font-black leading-none text-stone-500">
@@ -4476,7 +4385,7 @@ function TopicTimer(props: {
         </div>
       </div>
       <div className="mt-2 space-y-1 text-[11px] font-bold leading-tight text-stone-600">
-        <div className="flex justify-between gap-2">
+        <div className="flex justify-between gap-2 text-[24px]">
           <span>対話全体</span>
           <span className="font-black text-emerald-800">残り {formattedTotalTime}</span>
         </div>
