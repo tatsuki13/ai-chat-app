@@ -3090,14 +3090,7 @@ async function completeSession() {
           </div>
         </div>
 
-        <div className="mt-3 grid gap-4 lg:grid-cols-[minmax(0,860px)_240px] lg:items-start">
-          <PromptPanel
-            prompt={promptPanel}
-            topicTitle={currentTopic.title}
-            topicIndex={currentTopicIndex + 1}
-            topicCount={DISCUSSION_TOPICS.length}
-            aiSpeechActive={aiSpeechActive}
-          />
+        <div className="mt-3 grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)_240px] lg:items-start">
           <TopicTimer
             topicIndex={currentTopicIndex + 1}
             topicCount={DISCUSSION_TOPICS.length}
@@ -3106,6 +3099,36 @@ async function completeSession() {
             progress={topicProgress}
             pausedReason={timerPausedReason}
           />
+          <PromptPanel
+            prompt={promptPanel}
+            topicTitle={currentTopic.title}
+            topicIndex={currentTopicIndex + 1}
+            topicCount={DISCUSSION_TOPICS.length}
+            aiSpeechActive={aiSpeechActive}
+          />
+          <div className="grid grid-cols-1 gap-2">
+            <ActionButton
+              label={"AI\u8cea\u554f\u751f\u6210"}
+              tone="blue"
+              busy={busyAction === "next_question"}
+              disabled={!session || Boolean(busyAction)}
+              onClick={() => handleAction("next_question")}
+            />
+            <ActionButton
+              label={"\u6b21\u306e\u8a71\u984c\u3078"}
+              tone="emerald"
+              busy={busyAction === "switch_topic"}
+              disabled={!session || Boolean(busyAction)}
+              onClick={() => handleAction("switch_topic")}
+            />
+            <ActionButton
+              label={"\u5168\u4f53\u7d42\u4e86\u78ba\u8a8d"}
+              tone="amber"
+              busy={busyAction === "check_end"}
+              disabled={!session || Boolean(busyAction)}
+              onClick={() => handleAction("check_end")}
+            />
+          </div>
         </div>
 
         {transitionProposal ? (
@@ -3275,29 +3298,6 @@ async function completeSession() {
               }}
             />
 
-            <div className="grid grid-cols-1 gap-2">
-              <ActionButton
-                label="質問生成"
-                tone="blue"
-                busy={busyAction === "next_question"}
-                disabled={!session || Boolean(busyAction)}
-                onClick={() => handleAction("next_question")}
-              />
-              <ActionButton
-                label="次の話題へ"
-                tone="emerald"
-                busy={busyAction === "switch_topic"}
-                disabled={!session || Boolean(busyAction)}
-                onClick={() => handleAction("switch_topic")}
-              />
-              <ActionButton
-                label="全体終了確認"
-                tone="amber"
-                busy={busyAction === "check_end"}
-                disabled={!session || Boolean(busyAction)}
-                onClick={() => handleAction("check_end")}
-              />
-            </div>
           </div>
         </div>
       </section>
