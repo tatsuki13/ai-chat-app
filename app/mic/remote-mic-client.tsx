@@ -95,6 +95,7 @@ export default function RemoteMicClient(props: {
   const [remoteMic, setRemoteMic] = useState<RemoteMicSession | null>(null);
   const [fixedRole, setFixedRole] = useState<RemoteMicRole | null>(null);
   const [micState, setMicState] = useState<MicState>("idle");
+  const [micPrepared, setMicPrepared] = useState(false);
   const [secureContext, setSecureContext] = useState(false);
   const [mediaSupported, setMediaSupported] = useState(false);
   const [webrtcSupported, setWebrtcSupported] = useState(false);
@@ -124,6 +125,7 @@ export default function RemoteMicClient(props: {
   const remoteMicRef = useRef<RemoteMicSession | null>(null);
   const fixedRoleRef = useRef<RemoteMicRole | null>(null);
   const micStateRef = useRef<MicState>("idle");
+  const micPreparedRef = useRef(false);
   const streamIdRef = useRef("");
   const captureEpochRef = useRef(0);
   const realtimeModelRef = useRef("");
@@ -166,7 +168,7 @@ export default function RemoteMicClient(props: {
     if (remoteMic?.role === "caregiver") return "介護者用マイク";
     return "スマートフォンマイク";
   }, [remoteMic?.role]);
-  const canStart = Boolean(remoteMic) && micState === "idle";
+  const canStart = micState === "idle";
 
   useEffect(() => {
     remoteMicRef.current = remoteMic;
@@ -179,6 +181,10 @@ export default function RemoteMicClient(props: {
   useEffect(() => {
     micStateRef.current = micState;
   }, [micState]);
+
+  useEffect(() => {
+    micPreparedRef.current = micPrepared;
+  }, [micPrepared]);
 
   useEffect(() => {
     micPhaseRef.current = micPhase;
@@ -229,23 +235,36 @@ export default function RemoteMicClient(props: {
   }, [fixedRole, micState]);
 
   useEffect(() => {
+    if (!micPrepared || !remoteMic || micState !== "idle") return;
+    if (startInFlightRef.current || recordingActiveRef.current) return;
+
+    void start(remoteMic);
+  }, [micPrepared, remoteMic?.sessionId, remoteMic?.role, micState]);
+
+  useEffect(() => {
     if (!remoteMic || micState !== "streaming") return;
 
     const timerId = window.setInterval(() => {
       if (!fixedRole) return;
 
       void fetchCurrentSession(fixedRole)
-        .then((data) => {
-          if (
-            !data.active ||
-            data.active.sessionId !== remoteMic.sessionId ||
-            data.active.endedAt
-          ) {
-            sessionEndedRef.current = true;
-            fullyStoppedRef.current = true;
-            void stop(false);
+        .then(async (data) => {
+          if (!data.active || data.active.endedAt) {
+            await returnToWaitingForNextSession();
             setRemoteMic(null);
             setServerLabel("PC待機中");
+            return;
+          }
+
+          if (data.active.sessionId !== remoteMic.sessionId) {
+            await returnToWaitingForNextSession();
+            setRemoteMic({
+              sessionId: data.active.sessionId,
+              participantCode: data.active.participantCode,
+              dialogueStartedAt: data.active.dialogueStartedAt,
+              role: data.role,
+            });
+            setServerLabel("新しいセッションへ接続します");
             return;
           }
 
@@ -1121,7 +1140,7 @@ export default function RemoteMicClient(props: {
 
       await openRealtimeConnection(targetRemoteMic, {
         reconnecting: false,
-        reuseLiveStream: false,
+        reuseLiveStream: micPreparedRef.current,
       });
 
       recordingActiveRef.current = true;
@@ -1147,6 +1166,8 @@ export default function RemoteMicClient(props: {
     } catch (startError) {
       if (isPermissionError(startError)) {
         setPermissionLabel("拒否");
+        micPreparedRef.current = false;
+        setMicPrepared(false);
       }
       setError(
         startError instanceof Error
@@ -1523,6 +1544,81 @@ export default function RemoteMicClient(props: {
     await stop();
   }
 
+  async function prepareMicrophone() {
+    if (micPreparedRef.current || startInFlightRef.current) return;
+
+    startInFlightRef.current = true;
+    setError("");
+    setPermissionLabel("確認中");
+    setConnectionLabel("待機準備中");
+    setMicState("requesting");
+    setMicPhaseValue("connecting");
+
+    try {
+      if (!isHttpsTsNetUrl(window.location.href)) {
+        throw new Error(
+          "スマホマイクは https:// で始まる .ts.net のTailscale Serve URLから開いてください。",
+        );
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("このブラウザではマイクを利用できません。");
+      }
+      if (typeof RTCPeerConnection === "undefined") {
+        throw new Error(
+          "このブラウザではRealtime接続を利用できません。ChromeまたはSafariで開いてください。",
+        );
+      }
+
+      const stream = await getOrCreateMediaStream(false);
+      await getOrCreateOutgoingAudioStream(stream);
+      micPreparedRef.current = true;
+      setMicPrepared(true);
+      setPermissionLabel("許可済み");
+      setConnectionLabel("待機中");
+      setServerLabel(remoteMicRef.current ? "接続準備完了" : "PC待機中");
+      setMicPhaseValue("disconnected");
+      setMicState("idle");
+    } catch (prepareError) {
+      if (isPermissionError(prepareError)) {
+        setPermissionLabel("拒否");
+      }
+      setError(
+        prepareError instanceof Error
+          ? prepareError.message
+          : "マイクを準備できませんでした。",
+      );
+      await closeAudioCapture();
+      micPreparedRef.current = false;
+      setMicPrepared(false);
+      setMicState("idle");
+      setMicPhaseValue("error");
+      setConnectionLabel("未接続");
+    } finally {
+      startInFlightRef.current = false;
+    }
+  }
+
+  async function returnToWaitingForNextSession() {
+    recordingActiveRef.current = false;
+    reconnectInFlightRef.current = false;
+    sessionEndedRef.current = false;
+    fullyStoppedRef.current = false;
+    clearAiSpeechReleaseTimer();
+    clearReconnectTimers();
+    connectionGenerationRef.current += 1;
+    discardLiveTranscripts("session_changed");
+    flushPendingFinalTranscripts();
+    clearTranscriptState();
+    await closeRealtimeTransport(false);
+    captureBlockedRef.current = false;
+    activeAiSpeechPlaybackIdRef.current = null;
+    setLevel(0);
+    setMicState("idle");
+    setMicPhaseValue(micPreparedRef.current ? "disconnected" : "stopped");
+    setConnectionLabel(micPreparedRef.current ? "待機中" : "未接続");
+    setAiSpeechLabel("通常受付");
+  }
+
   async function stop(notifyServer = true) {
     manuallyStoppedRef.current = true;
     fullyStoppedRef.current = true;
@@ -1533,6 +1629,8 @@ export default function RemoteMicClient(props: {
     setLevel(0);
     setMicState("idle");
     setMicPhaseValue("stopped");
+    micPreparedRef.current = false;
+    setMicPrepared(false);
 
     if (notifyServer) {
       await updateFixedMicState({
@@ -1699,10 +1797,20 @@ export default function RemoteMicClient(props: {
           <button
             type="button"
             disabled={!canStart}
-            onClick={() => void start()}
+            onClick={() => {
+              if (!micPrepared) {
+                void prepareMicrophone();
+                return;
+              }
+              if (remoteMic) {
+                void start(remoteMic);
+                return;
+              }
+              void loadActiveSession(fixedRole);
+            }}
             className="min-h-12 rounded-md bg-stone-950 px-3 text-[14px] font-black text-white active:scale-[0.99] disabled:bg-stone-200 disabled:text-stone-400"
           >
-            マイク開始
+            {micPrepared ? "再接続" : "マイクを準備"}
           </button>
           <button
             type="button"

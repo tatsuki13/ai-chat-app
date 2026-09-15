@@ -80,7 +80,7 @@ function classifyAiQuestionError(error: unknown) {
     };
   }
 
-  if (code?.startsWith("P")) {
+  if (isDatabaseErrorCode(code)) {
     return {
       status: 500,
       category: "database_error",
@@ -90,11 +90,11 @@ function classifyAiQuestionError(error: unknown) {
     };
   }
 
-  if (message.includes("llm") || message.includes("OpenAI")) {
+  if (isAiQuestionGenerationError(message)) {
     return {
       status: 502,
-      category: "llm_error",
-      stage: "llm",
+      category: "ai_generation_error",
+      stage: "ai_generation",
       userMessage: "Question generation failed. Please try again.",
       log,
     };
@@ -102,9 +102,29 @@ function classifyAiQuestionError(error: unknown) {
 
   return {
     status: 500,
-    category: "question_generation_error",
+    category: "unexpected_error",
     stage: "unknown",
     userMessage: "Question generation failed. Please try again.",
     log,
   };
+}
+
+function isDatabaseErrorCode(code: string | null) {
+  if (code?.startsWith("P")) {
+    return true;
+  }
+
+  return false;
+}
+
+function isAiQuestionGenerationError(message: string) {
+  return (
+    message.includes("ai_question_no_usable_result") ||
+    message.includes("ai_question_combined_llm_failed") ||
+    message.includes("llm") ||
+    message.includes("LLM") ||
+    message.includes("OpenAI") ||
+    message.includes("fallback") ||
+    message.includes("ai_next_action_")
+  );
 }

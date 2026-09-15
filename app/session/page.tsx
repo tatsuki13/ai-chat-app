@@ -376,6 +376,17 @@ type AiQuestionResponse = {
   slot_classification_debug?: SlotClassificationDebugDetails | null;
 };
 
+class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly errorCode: string | null,
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
 const STORAGE_KEY = "acp-hitl-pending-auto-session-id";
 const MAX_RENDERED_UTTERANCES = 30;
 const TOTAL_DIALOGUE_DURATION_MS = 30 * 60 * 1000;
@@ -391,6 +402,8 @@ const AI_SPEECH_RELEASE_DELAY_MS = 500;
 const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45_000;
 const REMOTE_MIC_CONTROL_STATE_TIMEOUT_MS = 8_000;
 const REMOTE_MIC_CONTROL_STATE_POLL_MS = 250;
+const REMOTE_MIC_START_READY_TIMEOUT_MS = 45_000;
+const REMOTE_MIC_START_READY_POLL_MS = 1_000;
 const BROWSER_SPEECH_ENABLED =
   process.env.NEXT_PUBLIC_BROWSER_SPEECH_ENABLED !== "false";
 const REMOTE_MIC_SESSION_SYNC_MS = 3_000;
@@ -704,6 +717,11 @@ function SessionPageClient() {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    if (isEditingId) return;
+    setIdDraft(session?.participant_code ?? "");
+  }, [isEditingId, session?.participant_code]);
 
   useEffect(() => {
     if (!session?.id) return;
@@ -1999,7 +2017,7 @@ function SessionPageClient() {
   }
 
   function playTopicPrompt(topic: (typeof DISCUSSION_TOPICS)[number]) {
-    void playSpokenContent({
+    return playSpokenContent({
       contentType: "topic",
       topicId: topic.id,
       text: topic.opening_prompt,
@@ -2160,10 +2178,7 @@ function SessionPageClient() {
       setAiProcessingStatus("failed");
       showTemporaryErrorPrompt({
         title: "AI支援を実行できません",
-        body: "通信状態またはデータベース接続を確認してください。",
-        ...(error instanceof Error
-          ? { body: error.message }
-          : { body: "Question generation failed. Please try again." }),
+        body: getAiQuestionErrorMessage(error),
         tone: "error",
       });
       console.warn("[ai question generation failed]", error);
@@ -2506,54 +2521,75 @@ function SessionPageClient() {
   }
 
   async function handleStartDialogue() {
-    if (!session || busyAction || dialogueStarted) return;
+    if (busyAction || dialogueStarted) return;
 
-    if (!hasParticipantCode) {
+    const participantCodeInput = (
+      idDraft.trim() ||
+      sessionRef.current?.participant_code?.trim() ||
+      ""
+    ).trim();
+
+    if (!participantCodeInput) {
       setStatusText("参加者ID未設定");
+      setIdError("参加者IDを入力してください。");
       showTemporaryErrorPrompt({
-        title: "参加者IDを設定してください",
-        body: "セッション開始前に、参加者IDを登録してください。",
+        title: "参加者IDを入力してください",
+        body: "対話を開始する前に、参加者IDを入力してください。",
         tone: "error",
       });
       return;
     }
 
     primeBrowserSpeech();
+    stopVoiceAudioInput();
     setBusyAction("dialogue_start");
-    setStatusText("開始中");
+    setRemoteMicConnecting(true);
+    setRemoteMicControlNotice(null);
+    setStatusText("スマホマイクを接続しています");
     setIdError("");
 
     try {
-      const micStatus = await fetchFixedRemoteMicStatus(session.id);
-      setRemoteMicStatuses(micStatus.roles);
-      if (
-        micStatus.roles.elder.status !== "connected" ||
-        micStatus.roles.caregiver.status !== "connected" ||
-        micStatus.roles.elder.ready !== true ||
-        micStatus.roles.caregiver.ready !== true ||
-        micStatus.roles.elder.captureState === "error" ||
-        micStatus.roles.caregiver.captureState === "error"
-      ) {
-        const missingRoles = (["elder", "caregiver"] as const).filter(
-          (role) =>
-            micStatus.roles[role].status !== "connected" ||
-            micStatus.roles[role].ready !== true,
+      let workingSession = sessionRef.current;
+      if (!workingSession) {
+        workingSession = await startSession(participantCodeInput);
+        window.localStorage.setItem(STORAGE_KEY, workingSession.id);
+        sessionRef.current = workingSession;
+        setSession(workingSession);
+        setUtterances([]);
+        setUtteranceTotal(0);
+        resetTopicTiming();
+        router.replace("/session");
+      } else if (workingSession.participant_code !== participantCodeInput) {
+        workingSession = await updateSessionParticipantCode(
+          workingSession.id,
+          participantCodeInput,
         );
-        setStatusText("マイク未接続");
-        const controlRoles: SpeakerRole[] =
-          missingRoles.length > 0 ? missingRoles : ["elder", "caregiver"];
+        markSessionUsed(workingSession.id);
+        sessionRef.current = workingSession;
+        setSession(workingSession);
+      }
+      setIsEditingId(false);
+      setIdDraft(participantCodeInput);
+
+      const activated = await activateFixedRemoteMics(workingSession.id);
+      setRemoteMicStatuses(activated.roles);
+      applyDialogueStartedAt(activated.dialogueStartedAt);
+
+      const ready = await waitForFixedRemoteMicsReady(workingSession.id);
+      setRemoteMicStatuses(ready.status.roles);
+      applyDialogueStartedAt(ready.status.dialogueStartedAt);
+      if (!ready.ok) {
+        const issue = getRemoteMicStartIssue(ready.status.roles);
+        setStatusText("スマホマイクを確認してください");
         showRemoteMicControlError(
-          "両方のスマートフォンマイク接続を確認してください",
-          controlRoles,
-          getRemoteMicControlIssue(micStatus.roles, {
-            captureState: "listening",
-            targetRoles: controlRoles,
-          })?.reason ?? "heartbeat_stale",
+          getRemoteMicStartIssueTitle(issue.roles, ready.status.roles),
+          issue.roles,
+          issue.reason,
         );
         return;
       }
 
-      const updated = await startDialogueSession(session.id);
+      const updated = await startDialogueSession(workingSession.id);
       sessionRef.current = updated;
       setSession(updated);
       const startedAt = updated.dialogue_started_at
@@ -2561,16 +2597,25 @@ function SessionPageClient() {
         : Date.now();
       startTopicTimerAt(startedAt, "text");
       setPromptPanel(createOpeningPrompt(currentTopic));
-      playTopicPrompt(currentTopic);
-      setStatusText("対話中");
-    } catch {
+      setStatusText("テーマを読み上げています");
+      void playTopicPrompt(currentTopic).finally(() => {
+        if (sessionRef.current?.id === updated.id) {
+          setStatusText("対話を開始してください");
+        }
+      });
+    } catch (error) {
+      console.warn("[dialogue auto-start failed]", error);
       setStatusText("開始エラー");
       showTemporaryErrorPrompt({
-        title: "セッションを開始できません",
-        body: "データベース接続またはスマートフォンマイク接続を確認してください。",
+        title: "対話を開始できません",
+        body:
+          error instanceof Error && error.message
+            ? error.message
+            : "スマホマイクの接続状態を確認して、再接続してください。",
         tone: "error",
       });
     } finally {
+      setRemoteMicConnecting(false);
       setBusyAction(null);
     }
   }
@@ -3002,58 +3047,25 @@ async function completeSession() {
                   <span className="text-[12px] font-bold text-stone-500">
                     参加者ID
                   </span>
-                  {isEditingId ? (
-                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                      <input
-                        ref={idInputRef}
-                        value={idDraft}
-                        onChange={(event) => setIdDraft(event.target.value)}
-                        onKeyDown={handleIdKeyDown}
-                        className="h-8 min-w-0 rounded-md border border-emerald-400 bg-white px-2 text-[13px] font-black text-stone-950 outline-none ring-2 ring-emerald-100"
-                        disabled={busyAction === "id"}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => void saveDisplayId()}
-                        disabled={busyAction === "id"}
-                        className="h-8 rounded-md bg-emerald-700 px-3 text-[12px] font-black text-white disabled:bg-stone-300"
-                      >
-                        保存
-                      </button>
-                      <button
-                        type="button"
-                        onClick={cancelEditingId}
-                        disabled={busyAction === "id"}
-                        className="h-8 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 disabled:text-stone-400"
-                      >
-                        取消
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        onClick={startEditingId}
-                        disabled={!session || Boolean(busyAction)}
-                        className="max-w-[260px] truncate rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[12px] font-black text-stone-700 shadow-sm disabled:text-stone-400"
-                      >
-                        {participantCode}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleStartDialogue()}
-                        disabled={
-                          !session ||
-                          Boolean(busyAction) ||
-                          !hasParticipantCode ||
-                          dialogueStarted
-                        }
-                        className="min-h-8 rounded-md border border-emerald-200 bg-emerald-100 px-3 text-[12px] font-black text-emerald-900 shadow-sm active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
-                      >
-                        セッション開始
-                      </button>
-                    </>
-                  )}
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <input
+                      ref={idInputRef}
+                      value={idDraft}
+                      onChange={(event) => setIdDraft(event.target.value)}
+                      onKeyDown={handleIdKeyDown}
+                      placeholder="参加者ID"
+                      className="h-8 min-w-[180px] rounded-md border border-emerald-300 bg-white px-2 text-[13px] font-black text-stone-950 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100 disabled:text-stone-400"
+                      disabled={Boolean(busyAction) || dialogueStarted}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void handleStartDialogue()}
+                      disabled={Boolean(busyAction) || dialogueStarted || !idDraft.trim()}
+                      className="min-h-8 rounded-md border border-emerald-200 bg-emerald-100 px-3 text-[12px] font-black text-emerald-900 shadow-sm active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
+                    >
+                      対話を開始
+                    </button>
+                  </div>
                 </div>
                 {idError ? (
                   <p className="mt-1 text-[12px] font-bold text-red-700">
@@ -3229,21 +3241,14 @@ async function completeSession() {
           </div>
 
           <div className="space-y-3">
-            <DialogueSetupGuide
-              hasParticipantCode={hasParticipantCode}
-              isEditingParticipantCode={isEditingId}
-              microphonesConnected={remoteMicrophonesConnected}
-              microphonesReady={remoteMicrophonesReady}
-              statuses={remoteMicStatuses}
-              onEditParticipantCode={startEditingId}
-            />
-
-            <RemoteMicrophonePanel
-              sessionId={session?.id ?? ""}
-              statuses={remoteMicStatuses}
+            <RemoteMicStartPanel
+              dialogueStarted={dialogueStarted}
+              starting={busyAction === "dialogue_start" || remoteMicConnecting}
+              reading={aiSpeechActive}
               notice={remoteMicControlNotice}
-              connecting={remoteMicConnecting}
-              onConnect={handleConnectRemoteMics}
+              statuses={remoteMicStatuses}
+              retryDisabled={Boolean(busyAction) || dialogueStarted || !idDraft.trim()}
+              onRetry={() => void handleStartDialogue()}
             />
 
             <DeveloperDialogueTopics
@@ -3309,6 +3314,54 @@ function SessionPageLoading() {
         </div>
       </section>
     </main>
+  );
+}
+
+function RemoteMicStartPanel(props: {
+  dialogueStarted: boolean;
+  starting: boolean;
+  reading: boolean;
+  notice: RemoteMicControlNotice;
+  statuses: Record<SpeakerRole, RemoteMicRoleStatus>;
+  retryDisabled: boolean;
+  onRetry: () => void;
+}) {
+  const message = props.reading
+    ? "テーマを読み上げています"
+    : props.starting
+      ? "スマホマイクを接続しています"
+      : props.dialogueStarted
+        ? "対話を開始してください"
+        : "参加者IDを入力して「対話を開始」を押してください";
+  const issueTitle = props.notice
+    ? getRemoteMicStartIssueTitle(props.notice.roles, props.statuses)
+    : "";
+
+  return (
+    <aside className="rounded-md border border-emerald-200 bg-white p-3 shadow-sm">
+      <div className="text-[11px] font-black uppercase tracking-[0.08em] text-emerald-700">
+        Start
+      </div>
+      <div className="mt-1 text-[14px] font-black leading-tight text-stone-950">
+        {message}
+      </div>
+
+      {props.notice ? (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+          <div className="text-[12px] font-black text-amber-950">
+            {issueTitle}
+          </div>
+          <button
+            type="button"
+            disabled={props.retryDisabled}
+            onClick={props.onRetry}
+            className="mt-2 min-h-9 w-full rounded-md border border-amber-300 bg-white px-3 text-[12px] font-black text-amber-950 active:scale-[0.99] disabled:bg-stone-100 disabled:text-stone-400"
+          >
+            再接続する
+          </button>
+        </div>
+      ) : null}
+    </aside>
   );
 }
 
@@ -3666,6 +3719,59 @@ function toFixedRemoteMicStatus(
     reconnectAttempt: roleState.reconnectAttempt ?? undefined,
     reconnectReason: roleState.reconnectReason,
   };
+}
+
+async function waitForFixedRemoteMicsReady(sessionId: string) {
+  const deadline = Date.now() + REMOTE_MIC_START_READY_TIMEOUT_MS;
+  let latest = await fetchFixedRemoteMicStatus(sessionId);
+
+  while (Date.now() <= deadline) {
+    if (
+      latest.roles.elder.ready === true &&
+      latest.roles.caregiver.ready === true
+    ) {
+      return { ok: true as const, status: latest };
+    }
+
+    await sleep(REMOTE_MIC_START_READY_POLL_MS);
+    latest = await fetchFixedRemoteMicStatus(sessionId);
+  }
+
+  return { ok: false as const, status: latest };
+}
+
+function getRemoteMicStartIssue(
+  statuses: Record<SpeakerRole, RemoteMicRoleStatus>,
+): { roles: SpeakerRole[]; reason: RemoteMicControlIssueReason } {
+  const roles = (["elder", "caregiver"] as const).filter(
+    (role) => statuses[role].ready !== true,
+  );
+  const targetRoles: SpeakerRole[] = roles.length > 0 ? roles : ["elder", "caregiver"];
+  const issue = getRemoteMicControlIssue(statuses, {
+    captureState: "listening",
+    targetRoles,
+  });
+
+  return issue ?? { roles: targetRoles, reason: "capture_resume_pending" };
+}
+
+function getRemoteMicStartIssueTitle(
+  roles: SpeakerRole[],
+  statuses: Record<SpeakerRole, RemoteMicRoleStatus>,
+) {
+  const role = roles[0] ?? "elder";
+  const roleName = role === "elder" ? "本人用スマホ" : "介護者用スマホ";
+  const status = statuses[role];
+
+  if (
+    status.status === "connected" &&
+    status.realtimeConnected !== true &&
+    status.captureState === "idle"
+  ) {
+    return `${roleName}で「マイクを準備」を押してください`;
+  }
+
+  return `${roleName}の接続を確認してください`;
 }
 
 function getRemoteMicControlIssue(
@@ -5206,11 +5312,40 @@ async function requestJson<T = unknown>(
       errorBody && typeof errorBody.error === "string"
         ? errorBody.error
         : `Request failed: ${url}`;
+    const errorCode =
+      errorBody && typeof errorBody.error_code === "string"
+        ? errorBody.error_code
+        : null;
 
-    throw new Error(toUserFacingError(errorText));
+    throw new ApiRequestError(
+      toUserFacingError(errorText),
+      errorCode,
+      response.status,
+    );
   }
 
   return response.json() as Promise<T>;
+}
+
+function getAiQuestionErrorMessage(error: unknown) {
+  if (error instanceof ApiRequestError) {
+    if (error.errorCode === "database_error") {
+      return "データベースへの接続または保存に失敗しました。";
+    }
+    if (error.errorCode === "ai_generation_error") {
+      return "AIの質問を生成できませんでした。もう一度お試しください。";
+    }
+    if (error.errorCode === "processing_conflict") {
+      return "質問を処理しています。少し待ってからもう一度お試しください。";
+    }
+    return "質問の取得に失敗しました。通信状態を確認してもう一度お試しください。";
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "質問の取得に失敗しました。通信状態を確認してもう一度お試しください。";
 }
 
 function toUserFacingError(error: string) {

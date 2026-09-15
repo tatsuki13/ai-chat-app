@@ -524,6 +524,10 @@ type SlotStateBundle = {
     summary: {
       source: "openai" | "fallback" | "error";
       llmSucceeded: boolean;
+      fallbackUsed: boolean;
+      fallbackSucceeded: boolean;
+      resultSource: "llm" | "fallback";
+      processingSucceeded: boolean;
       candidateCount: number;
       llmCandidateCount: number;
       acceptedCount: number;
@@ -565,6 +569,10 @@ export async function updateSlotStateBundleFromConversation(
         summary: createSlotClassificationDebugSummary([], [], [], {
           source: "fallback",
           llmSucceeded: false,
+          fallbackUsed: true,
+          fallbackSucceeded: true,
+          resultSource: "fallback",
+          processingSucceeded: true,
           unmatchedUtteranceCount: 0,
         }),
       },
@@ -851,6 +859,13 @@ export async function updateSlotsAndGenerateNextQuestionAction(
           subSlotStates: applied.subSlotStates,
           debug: {
             ...applied.debug,
+            summary: markQuestionProcessingSucceeded(applied.debug.summary, {
+              resultSource: fallbackAfterValidation.no_relevant_followup
+                ? "fallback"
+                : "fallback",
+              fallbackUsed: true,
+              fallbackSucceeded: true,
+            }),
             classifiedUtteranceIds: utterancesToClassify
               .map((utterance) => utterance.id)
               .filter(Boolean) as string[],
@@ -915,6 +930,11 @@ function buildCombinedQuestionBundle(input: {
     subSlotStates: applied.subSlotStates,
     debug: {
       ...applied.debug,
+      summary: markQuestionProcessingSucceeded(applied.debug.summary, {
+        resultSource: input.requestMeta.source === "openai" ? "llm" : "fallback",
+        fallbackUsed: input.requestMeta.source !== "openai",
+        fallbackSucceeded: input.requestMeta.source !== "openai",
+      }),
       classifiedUtteranceIds: input.utterancesToClassify
         .map((utterance) => utterance.id)
         .filter(Boolean) as string[],
@@ -1275,6 +1295,10 @@ function createSlotClassificationDebugSummary(
   meta: {
     source?: "openai" | "fallback" | "error";
     llmSucceeded?: boolean;
+    fallbackUsed?: boolean;
+    fallbackSucceeded?: boolean;
+    resultSource?: "llm" | "fallback";
+    processingSucceeded?: boolean;
     unmatchedUtteranceCount?: number;
   } = {},
 ) {
@@ -1283,9 +1307,18 @@ function createSlotClassificationDebugSummary(
     return accumulator;
   }, {});
 
+  const llmSucceeded = meta.llmSucceeded === true;
+  const fallbackUsed = meta.fallbackUsed ?? meta.source === "fallback";
+  const fallbackSucceeded = meta.fallbackSucceeded === true;
+
   return {
     source: meta.source ?? "fallback",
-    llmSucceeded: meta.llmSucceeded === true,
+    llmSucceeded,
+    fallbackUsed,
+    fallbackSucceeded,
+    resultSource: meta.resultSource ?? (llmSucceeded ? "llm" : "fallback"),
+    processingSucceeded:
+      meta.processingSucceeded ?? (llmSucceeded || fallbackSucceeded),
     candidateCount: candidates.length,
     llmCandidateCount: candidates.length,
     acceptedCount: accepted.length,
@@ -1294,6 +1327,23 @@ function createSlotClassificationDebugSummary(
     unmatchedUtteranceCount: meta.unmatchedUtteranceCount ?? 0,
     derivedStateCount: accepted.length,
     transitionBlockedCount: rejectionReasons.invalid_transition ?? 0,
+  };
+}
+
+function markQuestionProcessingSucceeded(
+  summary: SlotStateBundle["debug"]["summary"],
+  result: {
+    resultSource: "llm" | "fallback";
+    fallbackUsed: boolean;
+    fallbackSucceeded: boolean;
+  },
+): SlotStateBundle["debug"]["summary"] {
+  return {
+    ...summary,
+    resultSource: result.resultSource,
+    fallbackUsed: result.fallbackUsed,
+    fallbackSucceeded: result.fallbackSucceeded,
+    processingSucceeded: true,
   };
 }
 
@@ -2392,12 +2442,14 @@ function logAiQuestionStage(stage: string, details: Record<string, unknown>) {
         }
       : error;
 
-  console.info("[ai question generation stage]", {
-    ...details,
-    stage,
-    error: normalizedError,
-    occurredAt: new Date().toISOString(),
-  });
+  console.info(
+    `[ai question generation stage] ${JSON.stringify({
+      ...details,
+      stage,
+      error: normalizedError,
+      occurredAt: new Date().toISOString(),
+    })}`,
+  );
 }
 
 function describeLlmError(error: unknown) {

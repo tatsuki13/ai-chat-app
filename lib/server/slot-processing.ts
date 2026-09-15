@@ -2,6 +2,7 @@ import {
   buildSlotControlDebugState,
   DISCUSSION_TOPICS,
   resolveDiscussionTopic,
+  type NextQuestionResult,
 } from "../acp-mvp";
 import {
   getChangedSlotStates,
@@ -421,8 +422,8 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
       currentTopicQuestionCount: input.currentTopicQuestionCount,
     });
 
-    if (bundle.debug.summary.llmSucceeded !== true) {
-      throw new Error("ai_question_combined_llm_failed");
+    if (!isUsableQuestionGenerationResult(bundle.nextQuestion, bundle.nextActionDebug)) {
+      throw new Error("ai_question_no_usable_result");
     }
 
     const processedThroughUtteranceId = rangeEndUtterance?.id ?? null;
@@ -520,6 +521,11 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
       subSlotWrites: changedSubSlotStates.length,
       slotRevision: transactionResult.slotProcessingState.slotRevision,
       nextActionType: bundle.nextActionDebug.acceptedActionType,
+      resultSource: bundle.debug.summary.resultSource,
+      llmSucceeded: bundle.debug.summary.llmSucceeded,
+      fallbackUsed: bundle.debug.summary.fallbackUsed,
+      fallbackSucceeded: bundle.debug.summary.fallbackSucceeded,
+      processingSucceeded: bundle.debug.summary.processingSucceeded,
       llmCallCount: 1,
     });
 
@@ -555,6 +561,41 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
 
     throw error;
   }
+}
+
+function isUsableQuestionGenerationResult(
+  nextQuestion: NextQuestionResult | null | undefined,
+  nextActionDebug:
+    | {
+        acceptedActionType: "ask_question" | "advance_topic";
+      }
+    | null
+    | undefined,
+) {
+  if (!nextQuestion || !nextActionDebug) return false;
+  if (nextQuestion.no_relevant_followup === true) {
+    return (
+      nextActionDebug.acceptedActionType === "advance_topic" &&
+      typeof nextQuestion.target_slot === "string" &&
+      nextQuestion.target_slot.trim().length > 0 &&
+      typeof nextQuestion.reason === "string" &&
+      nextQuestion.reason.trim().length > 0
+    );
+  }
+
+  return (
+    nextActionDebug.acceptedActionType === "ask_question" &&
+    typeof nextQuestion.question === "string" &&
+    nextQuestion.question.trim().length > 0 &&
+    typeof nextQuestion.target_slot === "string" &&
+    nextQuestion.target_slot.trim().length > 0 &&
+    typeof nextQuestion.targetMainSlotId === "string" &&
+    nextQuestion.targetMainSlotId.trim().length > 0 &&
+    typeof nextQuestion.targetSubSlotId === "string" &&
+    nextQuestion.targetSubSlotId.trim().length > 0 &&
+    typeof nextQuestion.reason === "string" &&
+    nextQuestion.reason.trim().length > 0
+  );
 }
 
 function getTopicUtterances(
