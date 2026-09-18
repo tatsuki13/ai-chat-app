@@ -8,8 +8,19 @@ import {
   type RemoteMicRealtimeEvent,
   type RemoteMicRole,
 } from "../../../lib/remote-mic/control-events";
+import {
+  ActionButton,
+  ConversationLog,
+  PromptPanel,
+  RemoteMicStatus,
+  SessionShell,
+  createConversationEntries,
+  type LiveTranscriptLike,
+  type PromptPanelState,
+  type RemoteMicRoleStatusLike,
+  type UtteranceLike,
+} from "../session-ui";
 
-type PracticeMode = "practice" | "experiment";
 type Speaker = RemoteMicRole;
 type SpeechPhase =
   | "idle"
@@ -20,7 +31,7 @@ type SpeechPhase =
   | "resuming"
   | "error";
 type PlaybackStatus = "completed" | "failed" | "cancelled" | "text_only" | "not_started";
-type PracticeStep = "setup" | "talk" | "question" | "second-topic" | "completed";
+type PracticeStep = "setup" | "talk" | "question" | "completed";
 type PracticeSession = {
   id: string;
   condition: string | null;
@@ -29,42 +40,21 @@ type PracticeTopic = {
   id: string;
   title: string;
   openingPrompt: string;
-  hints?: string[];
+  fixedQuestion: string;
 };
-type PracticeUtterance = {
-  id: string;
+type PracticeUtterance = UtteranceLike & {
   speaker: Speaker;
-  text: string;
-  created_at: string;
-  source_group_id?: string | null;
 };
-type LiveTranscript = {
-  key: string;
-  sessionId: string;
+type LiveTranscript = LiveTranscriptLike & {
   role: Speaker;
-  streamId: string;
-  transcriptId: string;
-  revision: number;
-  text: string;
-  status: "partial" | "final";
-  startedAt?: string;
-  firstPartialAt?: string;
-  finalizedAt?: string;
 };
-type RemoteMicRoleStatus = {
-  status: "connected" | "disconnected";
-  ready: boolean;
-  readyReason?: string | null;
+type RemoteMicRoleStatus = RemoteMicRoleStatusLike & {
   lastSeenAt?: string | null;
-  lastHeartbeatAt?: string | null;
-  muted?: boolean;
-  realtimeConnected?: boolean;
-  captureState?: "idle" | "listening" | "suppressed" | "reconnecting" | "error";
 };
 type FixedRemoteMicActiveState = {
   sessionId: string;
   participantCode: string | null;
-  mode?: PracticeMode;
+  mode?: "practice" | "experiment";
   endedAt: string | null;
   dialogueStartedAt: string | null;
   roles: Record<Speaker, RemoteMicRoleStatus>;
@@ -78,22 +68,23 @@ type AiSpeechStateResponse = {
   } | null;
 };
 
-const MODE: PracticeMode = "practice";
 const PRACTICE_TOPICS: PracticeTopic[] = [
   {
     id: "practice-animals-1",
     title: "操作練習の話題 1",
     openingPrompt:
-      "好きな動物は何ですか。その動物のどのようなところが好きか、二人で話してみてください。",
-    hints: ["どんなところが好きですか", "なんで好きになったんでしょうか"],
+      "好きな動物や、これまでに飼ったことのある動物について、お二人で自由にお話しください。",
+    fixedQuestion: "その動物のどんなところが好きですか？",
   },
   {
-    id: "practice-animals-2",
+    id: "practice-food-2",
     title: "操作練習の話題 2",
     openingPrompt:
-      "動物を飼った経験や、動物と触れ合った思い出があれば、二人で話してみてください。",
+      "次の練習に進みます。好きな食べ物や、よく食べる料理について、お二人でお話しください。",
+    fixedQuestion: "その食べ物にまつわる思い出はありますか？",
   },
 ];
+
 const REMOTE_MIC_STATUS_POLL_MS = 1500;
 const REMOTE_MIC_CONTROL_STATE_TIMEOUT_MS = 8000;
 const REMOTE_MIC_CONTROL_STATE_POLL_MS = 250;
@@ -120,16 +111,16 @@ function PracticePageClient() {
     emptyRemoteMicStatuses(),
   );
   const [setupError, setSetupError] = useState("");
-  const [statusText, setStatusText] = useState("練習を準備しています");
-  const [questionText, setQuestionText] = useState("");
-  const [questionError, setQuestionError] = useState("");
+  const [statusText, setStatusText] = useState("練習ページを準備しています");
   const [questionLoading, setQuestionLoading] = useState(false);
+  const [questionError, setQuestionError] = useState("");
   const [speechPhase, setSpeechPhase] = useState<SpeechPhase>("idle");
   const [spokenTopicIds, setSpokenTopicIds] = useState<Record<string, boolean>>({});
+  const [questionShownTopicIds, setQuestionShownTopicIds] = useState<Record<string, boolean>>({});
+  const [topicStartUtteranceCounts, setTopicStartUtteranceCounts] = useState<Record<string, number>>({});
+  const [cleanupError, setCleanupError] = useState("");
 
   const sessionRef = useRef<PracticeSession | null>(null);
-  const utterancesRef = useRef<PracticeUtterance[]>([]);
-  const liveTranscriptsRef = useRef<Record<string, LiveTranscript>>({});
   const remoteMicStatusesRef = useRef<Record<Speaker, RemoteMicRoleStatus>>(
     emptyRemoteMicStatuses(),
   );
@@ -141,31 +132,39 @@ function PracticePageClient() {
   } | null>(null);
 
   const currentTopic = PRACTICE_TOPICS[topicIndex] ?? PRACTICE_TOPICS[0];
-  const connectedRoles = getConnectedRoles(remoteMicStatuses);
+  const bothMicsReady = getMissingRoles(remoteMicStatuses).length === 0;
   const missingRoles = getMissingRoles(remoteMicStatuses);
-  const bothMicsReady = missingRoles.length === 0;
+  const questionShown = Boolean(questionShownTopicIds[currentTopic.id]);
+  const topicStarted = Boolean(spokenTopicIds[currentTopic.id]);
+  const topicStartUtteranceCount = topicStartUtteranceCounts[currentTopic.id] ?? utterances.length;
+  const hasSpokenAfterTopicStart = utterances.length > topicStartUtteranceCount;
+  const aiSpeechActive = speechPhase !== "idle";
   const conversationEntries = createConversationEntries(
     utterances,
     Object.values(liveTranscripts),
   );
+  const promptPanel = getPracticePromptPanel({
+    topic: currentTopic,
+    topicStarted,
+    questionShown,
+    questionLoading,
+    questionError,
+  });
   const currentInstruction = getCurrentInstruction({
     step,
     bothMicsReady,
     questionLoading,
     speechPhase,
+    questionShown,
+    topicStarted,
+    hasSpokenAfterTopicStart,
+    isSecondTopic: topicIndex > 0,
   });
+  const micIssue = useMemo(() => getMissingMicMessage(missingRoles), [missingRoles]);
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
-
-  useEffect(() => {
-    utterancesRef.current = utterances;
-  }, [utterances]);
-
-  useEffect(() => {
-    liveTranscriptsRef.current = liveTranscripts;
-  }, [liveTranscripts]);
 
   useEffect(() => {
     remoteMicStatusesRef.current = remoteMicStatuses;
@@ -176,11 +175,12 @@ function PracticePageClient() {
 
     async function createPracticeSession() {
       setSetupError("");
+      setCleanupError("");
       try {
         const response = await fetch("/api/session/practice", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: MODE }),
+          body: JSON.stringify({ mode: "practice" }),
         });
         if (!response.ok) throw new Error(`practice session failed: ${response.status}`);
 
@@ -212,7 +212,9 @@ function PracticePageClient() {
       cancelled = true;
       const practiceSession = sessionRef.current;
       if (practiceSession) {
-        void cleanupPracticeSession(practiceSession.id);
+        void cleanupPracticeSession(practiceSession.id).catch((error) => {
+          console.warn("[practice cleanup on leave failed]", error);
+        });
       }
       cancelBrowserSpeech();
     };
@@ -259,32 +261,30 @@ function PracticePageClient() {
     };
   }, [session?.id]);
 
-  useEffect(() => {
-    if (!session?.id || !bothMicsReady || step === "completed") return;
-    if (spokenTopicIds[currentTopic.id] || speechPhase !== "idle") return;
+  function handleStartPracticeTopic() {
+    const currentSession = sessionRef.current;
+    if (!currentSession || !bothMicsReady || speechPhase !== "idle") return;
+    if (spokenTopicIds[currentTopic.id]) return;
 
+    setSetupError("");
+    setQuestionError("");
+    setTopicStartUtteranceCounts((current) => ({
+      ...current,
+      [currentTopic.id]: utterances.length,
+    }));
     setSpokenTopicIds((current) => ({ ...current, [currentTopic.id]: true }));
-    setStep(topicIndex === 0 ? "talk" : "second-topic");
+    setStep("talk");
     setStatusText("話題を読み上げています");
     void playSpokenContent({
       contentType: "topic",
       text: currentTopic.openingPrompt,
       topicId: currentTopic.id,
     }).finally(() => {
-      if (sessionRef.current?.id === session.id) {
-        setStatusText("表示された話題について話してください");
+      if (sessionRef.current?.id === currentSession.id) {
+        setStatusText("表示された話題についてお話しください");
       }
     });
-  }, [
-    bothMicsReady,
-    currentTopic.id,
-    currentTopic.openingPrompt,
-    session?.id,
-    speechPhase,
-    spokenTopicIds,
-    step,
-    topicIndex,
-  ]);
+  }
 
   async function handleGeneratePracticeQuestion() {
     if (questionInFlightRef.current) {
@@ -292,15 +292,23 @@ function PracticePageClient() {
       return;
     }
 
-    const run = runGeneratePracticeQuestion();
+    const run = runFixedPracticeQuestion();
     questionInFlightRef.current = run.finally(() => {
       questionInFlightRef.current = null;
     });
     await questionInFlightRef.current;
   }
 
-  async function runGeneratePracticeQuestion() {
-    if (!sessionRef.current || questionLoading) return;
+  async function runFixedPracticeQuestion() {
+    if (
+      !sessionRef.current ||
+      questionLoading ||
+      questionShown ||
+      !topicStarted ||
+      !hasSpokenAfterTopicStart
+    ) {
+      return;
+    }
     if (!bothMicsReady) {
       setQuestionError(getMissingMicMessage(missingRoles));
       return;
@@ -308,82 +316,91 @@ function PracticePageClient() {
 
     setQuestionLoading(true);
     setQuestionError("");
-    setStatusText("AIの質問を生成しています");
+    setQuestionShownTopicIds((current) => ({ ...current, [currentTopic.id]: true }));
+    setStep("question");
+    setStatusText("AIの質問を読み上げています");
 
     try {
-      const response = await fetch("/api/ai/practice-question", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: MODE,
-          topic: currentTopic.openingPrompt,
-          utterances: utterancesRef.current.map((utterance) => ({
-            speaker: utterance.speaker,
-            text: utterance.text,
-          })),
-        }),
-      });
-      if (!response.ok) throw new Error(`practice question failed: ${response.status}`);
-
-      const data = (await response.json()) as {
-        suggestion?: { transition_phrase?: string; question?: string | null };
-      };
-      const nextQuestion = [
-        data.suggestion?.transition_phrase?.trim(),
-        data.suggestion?.question?.trim(),
-      ].filter(Boolean).join("\n\n");
-
-      if (!nextQuestion) throw new Error("practice question empty");
-
-      setQuestionText(nextQuestion);
-      setStep("question");
-      setStatusText("AIの質問を読み上げています");
       await playSpokenContent({
         contentType: "question",
-        text: nextQuestion,
+        text: currentTopic.fixedQuestion,
         topicId: currentTopic.id,
       });
-      setStatusText("質問の表示と読み上げを確認してください");
+      setStatusText("AIの質問表示と読み上げを確認してください");
     } catch (error) {
-      console.warn("[practice question failed]", error);
-      const fallback = "その動物のことを思い出すと、どんな気持ちになりますか。";
-      setQuestionText(fallback);
-      setQuestionError("質問生成に失敗したため、練習用の質問を表示しました。");
-      setStep("question");
-      await playSpokenContent({
-        contentType: "question",
-        text: fallback,
-        topicId: currentTopic.id,
-      }).catch(() => undefined);
+      console.warn("[practice fixed question playback failed]", error);
+      setQuestionError("読み上げに失敗しました。質問文は画面で確認できます。");
       setStatusText("練習は続けられます");
     } finally {
       setQuestionLoading(false);
     }
   }
 
-  function handleNextTopic() {
-    if (topicIndex >= PRACTICE_TOPICS.length - 1) return;
-    setTopicIndex((current) => current + 1);
-    setQuestionText("");
-    setQuestionError("");
-    setStep("second-topic");
-    setStatusText("次の練習話題に進みました");
+  function handleNextOrFinish() {
+    if (topicIndex < PRACTICE_TOPICS.length - 1) {
+      const nextIndex = topicIndex + 1;
+      const nextTopic = PRACTICE_TOPICS[nextIndex];
+      if (!nextTopic || speechPhase !== "idle" || !questionShown) return;
+
+      setTopicIndex(nextIndex);
+      setQuestionError("");
+      setStep("talk");
+      setTopicStartUtteranceCounts((current) => ({
+        ...current,
+        [nextTopic.id]: utterances.length,
+      }));
+      setSpokenTopicIds((current) => ({ ...current, [nextTopic.id]: true }));
+      setStatusText("次の練習話題を読み上げています");
+      void playSpokenContent({
+        contentType: "topic",
+        text: nextTopic.openingPrompt,
+        topicId: nextTopic.id,
+      }).finally(() => {
+        if (sessionRef.current) {
+          setStatusText("新しい話題についてお話しください");
+        }
+      });
+      return;
+    }
+
+    if (!questionShown || speechPhase !== "idle") return;
+    void handleFinishPractice();
   }
 
   async function handleFinishPractice() {
     const practiceSession = sessionRef.current;
+    setCleanupError("");
     cancelBrowserSpeech();
-    setSpeechPhase("idle");
-    setStep("completed");
-    setStatusText("練習は完了です");
+
+    if (!practiceSession) {
+      clearPracticeState();
+      setStep("completed");
+      return;
+    }
+
+    setStatusText("練習データを片付けています");
+    try {
+      await cleanupPracticeSession(practiceSession.id);
+      clearPracticeState();
+      setStep("completed");
+      setStatusText("練習は完了です");
+    } catch (error) {
+      console.warn("[practice cleanup after finish failed]", error);
+      setCleanupError("練習の一時データを削除できませんでした。もう一度終了を押してください。");
+      setStatusText("片付けエラー");
+    }
+  }
+
+  function clearPracticeState() {
     setSession(null);
     sessionRef.current = null;
+    setUtterances([]);
+    setLiveTranscripts({});
     setRemoteMicStatuses(emptyRemoteMicStatuses());
-    if (practiceSession) {
-      await cleanupPracticeSession(practiceSession.id).catch((error) => {
-        console.warn("[practice cleanup after finish failed]", error);
-      });
-    }
+    setSpokenTopicIds({});
+    setQuestionShownTopicIds({});
+    setTopicStartUtteranceCounts({});
+    setSpeechPhase("idle");
   }
 
   function handleProceedToExperiment() {
@@ -419,7 +436,9 @@ function PracticePageClient() {
         setSpeechPhase("echo-guard");
       }
       if ("roles" in event && event.roles) {
-        setRemoteMicStatuses(normalizeRemoteMicStatuses(event.roles as Record<Speaker, RemoteMicRoleStatus>));
+        setRemoteMicStatuses(
+          normalizeRemoteMicStatuses(event.roles as Record<Speaker, RemoteMicRoleStatus>),
+        );
       }
     }
   }
@@ -561,16 +580,12 @@ function PracticePageClient() {
     }
   }
 
-  const micIssue = useMemo(() => getMissingMicMessage(missingRoles), [missingRoles]);
-
   if (step === "completed") {
     return (
-      <main className="min-h-screen bg-[#f7f4ec] px-4 py-5 text-stone-950">
+      <main className="min-h-dvh bg-[#f7f8f4] px-4 py-5 text-stone-950">
         <section className="mx-auto flex min-h-[70vh] max-w-3xl flex-col justify-center">
           <div className="rounded-md border border-stone-200 bg-white p-6 shadow-sm">
-            <div className="text-[12px] font-black uppercase tracking-[0.08em] text-emerald-700">
-              操作練習
-            </div>
+            <div className="text-[12px] font-black text-emerald-700">操作練習</div>
             <h1 className="mt-3 text-2xl font-black">操作の練習は完了です。</h1>
             <p className="mt-3 text-[15px] font-bold leading-relaxed text-stone-700">
               分からないことがある場合は、実験担当者にお知らせください。
@@ -589,260 +604,175 @@ function PracticePageClient() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f7f4ec] px-4 py-4 text-stone-950">
-      <section className="mx-auto flex max-w-6xl flex-col gap-3">
-        <header className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <div className="text-[12px] font-black uppercase tracking-[0.08em] text-emerald-800">
-                操作練習
+    <SessionShell
+      topDetails={
+        <details className="group rounded-md border border-stone-200 bg-white shadow-sm" open>
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
+            <div className="min-w-0">
+              <div className="text-[11px] font-black text-stone-500">操作練習</div>
+              <div className="mt-1 truncate text-[15px] font-black leading-tight text-stone-950">
+                本番前の操作確認
               </div>
-              <h1 className="mt-1 text-xl font-black">本番前の操作確認</h1>
             </div>
-            <div className="rounded-md bg-white px-3 py-1 text-[12px] font-black text-stone-700">
-              {statusText}
-            </div>
+            <span className="grid h-8 w-8 shrink-0 place-items-center text-[16px] font-black leading-none text-stone-800 transition group-open:rotate-180">
+              ▼
+            </span>
+          </summary>
+          <div className="whitespace-pre-line border-t border-stone-100 px-4 pb-3 pt-2 text-[13px] font-semibold leading-relaxed text-stone-600">
+            {"これから操作の練習を行います。\n画面に表示された話題について、普段どおりお話しください。\n途中で「AIに質問してもらう」と「次の話題へ」を一度ずつ試します。\nこの練習内容は、本番の記録には含まれません。"}
           </div>
-          <p className="mt-2 max-w-3xl whitespace-pre-line text-[13px] font-bold leading-relaxed text-stone-700">
-            これから操作の練習を行います。{"\n"}
-            画面に表示された話題について、普段どおりお話しください。{"\n"}
-            途中で「AIに質問してもらう」と「次の話題へ」を一度ずつ試します。{"\n"}
-            この練習内容は、本番の記録には含まれません。
-          </p>
+        </details>
+      }
+      header={
+        <header className="flex flex-wrap items-end justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[12px] font-bold text-stone-500">ACP対話支援</p>
+            <h1 className="truncate text-[22px] font-black leading-tight">
+              操作練習
+            </h1>
+            <p className="mt-1 text-[12px] font-bold text-stone-500">
+              本番と同じスマートフォンマイクで練習します
+            </p>
+          </div>
+          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[12px] font-bold text-emerald-800">
+            {statusText}
+          </span>
         </header>
-
-        <div className="grid gap-3 lg:grid-cols-[360px_minmax(0,1fr)]">
-          <aside className="space-y-3">
-            <section className="rounded-md border border-stone-200 bg-white p-3 shadow-sm">
-              <h2 className="text-[14px] font-black">現在行う操作</h2>
-              <p className="mt-2 rounded-md bg-stone-50 px-3 py-2 text-[13px] font-bold leading-relaxed text-stone-700">
-                {currentInstruction}
-              </p>
-              {micIssue ? (
-                <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] font-bold text-amber-900">
-                  {micIssue}
-                </p>
-              ) : null}
-              {setupError ? (
-                <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[12px] font-bold text-red-800">
-                  {setupError}
-                </p>
-              ) : null}
+      }
+      sidePanel={
+        <section className="mx-auto flex h-[296px] w-[296px] shrink-0 flex-col rounded-md border border-stone-200 bg-white p-5 shadow-md lg:mx-0 lg:h-[316px] lg:w-[316px]">
+          <div className="text-center text-[14px] font-black text-emerald-700">
+            現在行う操作
+          </div>
+          <div className="mt-4 min-h-0 flex-1 rounded-md bg-stone-50 px-3 py-3 text-[14px] font-bold leading-relaxed text-stone-700">
+            {currentInstruction}
+          </div>
+          {micIssue ? (
+            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-center text-[11px] font-black text-amber-900">
+              {micIssue}
+            </div>
+          ) : null}
+        </section>
+      }
+      promptPanel={
+        <PromptPanel
+          prompt={promptPanel}
+          topicTitle={currentTopic.title}
+          topicIndex={topicIndex + 1}
+          topicCount={PRACTICE_TOPICS.length}
+          aiSpeechActive={aiSpeechActive}
+        />
+      }
+      actionPanel={
+        <div className="grid grid-cols-1 gap-2">
+          <ActionButton
+            label={topicStarted ? "AIに質問してもらう" : "練習を開始する"}
+            tone={topicStarted ? "blue" : "emerald"}
+            busy={questionLoading}
+            disabled={
+              !session ||
+              !bothMicsReady ||
+              questionLoading ||
+              (topicStarted && questionShown) ||
+              (topicStarted && !hasSpokenAfterTopicStart) ||
+              speechPhase !== "idle"
+            }
+            onClick={() => {
+              if (topicStarted) {
+                void handleGeneratePracticeQuestion();
+                return;
+              }
+              handleStartPracticeTopic();
+            }}
+          />
+          <ActionButton
+            label={topicIndex < PRACTICE_TOPICS.length - 1 ? "次の話題へ" : "練習を終了する"}
+            tone={topicIndex < PRACTICE_TOPICS.length - 1 ? "emerald" : "amber"}
+            busy={false}
+            disabled={!session || !questionShown || speechPhase !== "idle"}
+            onClick={handleNextOrFinish}
+          />
+          <ActionButton
+            label="練習を中止する"
+            tone="stone"
+            busy={false}
+            disabled={!session || (speechPhase !== "idle" && speechPhase !== "error")}
+            onClick={() => void handleFinishPractice()}
+          />
+        </div>
+      }
+      conversationPanel={
+        <ConversationLog
+          entries={conversationEntries}
+          totalCount={utterances.length}
+          emptyText="スマートフォンマイクで話すと、ここに発話が表示されます"
+          editable={false}
+        />
+      }
+      rightPanel={
+        <>
+          <RemoteMicStatus statuses={remoteMicStatuses} />
+          {(setupError || questionError || cleanupError) ? (
+            <section className="rounded-md border border-red-200 bg-red-50 p-3 text-[12px] font-bold leading-relaxed text-red-800">
+              {setupError ? <p>{setupError}</p> : null}
+              {questionError ? <p>{questionError}</p> : null}
+              {cleanupError ? <p>{cleanupError}</p> : null}
             </section>
+          ) : null}
+        </>
+      }
+    />
+  );
+}
 
-            <section className="rounded-md border border-stone-200 bg-white p-3 shadow-sm">
-              <h2 className="text-[14px] font-black">スマートフォンマイク</h2>
-              <div className="mt-2 grid gap-2">
-                <MicStatusRow label="本人用マイク" status={remoteMicStatuses.elder} />
-                <MicStatusRow label="介護者用マイク" status={remoteMicStatuses.caregiver} />
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <a
-                  href="/mic/elder"
-                  target="_blank"
-                  className="rounded-md border border-stone-300 bg-white px-3 py-2 text-center text-[12px] font-black text-stone-700"
-                >
-                  本人用を開く
-                </a>
-                <a
-                  href="/mic/caregiver"
-                  target="_blank"
-                  className="rounded-md border border-stone-300 bg-white px-3 py-2 text-center text-[12px] font-black text-stone-700"
-                >
-                  介護者用を開く
-                </a>
-              </div>
-            </section>
-          </aside>
-
-          <section className="grid min-h-[70vh] gap-3 lg:grid-rows-[auto_minmax(0,1fr)_auto]">
-            <section className="rounded-md border border-stone-200 bg-white p-4 shadow-sm">
-              <div className="text-[12px] font-black text-emerald-700">
-                {currentTopic.title}
-              </div>
-              <p className="mt-2 whitespace-pre-line text-[20px] font-black leading-relaxed">
-                {currentTopic.openingPrompt}
-              </p>
-              {currentTopic.hints?.length ? (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {currentTopic.hints.map((hint) => (
-                    <span
-                      key={hint}
-                      className="rounded-md border border-stone-200 bg-stone-50 px-2 py-1 text-[12px] font-bold text-stone-600"
-                    >
-                      {hint}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-              {questionText ? (
-                <div className="mt-4 rounded-md border border-sky-200 bg-sky-50 px-3 py-2">
-                  <div className="text-[12px] font-black text-sky-800">
-                    AIの質問
-                  </div>
-                  <p className="mt-1 whitespace-pre-line text-[16px] font-black leading-relaxed text-sky-950">
-                    {questionText}
-                  </p>
-                  {questionError ? (
-                    <p className="mt-2 text-[12px] font-bold text-amber-800">
-                      {questionError}
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
-            </section>
-
-            <section className="min-h-[320px] overflow-hidden rounded-md border border-stone-200 bg-white shadow-sm">
-              <div className="border-b border-stone-200 px-4 py-2 text-[13px] font-black">
-                会話ログ
-              </div>
-              <div className="flex h-full max-h-[48vh] flex-col gap-2 overflow-y-auto p-3">
-                {conversationEntries.length === 0 ? (
-                  <div className="flex min-h-48 items-center justify-center rounded-md bg-stone-50 px-4 text-center text-[13px] font-bold text-stone-500">
-                    スマートフォンマイクで話すと、ここに発話が表示されます。
-                  </div>
-                ) : (
-                  conversationEntries.map((entry) =>
-                    entry.kind === "live" ? (
-                      <LiveSpeechBubble key={entry.key} transcript={entry.transcript} />
-                    ) : (
-                      <SpeechBubble key={entry.key} utterance={entry.utterance} />
-                    ),
-                  )
-                )}
-              </div>
-            </section>
-
-            <footer className="grid gap-2 sm:grid-cols-3">
-              <ActionButton
-                label="AIに質問してもらう"
-                busy={questionLoading}
-                disabled={!session || !bothMicsReady || questionLoading || speechPhase !== "idle"}
-                onClick={() => void handleGeneratePracticeQuestion()}
-              />
-              <ActionButton
-                label="次の話題へ"
-                busy={false}
-                disabled={topicIndex >= PRACTICE_TOPICS.length - 1 || speechPhase !== "idle"}
-                onClick={handleNextTopic}
-              />
-              <ActionButton
-                label="練習を終了する"
-                busy={false}
-                disabled={speechPhase !== "idle" && speechPhase !== "error"}
-                onClick={() => void handleFinishPractice()}
-              />
-            </footer>
-          </section>
+function PracticeLoading() {
+  return (
+    <main className="min-h-dvh bg-[#f7f8f4] px-4 py-5 text-stone-950">
+      <section className="mx-auto max-w-6xl rounded-md border border-stone-300 bg-white p-4 shadow-sm">
+        <div className="text-[13px] font-black text-stone-600">
+          練習ページを準備しています
         </div>
       </section>
     </main>
   );
 }
 
-function PracticeLoading() {
-  return (
-    <main className="min-h-screen bg-[#f7f4ec] px-4 py-5 text-stone-950">
-      <div className="mx-auto max-w-3xl rounded-md border border-stone-200 bg-white p-5 text-[14px] font-bold">
-        練習ページを準備しています。
-      </div>
-    </main>
-  );
-}
+function getPracticePromptPanel(input: {
+  topic: PracticeTopic;
+  topicStarted: boolean;
+  questionShown: boolean;
+  questionLoading: boolean;
+  questionError: string;
+}): PromptPanelState {
+  if (!input.topicStarted) {
+    return {
+      title: "練習を開始します",
+      body: "本人用と介護者用のスマートフォンマイクを接続したら、「練習を開始する」を押してください。話題が表示され、音声で読み上げられます。",
+      tone: "status",
+    };
+  }
 
-function MicStatusRow(props: { label: string; status: RemoteMicRoleStatus }) {
-  const ready = props.status.ready;
-  const captureState = props.status.captureState ?? "idle";
-  const value = ready
-    ? captureState === "suppressed"
-      ? "AI音声中ミュート"
-      : "接続済み"
-    : props.status.status === "connected"
-      ? "接続確認中"
-      : "未接続";
+  if (input.questionLoading) {
+    return {
+      title: "AIの質問を準備しています",
+      body: "少しお待ちください。",
+      tone: "status",
+    };
+  }
 
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
-      <span className="text-[12px] font-bold text-stone-600">{props.label}</span>
-      <span
-        className={`rounded-md px-2 py-0.5 text-[11px] font-black ${
-          ready ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-900"
-        }`}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
+  if (input.questionShown) {
+    return {
+      title: "AIの質問",
+      body: input.topic.fixedQuestion,
+      tone: input.questionError ? "error" : "question",
+    };
+  }
 
-function LiveSpeechBubble(props: { transcript: LiveTranscript }) {
-  const isCaregiver = props.transcript.role === "caregiver";
-  return (
-    <div className={`flex ${isCaregiver ? "justify-end" : "justify-start"}`}>
-      <article
-        className={`max-w-[88%] rounded-md border px-3 py-1.5 shadow-sm ${
-          isCaregiver
-            ? "border-sky-200 bg-sky-50 text-sky-950"
-            : "border-emerald-200 bg-emerald-50 text-stone-950"
-        } border-dashed opacity-75`}
-      >
-        <div className="mb-0.5 flex items-center justify-between gap-3">
-          <div className={`text-[10px] font-black ${isCaregiver ? "text-sky-700" : "text-emerald-700"}`}>
-            {isCaregiver ? "介護者" : "本人"}
-          </div>
-          <div className="rounded-md bg-white/70 px-2 py-0.5 text-[10px] font-black">
-            認識中
-          </div>
-        </div>
-        <p className="whitespace-pre-wrap break-words text-[14px] leading-snug">
-          {props.transcript.text}
-        </p>
-      </article>
-    </div>
-  );
-}
-
-function SpeechBubble(props: { utterance: PracticeUtterance }) {
-  const isCaregiver = props.utterance.speaker === "caregiver";
-  return (
-    <div className={`flex ${isCaregiver ? "justify-end" : "justify-start"}`}>
-      <article
-        className={`max-w-[88%] rounded-md border px-3 py-1.5 shadow-sm ${
-          isCaregiver
-            ? "border-sky-700 bg-sky-700 text-white"
-            : "border-stone-200 bg-[#fffdf7] text-stone-950"
-        }`}
-      >
-        <div className={`mb-0.5 text-[10px] font-black ${isCaregiver ? "text-sky-100" : "text-emerald-700"}`}>
-          {isCaregiver ? "介護者" : "本人"}
-        </div>
-        <p className="whitespace-pre-wrap break-words text-[14px] leading-snug">
-          {props.utterance.text}
-        </p>
-        <time className={`mt-1 block text-[10px] font-bold ${isCaregiver ? "text-sky-100" : "text-stone-400"}`}>
-          {formatDateTime(props.utterance.created_at)}
-        </time>
-      </article>
-    </div>
-  );
-}
-
-function ActionButton(props: {
-  label: string;
-  busy: boolean;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={props.disabled}
-      onClick={props.onClick}
-      className="min-h-12 rounded-md border border-stone-300 bg-white px-3 text-[14px] font-black text-stone-800 shadow-sm active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-200 disabled:text-stone-400"
-    >
-      {props.busy ? "処理中" : props.label}
-    </button>
-  );
+  return {
+    title: input.topic.title,
+    body: input.topic.openingPrompt,
+    tone: "switch",
+  };
 }
 
 async function fetchFixedRemoteMicStatus(sessionId: string) {
@@ -877,10 +807,11 @@ async function updateAiSpeechState(input: {
 }
 
 async function cleanupPracticeSession(sessionId: string) {
-  await fetch(`/api/session/practice?sessionId=${encodeURIComponent(sessionId)}`, {
+  const response = await fetch(`/api/session/practice?sessionId=${encodeURIComponent(sessionId)}`, {
     method: "DELETE",
     keepalive: true,
   });
+  if (!response.ok) throw new Error(`practice cleanup failed: ${response.status}`);
 }
 
 async function waitForRemoteMicCaptureState(input: {
@@ -997,40 +928,6 @@ function getAiSpeechStateRevision(response: AiSpeechStateResponse | null) {
   return typeof revision === "number" && Number.isFinite(revision) ? revision : null;
 }
 
-function createConversationEntries(
-  utterances: PracticeUtterance[],
-  liveTranscripts: LiveTranscript[],
-) {
-  const finalSourceGroupIds = new Set(
-    utterances
-      .map((utterance) => utterance.source_group_id?.trim())
-      .filter((sourceGroupId): sourceGroupId is string => Boolean(sourceGroupId)),
-  );
-  return [
-    ...utterances.map((utterance) => ({
-      kind: "final" as const,
-      key: utterance.source_group_id || utterance.id,
-      createdAt: utterance.created_at,
-      utterance,
-    })),
-    ...liveTranscripts
-      .filter((transcript) => !finalSourceGroupIds.has(transcript.transcriptId))
-      .map((transcript) => ({
-        kind: "live" as const,
-        key: transcript.key,
-        createdAt:
-          transcript.startedAt ??
-          transcript.firstPartialAt ??
-          transcript.finalizedAt ??
-          new Date().toISOString(),
-        transcript,
-      })),
-  ].sort(
-    (left, right) =>
-      new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime(),
-  );
-}
-
 function normalizeRemoteMicStatuses(
   roles: Record<Speaker, RemoteMicRoleStatus>,
 ): Record<Speaker, RemoteMicRoleStatus> {
@@ -1058,6 +955,7 @@ function normalizeRoleStatus(
     ready,
     readyReason: ready ? null : heartbeatFresh ? "realtime_disconnected" : "heartbeat_stale",
     lastHeartbeatAt: status?.lastSeenAt ?? null,
+    lastSeenAt: status?.lastSeenAt ?? null,
     muted: status?.muted ?? true,
     realtimeConnected: status?.realtimeConnected ?? false,
     captureState: status?.captureState ?? "idle",
@@ -1099,32 +997,34 @@ function getCurrentInstruction(input: {
   bothMicsReady: boolean;
   questionLoading: boolean;
   speechPhase: SpeechPhase;
+  questionShown: boolean;
+  topicStarted: boolean;
+  hasSpokenAfterTopicStart: boolean;
+  isSecondTopic: boolean;
 }) {
   if (!input.bothMicsReady) {
-    return "スマートフォンマイクを2台とも接続してください。接続後、最初の話題を読み上げます。";
+    return "本人用と介護者用のスマートフォンマイクを接続してください。接続後、最初の話題を読み上げます。";
   }
   if (input.speechPhase !== "idle") {
-    return "AI音声の読み上げ中です。マイクが一時的にミュートされ、読み上げ後に自動復帰します。";
+    return "AI音声の読み上げ中です。マイクは一時的にミュートされ、読み上げ後に自動復帰します。";
   }
-  if (input.questionLoading) return "AIの質問を生成しています。少しお待ちください。";
-  if (input.step === "question") {
-    return "AIの質問表示と読み上げを確認したら、「次の話題へ」を押してください。";
+  if (!input.topicStarted) {
+    return "両方のマイクが接続されました。「練習を開始する」を押して、話題の表示と読み上げを確認してください。";
   }
-  if (input.step === "second-topic") {
-    return "2つ目の話題について少し話したら、「練習を終了する」を押してください。";
+  if (input.questionLoading) return "AIの質問を表示して読み上げます。少しお待ちください。";
+  if (input.questionShown && input.isSecondTopic) {
+    return "質問の表示と読み上げを確認したら、「練習を終了する」を押してください。";
   }
-  return "表示された話題について話し、「AIに質問してもらう」を押してください。";
-}
-
-function formatDateTime(value: string | undefined) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-
-  return date.toLocaleTimeString("ja-JP", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  if (input.questionShown) {
+    return "質問の表示と読み上げを確認したら、「次の話題へ」を押してください。";
+  }
+  if (!input.hasSpokenAfterTopicStart) {
+    return "話題について短くお話しください。発話が会話ログに表示されたら、AI質問のボタンを押せます。";
+  }
+  if (input.step === "setup") {
+    return "マイク接続が完了したら、表示された話題について普段どおり話してください。";
+  }
+  return "少し話したら「AIに質問してもらう」を押してください。";
 }
 
 function sleep(ms: number) {

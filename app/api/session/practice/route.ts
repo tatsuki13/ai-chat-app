@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "../../../../lib/prisma";
 import {
   clearFixedRemoteMicActiveSession,
+  getFixedRemoteMicActiveSession,
   setFixedRemoteMicActiveSession,
 } from "../../../../lib/remote-mic/active-session-db";
 import { clearFixedRemoteMicRoleStates } from "../../../../lib/remote-mic/fixed-role-state-db";
@@ -10,6 +11,17 @@ export const runtime = "nodejs";
 
 export async function POST() {
   try {
+    const previousActive = await getFixedRemoteMicActiveSession();
+    if (previousActive?.mode === "practice") {
+      await clearFixedRemoteMicActiveSession(previousActive.sessionId);
+      await clearFixedRemoteMicRoleStates(previousActive.sessionId);
+      await prisma.session
+        .delete({
+          where: { id: previousActive.sessionId },
+        })
+        .catch(() => undefined);
+    }
+
     const session = await prisma.session.create({
       data: {
         condition: "practice",

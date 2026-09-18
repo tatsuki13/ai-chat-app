@@ -28,6 +28,12 @@ import {
   type LiveTranscriptEvent,
   type RemoteMicRealtimeEvent,
 } from "../../lib/remote-mic/control-events";
+import {
+  ActionButton as SharedActionButton,
+  PromptPanel as SharedPromptPanel,
+  RemoteMicConversationBubble as SharedRemoteMicConversationBubble,
+  createConversationEntries as createSharedConversationEntries,
+} from "./session-ui";
 
 type Speaker = "caregiver" | "elder";
 type SpeakerRole = Speaker;
@@ -553,7 +559,7 @@ function SessionPageClient() {
   const currentTopic = DISCUSSION_TOPICS[currentTopicIndex] ?? DISCUSSION_TOPICS[0];
   const nextTopic = DISCUSSION_TOPICS[currentTopicIndex + 1] ?? null;
   const visibleUtterances = limitUtteranceState(utterances);
-  const visibleConversationEntries = createConversationEntries(
+  const visibleConversationEntries = createSharedConversationEntries(
     visibleUtterances,
     Object.values(liveTranscripts),
   );
@@ -3065,6 +3071,14 @@ async function completeSession() {
                     >
                       対話を開始
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => router.push("/session/practice")}
+                      disabled={Boolean(busyAction) || dialogueStarted}
+                      className="min-h-8 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 shadow-sm active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
+                    >
+                      操作を練習する
+                    </button>
                   </div>
                 </div>
                 {idError ? (
@@ -3102,7 +3116,7 @@ async function completeSession() {
             />
           </div>
           <div className="grid gap-4 lg:grid-cols-[minmax(0,860px)_240px] lg:items-start">
-            <PromptPanel
+            <SharedPromptPanel
               prompt={promptPanel}
               topicTitle={currentTopic.title}
               topicIndex={currentTopicIndex + 1}
@@ -3110,21 +3124,21 @@ async function completeSession() {
               aiSpeechActive={aiSpeechActive}
             />
             <div className="grid grid-cols-1 gap-2">
-              <ActionButton
+              <SharedActionButton
                 label={"AI\u8cea\u554f\u751f\u6210"}
                 tone="blue"
                 busy={busyAction === "next_question"}
                 disabled={!session || Boolean(busyAction)}
                 onClick={() => handleAction("next_question")}
               />
-              <ActionButton
+              <SharedActionButton
                 label={"\u6b21\u306e\u8a71\u984c\u3078"}
                 tone="emerald"
                 busy={busyAction === "switch_topic"}
                 disabled={!session || Boolean(busyAction)}
                 onClick={() => handleAction("switch_topic")}
               />
-              <ActionButton
+              <SharedActionButton
                 label={"\u5168\u4f53\u7d42\u4e86\u78ba\u8a8d"}
                 tone="amber"
                 busy={busyAction === "check_end"}
@@ -3177,7 +3191,7 @@ async function completeSession() {
                       </div>
                     ) : null}
                     {visibleConversationEntries.map((entry) => (
-                      <RemoteMicConversationBubble
+                      <SharedRemoteMicConversationBubble
                         key={entry.key}
                         entry={entry}
                         onUpdate={handleUpdateUtterance}
