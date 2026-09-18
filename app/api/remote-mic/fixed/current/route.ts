@@ -33,6 +33,7 @@ export async function GET(request: Request) {
     active: {
       sessionId: active.sessionId,
       participantCode: active.participantCode,
+      mode: active.mode,
       endedAt: active.endedAt,
       dialogueStartedAt: active.dialogueStartedAt,
       roleState,

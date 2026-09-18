@@ -104,6 +104,7 @@ export async function POST(request: Request) {
       const session = await prisma.session.findUnique({
         where: { id: input.sessionId },
         select: {
+          condition: true,
           startedAt: true,
           dialogueStartedAt: true,
           currentTopicId: true,
@@ -113,6 +114,21 @@ export async function POST(request: Request) {
 
       if (!session) {
         return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+
+      if (active.mode === "practice" || session.condition === "practice") {
+        console.info("[remote-mic realtime transcript practice not saved]", {
+          sessionId: input.sessionId,
+          role: input.role,
+          streamId: input.streamId,
+          transcriptId: input.transcriptId,
+          textLength: input.text.length,
+        });
+        return NextResponse.json({
+          ok: true,
+          outcome: "created",
+          mode: "practice",
+        });
       }
 
       const timing = createUtteranceTiming({

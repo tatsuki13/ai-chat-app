@@ -10,6 +10,7 @@ export async function getFixedRemoteMicActiveSession() {
         select: {
           id: true,
           participantCode: true,
+          condition: true,
           endedAt: true,
           dialogueStartedAt: true,
         },
@@ -24,6 +25,7 @@ export async function getFixedRemoteMicActiveSession() {
     channel: active.channel,
     sessionId: active.session.id,
     participantCode: active.session.participantCode,
+    mode: active.session.condition === "practice" ? "practice" as const : "experiment" as const,
     endedAt: active.session.endedAt?.toISOString() ?? null,
     dialogueStartedAt: active.session.dialogueStartedAt?.toISOString() ?? null,
     activatedAt: active.activatedAt.toISOString(),
@@ -37,6 +39,7 @@ export async function setFixedRemoteMicActiveSession(sessionId: string) {
     select: {
       id: true,
       participantCode: true,
+      condition: true,
       endedAt: true,
       dialogueStartedAt: true,
     },
@@ -63,6 +66,7 @@ export async function setFixedRemoteMicActiveSession(sessionId: string) {
       channel: active.channel,
       sessionId: session.id,
       participantCode: session.participantCode,
+      mode: session.condition === "practice" ? "practice" as const : "experiment" as const,
       endedAt: session.endedAt?.toISOString() ?? null,
       dialogueStartedAt: session.dialogueStartedAt?.toISOString() ?? null,
       activatedAt: active.activatedAt.toISOString(),

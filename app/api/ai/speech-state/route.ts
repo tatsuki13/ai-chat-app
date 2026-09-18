@@ -148,8 +148,10 @@ async function logPlaybackIfRequested(input: {
 
   const session = await prisma.session.findUnique({
     where: { id: input.sessionId },
-    select: { participantCode: true },
+    select: { participantCode: true, condition: true },
   });
+  if (session?.condition === "practice") return;
+
   const requestedAt = parseDate(input.body?.requestedAt);
   const playbackStartedAt = parseDate(input.body?.playbackStartedAt);
   const playbackEndedAt = parseDate(input.body?.playbackEndedAt);

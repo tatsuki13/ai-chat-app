@@ -66,6 +66,7 @@ function serializeState(
   return {
     sessionId: state.sessionId,
     participantCode: state.participantCode,
+    mode: state.mode,
     endedAt: state.endedAt,
     dialogueStartedAt: state.dialogueStartedAt,
     roles,
