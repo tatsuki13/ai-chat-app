@@ -488,6 +488,7 @@ export function ActionButton(props: {
 
 export function RemoteMicStatus(props: {
   statuses: Record<SessionSpeaker, RemoteMicRoleStatusLike>;
+  showOpenLinks?: boolean;
 }) {
   return (
     <section className="rounded-md border border-stone-200 bg-white p-3 shadow-sm">
@@ -496,22 +497,24 @@ export function RemoteMicStatus(props: {
         <MicStatusRow label="本人用マイク" status={props.statuses.elder} />
         <MicStatusRow label="介護者用マイク" status={props.statuses.caregiver} />
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <a
-          href="/mic/elder"
-          target="_blank"
-          className="rounded-md border border-stone-300 bg-white px-3 py-2 text-center text-[12px] font-black text-stone-700"
-        >
-          本人用を開く
-        </a>
-        <a
-          href="/mic/caregiver"
-          target="_blank"
-          className="rounded-md border border-stone-300 bg-white px-3 py-2 text-center text-[12px] font-black text-stone-700"
-        >
-          介護者用を開く
-        </a>
-      </div>
+      {props.showOpenLinks ? (
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <a
+            href="/mic/elder"
+            target="_blank"
+            className="rounded-md border border-stone-300 bg-white px-3 py-2 text-center text-[12px] font-black text-stone-700"
+          >
+            本人用を開く
+          </a>
+          <a
+            href="/mic/caregiver"
+            target="_blank"
+            className="rounded-md border border-stone-300 bg-white px-3 py-2 text-center text-[12px] font-black text-stone-700"
+          >
+            介護者用を開く
+          </a>
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   createLiveTranscriptKey,
   type LiveTranscriptEvent,
@@ -41,6 +41,11 @@ type PracticeTopic = {
   title: string;
   openingPrompt: string;
   fixedQuestion: string;
+};
+type SpokenContentInput = {
+  contentType: "topic" | "question";
+  text: string;
+  topicId: string | null;
 };
 type PracticeUtterance = UtteranceLike & {
   speaker: Speaker;
@@ -91,6 +96,7 @@ const REMOTE_MIC_CONTROL_STATE_POLL_MS = 250;
 const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45000;
 const BROWSER_SPEECH_ENABLED =
   process.env.NEXT_PUBLIC_BROWSER_SPEECH_ENABLED !== "false";
+const PARTICIPANT_ID_DRAFT_QUERY_PARAM = "participantId";
 
 export default function PracticePage() {
   return (
@@ -102,6 +108,9 @@ export default function PracticePage() {
 
 function PracticePageClient() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const participantIdDraftFromUrl =
+    searchParams.get(PARTICIPANT_ID_DRAFT_QUERY_PARAM)?.trim() ?? "";
   const [session, setSession] = useState<PracticeSession | null>(null);
   const [topicIndex, setTopicIndex] = useState(0);
   const [step, setStep] = useState<PracticeStep>("setup");
@@ -112,7 +121,11 @@ function PracticePageClient() {
   );
   const [setupError, setSetupError] = useState("");
   const [statusText, setStatusText] = useState("練習ページを準備しています");
+  const [setupStarting, setSetupStarting] = useState(false);
   const [questionLoading, setQuestionLoading] = useState(false);
+  const [retryingSpeech, setRetryingSpeech] = useState(false);
+  const [retryableSpokenContent, setRetryableSpokenContent] =
+    useState<SpokenContentInput | null>(null);
   const [questionError, setQuestionError] = useState("");
   const [speechPhase, setSpeechPhase] = useState<SpeechPhase>("idle");
   const [spokenTopicIds, setSpokenTopicIds] = useState<Record<string, boolean>>({});
@@ -125,6 +138,8 @@ function PracticePageClient() {
     emptyRemoteMicStatuses(),
   );
   const questionInFlightRef = useRef<Promise<void> | null>(null);
+  const logScrollRef = useRef<HTMLDivElement | null>(null);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
   const activePlaybackRef = useRef<{
     sessionId: string;
     playbackId: string;
@@ -134,6 +149,7 @@ function PracticePageClient() {
   const currentTopic = PRACTICE_TOPICS[topicIndex] ?? PRACTICE_TOPICS[0];
   const bothMicsReady = getMissingRoles(remoteMicStatuses).length === 0;
   const missingRoles = getMissingRoles(remoteMicStatuses);
+  const micSessionActive = Boolean(session?.id);
   const questionShown = Boolean(questionShownTopicIds[currentTopic.id]);
   const topicStarted = Boolean(spokenTopicIds[currentTopic.id]);
   const topicStartUtteranceCount = topicStartUtteranceCounts[currentTopic.id] ?? utterances.length;
@@ -143,8 +159,16 @@ function PracticePageClient() {
     utterances,
     Object.values(liveTranscripts),
   );
+  const latestConversationEntry = conversationEntries.at(-1);
+  const latestConversationMarker = latestConversationEntry
+    ? latestConversationEntry.kind === "live"
+      ? `${latestConversationEntry.key}:${latestConversationEntry.transcript.revision}:${latestConversationEntry.transcript.text}`
+      : `${latestConversationEntry.key}:${latestConversationEntry.utterance.text}`
+    : "";
   const promptPanel = getPracticePromptPanel({
     topic: currentTopic,
+    micSessionActive,
+    setupStarting,
     topicStarted,
     questionShown,
     questionLoading,
@@ -153,6 +177,8 @@ function PracticePageClient() {
   const currentInstruction = getCurrentInstruction({
     step,
     bothMicsReady,
+    micSessionActive,
+    setupStarting,
     questionLoading,
     speechPhase,
     questionShown,
@@ -160,7 +186,10 @@ function PracticePageClient() {
     hasSpokenAfterTopicStart,
     isSecondTopic: topicIndex > 0,
   });
-  const micIssue = useMemo(() => getMissingMicMessage(missingRoles), [missingRoles]);
+  const micIssue = useMemo(
+    () => (micSessionActive ? getMissingMicMessage(missingRoles) : ""),
+    [micSessionActive, missingRoles],
+  );
 
   useEffect(() => {
     sessionRef.current = session;
@@ -171,45 +200,23 @@ function PracticePageClient() {
   }, [remoteMicStatuses]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function createPracticeSession() {
-      setSetupError("");
-      setCleanupError("");
-      try {
-        const response = await fetch("/api/session/practice", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "practice" }),
+    const frame = window.requestAnimationFrame(() => {
+      const container = logScrollRef.current;
+      if (container) {
+        container.scrollTo({
+          top: container.scrollHeight,
+          behavior: "smooth",
         });
-        if (!response.ok) throw new Error(`practice session failed: ${response.status}`);
-
-        const data = (await response.json()) as {
-          session: PracticeSession;
-          active?: FixedRemoteMicActiveState;
-        };
-        if (cancelled) {
-          void cleanupPracticeSession(data.session.id);
-          return;
-        }
-
-        sessionRef.current = data.session;
-        setSession(data.session);
-        if (data.active?.roles) {
-          setRemoteMicStatuses(normalizeRemoteMicStatuses(data.active.roles));
-        }
-        setStatusText("スマートフォンマイクを接続してください");
-      } catch (error) {
-        console.warn("[practice setup failed]", error);
-        setSetupError("練習ページを準備できませんでした。実験担当者にお知らせください。");
-        setStatusText("準備エラー");
       }
-    }
 
-    void createPracticeSession();
+      logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    });
 
+    return () => window.cancelAnimationFrame(frame);
+  }, [latestConversationMarker]);
+
+  useEffect(() => {
     return () => {
-      cancelled = true;
       const practiceSession = sessionRef.current;
       if (practiceSession) {
         void cleanupPracticeSession(practiceSession.id).catch((error) => {
@@ -219,6 +226,42 @@ function PracticePageClient() {
       cancelBrowserSpeech();
     };
   }, []);
+
+  async function handlePreparePracticeSession() {
+    if (setupStarting || sessionRef.current) return;
+
+    setSetupStarting(true);
+    setSetupError("");
+    setCleanupError("");
+    setStatusText("練習用マイク接続を準備しています");
+
+    try {
+      const response = await fetch("/api/session/practice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "practice" }),
+      });
+      if (!response.ok) throw new Error(`practice session failed: ${response.status}`);
+
+      const data = (await response.json()) as {
+        session: PracticeSession;
+        active?: FixedRemoteMicActiveState;
+      };
+
+      sessionRef.current = data.session;
+      setSession(data.session);
+      if (data.active?.roles) {
+        setRemoteMicStatuses(normalizeRemoteMicStatuses(data.active.roles));
+      }
+      setStatusText("スマートフォンマイクを接続してください");
+    } catch (error) {
+      console.warn("[practice setup failed]", error);
+      setSetupError("練習用マイク接続を開始できませんでした。もう一度お試しください。");
+      setStatusText("準備エラー");
+    } finally {
+      setSetupStarting(false);
+    }
+  }
 
   useEffect(() => {
     if (!session?.id) return;
@@ -268,6 +311,7 @@ function PracticePageClient() {
 
     setSetupError("");
     setQuestionError("");
+    setRetryableSpokenContent(null);
     setTopicStartUtteranceCounts((current) => ({
       ...current,
       [currentTopic.id]: utterances.length,
@@ -337,13 +381,16 @@ function PracticePageClient() {
   }
 
   function handleNextOrFinish() {
+    if (!topicStarted || speechPhase !== "idle") return;
+
     if (topicIndex < PRACTICE_TOPICS.length - 1) {
       const nextIndex = topicIndex + 1;
       const nextTopic = PRACTICE_TOPICS[nextIndex];
-      if (!nextTopic || speechPhase !== "idle" || !questionShown) return;
+      if (!nextTopic) return;
 
       setTopicIndex(nextIndex);
       setQuestionError("");
+      setRetryableSpokenContent(null);
       setStep("talk");
       setTopicStartUtteranceCounts((current) => ({
         ...current,
@@ -363,8 +410,22 @@ function PracticePageClient() {
       return;
     }
 
-    if (!questionShown || speechPhase !== "idle") return;
     void handleFinishPractice();
+  }
+
+  async function handleRetrySpokenContent() {
+    const retryInput = retryableSpokenContent;
+    if (!retryInput || retryingSpeech || speechPhase !== "idle" || !bothMicsReady) return;
+
+    setRetryingSpeech(true);
+    setSetupError("");
+    setQuestionError("");
+    setStatusText("もう一度読み上げています");
+    try {
+      await playSpokenContent(retryInput);
+    } finally {
+      setRetryingSpeech(false);
+    }
   }
 
   async function handleFinishPractice() {
@@ -400,11 +461,19 @@ function PracticePageClient() {
     setSpokenTopicIds({});
     setQuestionShownTopicIds({});
     setTopicStartUtteranceCounts({});
+    setRetryableSpokenContent(null);
+    setRetryingSpeech(false);
+    setSetupStarting(false);
     setSpeechPhase("idle");
   }
 
   function handleProceedToExperiment() {
-    router.push("/session");
+    const params = new URLSearchParams();
+    if (participantIdDraftFromUrl) {
+      params.set(PARTICIPANT_ID_DRAFT_QUERY_PARAM, participantIdDraftFromUrl);
+    }
+    const query = params.toString();
+    router.push(query ? `/session?${query}` : "/session");
   }
 
   function handleRemoteMicRealtimeEvent(event: RemoteMicRealtimeEvent) {
@@ -489,11 +558,7 @@ function PracticePageClient() {
     }));
   }
 
-  async function playSpokenContent(input: {
-    contentType: "topic" | "question";
-    text: string;
-    topicId: string | null;
-  }) {
+  async function playSpokenContent(input: SpokenContentInput) {
     const currentSession = sessionRef.current;
     const text = input.text.trim();
     if (!currentSession || !text || activePlaybackRef.current) return;
@@ -502,6 +567,7 @@ function PracticePageClient() {
     let playbackStatus: PlaybackStatus = "failed";
     let playbackErrorCode: string | null = null;
     let speechStateStarted = false;
+    let shouldOfferRetry = false;
     const ackTargetRoles = getConnectedRoles(remoteMicStatusesRef.current);
     activePlaybackRef.current = {
       sessionId: currentSession.id,
@@ -532,6 +598,7 @@ function PracticePageClient() {
         playbackErrorCode = suppressed.reason;
         setSetupError(getMicControlError("マイクの一時ミュートを確認できませんでした", suppressed.roles));
         setSpeechPhase("error");
+        shouldOfferRetry = true;
         return;
       }
 
@@ -542,15 +609,18 @@ function PracticePageClient() {
         });
         playbackStatus = speechResult.status;
         playbackErrorCode = speechResult.errorCode;
+        shouldOfferRetry = speechResult.status !== "completed";
       } else {
         playbackStatus = "text_only";
         playbackErrorCode = "browser_speech_unavailable";
+        shouldOfferRetry = true;
       }
     } catch (error) {
       playbackStatus = "failed";
       playbackErrorCode =
         error instanceof Error ? error.name || error.message : "playback_failed";
       setSpeechPhase("error");
+      shouldOfferRetry = true;
     } finally {
       if (speechStateStarted) {
         setSpeechPhase(playbackStatus === "completed" ? "echo-guard" : "resuming");
@@ -576,6 +646,7 @@ function PracticePageClient() {
       }
 
       activePlaybackRef.current = null;
+      setRetryableSpokenContent(shouldOfferRetry ? input : null);
       setSpeechPhase("idle");
     }
   }
@@ -619,7 +690,7 @@ function PracticePageClient() {
             </span>
           </summary>
           <div className="whitespace-pre-line border-t border-stone-100 px-4 pb-3 pt-2 text-[13px] font-semibold leading-relaxed text-stone-600">
-            {"これから操作の練習を行います。\n画面に表示された話題について、普段どおりお話しください。\n途中で「AIに質問してもらう」と「次の話題へ」を一度ずつ試します。\nこの練習内容は、本番の記録には含まれません。"}
+            {"これから操作の練習を行います。\n画面に表示された話題について、普段どおりお話しください。\n途中で「AI質問生成」と「次の話題へ」を一度ずつ試します。\nこの練習内容は、本番の記録には含まれません。"}
           </div>
         </details>
       }
@@ -666,18 +737,28 @@ function PracticePageClient() {
       actionPanel={
         <div className="grid grid-cols-1 gap-2">
           <ActionButton
-            label={topicStarted ? "AIに質問してもらう" : "練習を開始する"}
+            label={
+              !micSessionActive
+                ? "練習用マイク接続を開始"
+                : topicStarted
+                  ? "AI質問生成"
+                  : "練習を開始する"
+            }
             tone={topicStarted ? "blue" : "emerald"}
-            busy={questionLoading}
+            busy={setupStarting || questionLoading}
             disabled={
-              !session ||
-              !bothMicsReady ||
+              setupStarting ||
               questionLoading ||
+              (micSessionActive && !bothMicsReady) ||
               (topicStarted && questionShown) ||
               (topicStarted && !hasSpokenAfterTopicStart) ||
               speechPhase !== "idle"
             }
             onClick={() => {
+              if (!micSessionActive) {
+                void handlePreparePracticeSession();
+                return;
+              }
               if (topicStarted) {
                 void handleGeneratePracticeQuestion();
                 return;
@@ -689,8 +770,20 @@ function PracticePageClient() {
             label={topicIndex < PRACTICE_TOPICS.length - 1 ? "次の話題へ" : "練習を終了する"}
             tone={topicIndex < PRACTICE_TOPICS.length - 1 ? "emerald" : "amber"}
             busy={false}
-            disabled={!session || !questionShown || speechPhase !== "idle"}
+            disabled={!session || !topicStarted || speechPhase !== "idle"}
             onClick={handleNextOrFinish}
+          />
+          <ActionButton
+            label="もう一度読み上げる"
+            tone="amber"
+            busy={retryingSpeech}
+            disabled={
+              !retryableSpokenContent ||
+              retryingSpeech ||
+              !bothMicsReady ||
+              speechPhase !== "idle"
+            }
+            onClick={() => void handleRetrySpokenContent()}
           />
           <ActionButton
             label="練習を中止する"
@@ -706,6 +799,8 @@ function PracticePageClient() {
           entries={conversationEntries}
           totalCount={utterances.length}
           emptyText="スマートフォンマイクで話すと、ここに発話が表示されます"
+          logScrollRef={logScrollRef}
+          logEndRef={logEndRef}
           editable={false}
         />
       }
@@ -739,11 +834,21 @@ function PracticeLoading() {
 
 function getPracticePromptPanel(input: {
   topic: PracticeTopic;
+  micSessionActive: boolean;
+  setupStarting: boolean;
   topicStarted: boolean;
   questionShown: boolean;
   questionLoading: boolean;
   questionError: string;
 }): PromptPanelState {
+  if (!input.micSessionActive) {
+    return {
+      title: input.setupStarting ? "練習用マイク接続を準備しています" : "練習の準備",
+      body: "本番と同じ方法でスマートフォンマイクを接続します。まず「練習用マイク接続を開始」を押してください。その後、本人用と介護者用のスマートフォンマイクを開いて接続します。",
+      tone: "status",
+    };
+  }
+
   if (!input.topicStarted) {
     return {
       title: "練習を開始します",
@@ -995,6 +1100,8 @@ function getMicControlError(prefix: string, roles: Speaker[]) {
 function getCurrentInstruction(input: {
   step: PracticeStep;
   bothMicsReady: boolean;
+  micSessionActive: boolean;
+  setupStarting: boolean;
   questionLoading: boolean;
   speechPhase: SpeechPhase;
   questionShown: boolean;
@@ -1002,6 +1109,12 @@ function getCurrentInstruction(input: {
   hasSpokenAfterTopicStart: boolean;
   isSecondTopic: boolean;
 }) {
+  if (input.setupStarting) {
+    return "練習用のマイク接続先を準備しています。少しお待ちください。";
+  }
+  if (!input.micSessionActive) {
+    return "まず「練習用マイク接続を開始」を押してください。押すと、スマートフォンマイクがこの練習ページへ接続できるようになります。";
+  }
   if (!input.bothMicsReady) {
     return "本人用と介護者用のスマートフォンマイクを接続してください。接続後、最初の話題を読み上げます。";
   }
@@ -1019,12 +1132,12 @@ function getCurrentInstruction(input: {
     return "質問の表示と読み上げを確認したら、「次の話題へ」を押してください。";
   }
   if (!input.hasSpokenAfterTopicStart) {
-    return "話題について短くお話しください。発話が会話ログに表示されたら、AI質問のボタンを押せます。";
+    return "話題について短くお話しください。次の話題へ進むことも、発話が表示された後にAI質問を試すこともできます。";
   }
   if (input.step === "setup") {
     return "マイク接続が完了したら、表示された話題について普段どおり話してください。";
   }
-  return "少し話したら「AIに質問してもらう」を押してください。";
+  return "少し話したら「AI質問生成」を押してください。";
 }
 
 function sleep(ms: number) {

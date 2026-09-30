@@ -175,6 +175,13 @@ export default function RemoteMicClient(props: {
   }, [remoteMic]);
 
   useEffect(() => {
+    latestAiSpeechRevisionRef.current = 0;
+    activeAiSpeechPlaybackIdRef.current = null;
+    captureBlockedRef.current = false;
+    clearAiSpeechReleaseTimer();
+  }, [remoteMic?.sessionId]);
+
+  useEffect(() => {
     fixedRoleRef.current = fixedRole;
   }, [fixedRole]);
 

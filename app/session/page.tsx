@@ -394,6 +394,8 @@ class ApiRequestError extends Error {
 }
 
 const STORAGE_KEY = "acp-hitl-pending-auto-session-id";
+const PARTICIPANT_ID_DRAFT_STORAGE_KEY = "acp-hitl-participant-id-draft";
+const PARTICIPANT_ID_DRAFT_QUERY_PARAM = "participantId";
 const MAX_RENDERED_UTTERANCES = 30;
 const TOTAL_DIALOGUE_DURATION_MS = 30 * 60 * 1000;
 const BASE_TOPIC_DURATION_MS = Math.floor(
@@ -405,6 +407,7 @@ const TIMER_TICK_MS = 1000;
 const PROMPT_STATUS_RESTORE_DELAY_MS = 2000;
 const PROMPT_ERROR_RESTORE_DELAY_MS = 3000;
 const AI_SPEECH_RELEASE_DELAY_MS = 500;
+const AI_SPEECH_START_TIMEOUT_MS = 5_000;
 const AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS = 45_000;
 const REMOTE_MIC_CONTROL_STATE_TIMEOUT_MS = 8_000;
 const REMOTE_MIC_CONTROL_STATE_POLL_MS = 250;
@@ -450,6 +453,9 @@ function SessionPageClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const requestedSessionId = searchParams.get("sessionId")?.trim() ?? "";
+  const participantIdDraftFromUrl =
+    searchParams.get(PARTICIPANT_ID_DRAFT_QUERY_PARAM)?.trim() ?? "";
+  const searchParamString = searchParams.toString();
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [utterances, setUtterances] = useState<Utterance[]>([]);
   const [utteranceTotal, setUtteranceTotal] = useState(0);
@@ -512,6 +518,9 @@ function SessionPageClient() {
   const [aiProcessingStatus, setAiProcessingStatus] = useState("idle");
   const [activePlaybackControl, setActivePlaybackControl] =
     useState<ActivePlaybackControl | null>(null);
+  const [retryableSpokenContent, setRetryableSpokenContent] =
+    useState<SpokenContentRequest | null>(null);
+  const [retryingSpeech, setRetryingSpeech] = useState(false);
   const [liveTranscripts, setLiveTranscripts] = useState<Record<string, LiveTranscript>>({});
   const [remoteMicControlNotice, setRemoteMicControlNotice] =
     useState<RemoteMicControlNotice>(null);
@@ -628,6 +637,24 @@ function SessionPageClient() {
     remoteMicStatuses.caregiver.ready === true;
 
   useEffect(() => {
+    if (!participantIdDraftFromUrl) return;
+
+    const savedParticipantCode = sessionRef.current?.participant_code?.trim() ?? "";
+    if (!dialogueStarted && !savedParticipantCode) {
+      window.localStorage.setItem(
+        PARTICIPANT_ID_DRAFT_STORAGE_KEY,
+        participantIdDraftFromUrl,
+      );
+      setIdDraft(participantIdDraftFromUrl);
+    }
+
+    const nextParams = new URLSearchParams(searchParamString);
+    nextParams.delete(PARTICIPANT_ID_DRAFT_QUERY_PARAM);
+    const nextQuery = nextParams.toString();
+    router.replace(nextQuery ? `/session?${nextQuery}` : "/session");
+  }, [dialogueStarted, participantIdDraftFromUrl, router, searchParamString]);
+
+  useEffect(() => {
     let ignore = false;
 
     async function boot() {
@@ -726,8 +753,20 @@ function SessionPageClient() {
 
   useEffect(() => {
     if (isEditingId) return;
-    setIdDraft(session?.participant_code ?? "");
-  }, [isEditingId, session?.participant_code]);
+    if (participantIdDraftFromUrl) {
+      setIdDraft(participantIdDraftFromUrl);
+      return;
+    }
+
+    const savedParticipantCode = session?.participant_code?.trim() ?? "";
+    if (savedParticipantCode) {
+      window.localStorage.removeItem(PARTICIPANT_ID_DRAFT_STORAGE_KEY);
+      setIdDraft(savedParticipantCode);
+      return;
+    }
+
+    setIdDraft(window.localStorage.getItem(PARTICIPANT_ID_DRAFT_STORAGE_KEY) ?? "");
+  }, [isEditingId, participantIdDraftFromUrl, session?.participant_code]);
 
   useEffect(() => {
     if (!session?.id) return;
@@ -1803,6 +1842,7 @@ function SessionPageClient() {
       playbackId,
       contentType: input.contentType,
     };
+    setRetryableSpokenContent(null);
     setPlaybackControlValue({
       playbackId,
       contentType: input.contentType,
@@ -1952,7 +1992,24 @@ function SessionPageClient() {
       }
 
       aiSpeechPlaybackRef.current = null;
+      setRetryableSpokenContent(
+        playbackStatus === "completed" ? null : input,
+      );
       schedulePendingSpokenContent(currentSession.id);
+    }
+  }
+
+  async function handleRetrySpokenContent() {
+    const retryInput = retryableSpokenContent;
+    if (!retryInput || retryingSpeech || aiSpeechActive) return;
+
+    primeBrowserSpeech();
+    setRetryingSpeech(true);
+    setRemoteMicControlNotice(null);
+    try {
+      await playSpokenContent(retryInput);
+    } finally {
+      setRetryingSpeech(false);
     }
   }
 
@@ -2576,6 +2633,7 @@ function SessionPageClient() {
       }
       setIsEditingId(false);
       setIdDraft(participantCodeInput);
+      window.localStorage.removeItem(PARTICIPANT_ID_DRAFT_STORAGE_KEY);
 
       const activated = await activateFixedRemoteMics(workingSession.id);
       setRemoteMicStatuses(activated.roles);
@@ -2624,6 +2682,34 @@ function SessionPageClient() {
       setRemoteMicConnecting(false);
       setBusyAction(null);
     }
+  }
+
+  function handleParticipantIdDraftChange(value: string) {
+    setIdDraft(value);
+    const normalized = value.trim();
+    if (normalized) {
+      window.localStorage.setItem(PARTICIPANT_ID_DRAFT_STORAGE_KEY, normalized);
+    } else {
+      window.localStorage.removeItem(PARTICIPANT_ID_DRAFT_STORAGE_KEY);
+    }
+  }
+
+  function handleOpenPracticePage() {
+    const normalized = (
+      idDraft.trim() ||
+      sessionRef.current?.participant_code?.trim() ||
+      ""
+    ).trim();
+    if (normalized) {
+      window.localStorage.setItem(PARTICIPANT_ID_DRAFT_STORAGE_KEY, normalized);
+    }
+
+    const params = new URLSearchParams();
+    if (normalized) {
+      params.set(PARTICIPANT_ID_DRAFT_QUERY_PARAM, normalized);
+    }
+    const query = params.toString();
+    router.push(query ? `/session/practice?${query}` : "/session/practice");
   }
 
   function startEditingId() {
@@ -2683,6 +2769,7 @@ function SessionPageClient() {
       setRemoteMicStatuses(emptyFixedRemoteMicStatus().roles);
       setIsEditingId(false);
       setIdDraft("");
+      window.localStorage.removeItem(PARTICIPANT_ID_DRAFT_STORAGE_KEY);
       router.replace(`/session?sessionId=${encodeURIComponent(updatedSession.id)}`);
       setStatusText("保存済み");
     } catch (error) {
@@ -2931,6 +3018,8 @@ async function completeSession() {
     const now = Date.now();
 
     setCurrentTopicIndex(0);
+    setRetryableSpokenContent(null);
+    setRetryingSpeech(false);
     topicStartedAtRef.current = null;
     timerPausedStartedAtRef.current = null;
     timerRunningRef.current = false;
@@ -3057,7 +3146,7 @@ async function completeSession() {
                     <input
                       ref={idInputRef}
                       value={idDraft}
-                      onChange={(event) => setIdDraft(event.target.value)}
+                      onChange={(event) => handleParticipantIdDraftChange(event.target.value)}
                       onKeyDown={handleIdKeyDown}
                       placeholder="参加者ID"
                       className="h-8 min-w-[180px] rounded-md border border-emerald-300 bg-white px-2 text-[13px] font-black text-stone-950 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 disabled:bg-stone-100 disabled:text-stone-400"
@@ -3073,7 +3162,7 @@ async function completeSession() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => router.push("/session/practice")}
+                      onClick={handleOpenPracticePage}
                       disabled={Boolean(busyAction) || dialogueStarted}
                       className="min-h-8 rounded-md border border-stone-300 bg-white px-3 text-[12px] font-black text-stone-700 shadow-sm active:scale-[0.99] disabled:border-stone-200 disabled:bg-stone-100 disabled:text-stone-400"
                     >
@@ -3145,6 +3234,15 @@ async function completeSession() {
                 disabled={!session || Boolean(busyAction)}
                 onClick={() => handleAction("check_end")}
               />
+              {retryableSpokenContent ? (
+                <SharedActionButton
+                  label={"\u3082\u3046\u4e00\u5ea6\u8aad\u307f\u4e0a\u3052\u308b"}
+                  tone="amber"
+                  busy={retryingSpeech}
+                  disabled={Boolean(busyAction) || retryingSpeech || aiSpeechActive}
+                  onClick={() => void handleRetrySpokenContent()}
+                />
+              ) : null}
             </div>
           </div>
         </div>
@@ -5098,6 +5196,7 @@ function playBrowserSpeech(
     let settled = false;
     let startedAt: string | null = null;
     let timeoutId: number;
+    let startTimeoutId: number;
     const utterance = new SpeechSynthesisUtterance(text);
     const voices = window.speechSynthesis.getVoices();
     const japaneseVoice =
@@ -5116,9 +5215,11 @@ function playBrowserSpeech(
       if (settled) return;
       settled = true;
       window.clearTimeout(timeoutId);
+      window.clearTimeout(startTimeoutId);
       resolve(result);
     };
     utterance.onstart = () => {
+      window.clearTimeout(startTimeoutId);
       startedAt = new Date().toISOString();
       onStart(startedAt);
     };
@@ -5150,8 +5251,20 @@ function playBrowserSpeech(
         errorCode: "speech_safety_timeout",
       });
     }, AI_SPEECH_CLIENT_SAFETY_TIMEOUT_MS);
-    window.speechSynthesis.speak(utterance);
-    window.setTimeout(() => window.speechSynthesis.resume(), 0);
+    startTimeoutId = window.setTimeout(() => {
+      window.speechSynthesis.cancel();
+      finish({
+        startedAt: null,
+        endedAt: new Date().toISOString(),
+        status: "failed",
+        errorCode: "speech_start_timeout",
+      });
+    }, AI_SPEECH_START_TIMEOUT_MS);
+    window.setTimeout(() => {
+      if (settled) return;
+      window.speechSynthesis.speak(utterance);
+      window.speechSynthesis.resume();
+    }, 50);
   });
 }
 
