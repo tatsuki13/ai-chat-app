@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { DialogueTimer } from "../../lib/dialogue-timer";
 import {
   buildSlotControlDebugState,
   DISCUSSION_TOPIC,
@@ -398,9 +399,7 @@ const PARTICIPANT_ID_DRAFT_STORAGE_KEY = "acp-hitl-participant-id-draft";
 const PARTICIPANT_ID_DRAFT_QUERY_PARAM = "participantId";
 const MAX_RENDERED_UTTERANCES = 30;
 const TOTAL_DIALOGUE_DURATION_MS = 30 * 60 * 1000;
-const BASE_TOPIC_DURATION_MS = Math.floor(
-  TOTAL_DIALOGUE_DURATION_MS / DISCUSSION_TOPICS.length,
-);
+const TIMER_STORAGE_PREFIX = "acp-dialogue-timer-v1:";
 const DECISION_RATIO = 0.6;
 const PROPOSAL_COOLDOWN_MS = 100 * 1000;
 const TIMER_TICK_MS = 1000;
@@ -467,17 +466,24 @@ function SessionPageClient() {
   const [promptPanel, setPromptPanel] = useState<PromptPanelState | null>(
     createOpeningPrompt(),
   );
-  const [currentTopicIndex, setCurrentTopicIndex] = useState(0);
+  const dialogueTimerRef = useRef<DialogueTimer | null>(null);
+  if (dialogueTimerRef.current === null) {
+    dialogueTimerRef.current = new DialogueTimer(
+      TOTAL_DIALOGUE_DURATION_MS, DISCUSSION_TOPICS.length,
+    );
+  }
+  const [timerGeneration, setTimerGeneration] = useState(0);
+  const [timerState, setTimerState] = useState(() => dialogueTimerRef.current!.snapshot());
+  const currentTopicIndex = timerState.topicIndex;
+  const topicTimerStarted = timerState.started;
+  const topicElapsedMs = timerState.topicElapsedMs;
+  const topicTargetMs = timerState.topicTargetMs;
   const [statusText, setStatusText] = useState("準備中");
   const [isEditingId, setIsEditingId] = useState(false);
   const [idDraft, setIdDraft] = useState("");
   const [idError, setIdError] = useState("");
-  const [topicStartedAt, setTopicStartedAt] = useState<number | null>(null);
   const [topicTimerSource, setTopicTimerSource] =
     useState<TopicTimerStartSource | null>(null);
-  const [topicPausedMs, setTopicPausedMs] = useState(0);
-  const [totalActiveElapsedMs, setTotalActiveElapsedMs] = useState(0);
-  const [topicTargetMs, setTopicTargetMs] = useState(BASE_TOPIC_DURATION_MS);
   const [decisionPromptShownByTopic, setDecisionPromptShownByTopic] = useState<
     boolean[]
   >(() => DISCUSSION_TOPICS.map(() => false));
@@ -485,7 +491,6 @@ function SessionPageClient() {
     boolean[]
   >(() => DISCUSSION_TOPICS.map(() => false));
   const [overallEndPromptShown, setOverallEndPromptShown] = useState(false);
-  const [timerNow, setTimerNow] = useState(() => Date.now());
   const [transitionProposal, setTransitionProposal] =
     useState<TopicTransitionProposal | null>(null);
   const [proposalCooldownUntil, setProposalCooldownUntil] = useState(0);
@@ -545,10 +550,7 @@ function SessionPageClient() {
   const pushToTalkPressedRef = useRef(false);
   const pushToTalkStartingRef = useRef(false);
   const pushToTalkActiveRef = useRef(false);
-  const topicStartedAtRef = useRef<number | null>(null);
   const lastSyncedSessionTopicKeyRef = useRef("");
-  const timerPausedStartedAtRef = useRef<number | null>(null);
-  const timerRunningRef = useRef(false);
   const sttEnabledRef = useRef(AUDIO_TRANSCRIPTION_ENABLED);
   const voiceInputServiceRef = useRef<SingleMicInputService | null>(null);
   const latestProcessingSlotRevisionRef = useRef<number | null>(null);
@@ -588,13 +590,9 @@ function SessionPageClient() {
   const speechPhase = activePlaybackControl?.phase ?? "idle";
   const aiSpeechActive = speechPhase !== "idle";
   const blocksConversationTimer = isConversationBlockingBusyAction(busyAction);
-  const topicElapsedMs =
-    topicStartedAt === null
-      ? 0
-      : Math.max(0, timerNow - topicStartedAt - topicPausedMs);
   const totalElapsedWithCurrentMs = Math.min(
     TOTAL_DIALOGUE_DURATION_MS,
-    totalActiveElapsedMs + topicElapsedMs,
+    timerState.completedElapsedMs + topicElapsedMs,
   );
   const totalRemainingMs = Math.max(
     0,
@@ -613,14 +611,15 @@ function SessionPageClient() {
       : 1;
   const isConversationTimerRunning =
     Boolean(session) &&
-    topicStartedAt !== null &&
+    !session?.ended_at &&
+    topicTimerStarted &&
     completionState === "active" &&
     !blocksConversationTimer &&
     !transitionProposal &&
     !aiSpeechActive;
   const timerPausedReason = getTimerPausedReason({
     session,
-    topicStartedAt,
+    topicTimerStarted,
     completionState,
     busyAction,
     transitionProposal,
@@ -669,11 +668,11 @@ function SessionPageClient() {
             const restored = await fetchSessionDetail(requestedSessionId);
             if (!ignore) {
               window.localStorage.removeItem(STORAGE_KEY);
+              sessionRef.current = restored.session;
               setSession(restored.session);
               setUtterances(restored.utterances);
               setUtteranceTotal(restored.utterance_count);
-              resetTopicTiming();
-              applyDialogueStartedAt(restored.session.dialogue_started_at);
+              restoreTopicTiming(restored.session.id);
               setStatusText("保存済み");
               setBusyAction(null);
             }
@@ -705,8 +704,7 @@ function SessionPageClient() {
               setSession(restored.session);
               setUtterances(restored.utterances);
               setUtteranceTotal(restored.utterance_count);
-              resetTopicTiming();
-              applyDialogueStartedAt(restored.session.dialogue_started_at);
+              restoreTopicTiming(restored.session.id);
               setStatusText("保存済み");
               setBusyAction(null);
             }
@@ -833,7 +831,6 @@ function SessionPageClient() {
             ),
           );
           setUtteranceTotal(detail.utterance_count);
-          applyDialogueStartedAt(detail.session.dialogue_started_at);
         })
         .catch((error) => {
           if (!isSessionNotFoundError(error)) return;
@@ -861,6 +858,7 @@ function SessionPageClient() {
             window.localStorage.setItem(STORAGE_KEY, created.id);
             sessionRef.current = created;
             setSession(created);
+            resetTopicTiming();
             setStatusText("保存済み");
           });
         })
@@ -945,10 +943,6 @@ function SessionPageClient() {
   }, [speaker]);
 
   useEffect(() => {
-    topicStartedAtRef.current = topicStartedAt;
-  }, [topicStartedAt]);
-
-  useEffect(() => {
     sttEnabledRef.current = sttEnabled;
   }, [sttEnabled]);
 
@@ -1003,47 +997,45 @@ function SessionPageClient() {
   }, [latestVisibleConversationKey]);
 
   useEffect(() => {
-    const now = Date.now();
-
-    if (!topicStartedAt || !session) {
-      timerRunningRef.current = false;
-      timerPausedStartedAtRef.current = null;
-      return;
-    }
-
-    if (isConversationTimerRunning) {
-      if (!timerRunningRef.current && timerPausedStartedAtRef.current !== null) {
-        const pausedForMs = now - timerPausedStartedAtRef.current;
-        setTopicPausedMs((current) => current + Math.max(0, pausedForMs));
-        timerPausedStartedAtRef.current = null;
-      }
-
-      timerRunningRef.current = true;
-      setTimerNow(now);
-      return;
-    }
-
-    if (timerRunningRef.current || timerPausedStartedAtRef.current === null) {
-      timerPausedStartedAtRef.current = now;
-      setTimerNow(now);
-    }
-
-    timerRunningRef.current = false;
-  }, [isConversationTimerRunning, session, topicStartedAt]);
+    dialogueTimerRef.current!.setRunning(isConversationTimerRunning);
+    publishTimerSnapshot();
+  }, [isConversationTimerRunning, session?.id, timerGeneration]);
 
   useEffect(() => {
-    if (!isConversationTimerRunning) return;
-
-    const timerId = window.setInterval(() => {
-      setTimerNow(Date.now());
-    }, TIMER_TICK_MS);
-
-    return () => window.clearInterval(timerId);
-  }, [isConversationTimerRunning]);
+    if (!session?.id) return;
+    const sessionId = session.id;
+    const save = () => {
+      if (sessionRef.current?.id === sessionId) publishTimerSnapshot(sessionId);
+    };
+    const pauseAndSave = () => {
+      if (sessionRef.current?.id !== sessionId) return;
+      dialogueTimerRef.current!.setRunning(false);
+      save();
+    };
+    const resume = () => {
+      dialogueTimerRef.current!.setRunning(isConversationTimerRunning);
+      save();
+    };
+    const timerId = window.setInterval(save, TIMER_TICK_MS);
+    window.addEventListener("pagehide", pauseAndSave);
+    window.addEventListener("pageshow", resume);
+    const saveWhenHidden = () => {
+      if (document.visibilityState === "hidden") save();
+    };
+    document.addEventListener("visibilitychange", saveWhenHidden);
+    return () => {
+      window.clearInterval(timerId);
+      window.removeEventListener("pagehide", pauseAndSave);
+      window.removeEventListener("pageshow", resume);
+      document.removeEventListener("visibilitychange", saveWhenHidden);
+      pauseAndSave();
+    };
+  }, [session?.id, isConversationTimerRunning]);
 
   useEffect(() => {
-    if (!session || topicStartedAt === null) return;
+    if (!session || !topicTimerStarted) return;
     if (completionState !== "active") return;
+    if (!isConversationTimerRunning) return;
     if (blocksConversationTimer || transitionProposal) return;
     if (overallEndPromptShown) return;
     if (!totalTimeElapsed) return;
@@ -1051,18 +1043,20 @@ function SessionPageClient() {
     setOverallEndPromptShown(true);
     showEndConfirmation("Total active dialogue time has reached 30 minutes.");
   }, [
+    isConversationTimerRunning,
     blocksConversationTimer,
     completionState,
     overallEndPromptShown,
     session,
-    topicStartedAt,
+    topicTimerStarted,
     totalTimeElapsed,
     transitionProposal,
   ]);
 
   useEffect(() => {
-    if (!session || topicStartedAt === null) return;
+    if (!session || !topicTimerStarted) return;
     if (completionState !== "active") return;
+    if (!isConversationTimerRunning) return;
     if (blocksConversationTimer || transitionProposal) return;
     if (totalTimeElapsed) return;
     if (!maxTimeElapsed) return;
@@ -1085,6 +1079,7 @@ function SessionPageClient() {
       topicIndex: currentTopicIndex,
     });
   }, [
+    isConversationTimerRunning,
     blocksConversationTimer,
     completionState,
     currentTopicIndex,
@@ -1092,17 +1087,18 @@ function SessionPageClient() {
     maxTimeElapsed,
     maxTimePromptShownByTopic,
     session,
-    topicStartedAt,
+    topicTimerStarted,
     totalTimeElapsed,
     transitionProposal,
   ]);
 
   useEffect(() => {
-    if (!session || topicStartedAt === null) return;
+    if (!session || !topicTimerStarted) return;
     if (completionState !== "active") return;
+    if (!isConversationTimerRunning) return;
     if (blocksConversationTimer || pushToTalkActive || transitionProposal) return;
     if (maxTimeElapsed) return;
-    if (timerNow < proposalCooldownUntil) return;
+    if (performance.now() < proposalCooldownUntil) return;
     if (decisionPromptShownByTopic[currentTopicIndex]) return;
 
     const reason = getTransitionProposalReason({
@@ -1126,6 +1122,7 @@ function SessionPageClient() {
       ),
     );
   }, [
+    isConversationTimerRunning,
     blocksConversationTimer,
     completionState,
     currentTopic.slot_name,
@@ -1137,8 +1134,8 @@ function SessionPageClient() {
     proposalCooldownUntil,
     pushToTalkActive,
     session,
-    timerNow,
-    topicStartedAt,
+    timerState,
+    topicTimerStarted,
     transitionProposal,
     utterances,
   ]);
@@ -1798,7 +1795,6 @@ function SessionPageClient() {
     sessionRef.current = detail.session;
     setUtterances(syncUtterancesRef(limitUtteranceState(persistedUtterances)));
     setUtteranceTotal(detail.utterance_count);
-    applyDialogueStartedAt(detail.session.dialogue_started_at);
 
     return { ...detail, utterances: persistedUtterances };
   }
@@ -2568,7 +2564,6 @@ function SessionPageClient() {
     try {
       const status = await activateFixedRemoteMics(session.id);
       setRemoteMicStatuses(status.roles);
-      applyDialogueStartedAt(status.dialogueStartedAt);
       setStatusText("マイク接続確認済み");
     } catch {
       setRemoteMicStatuses(emptyFixedRemoteMicStatus().roles);
@@ -2637,11 +2632,9 @@ function SessionPageClient() {
 
       const activated = await activateFixedRemoteMics(workingSession.id);
       setRemoteMicStatuses(activated.roles);
-      applyDialogueStartedAt(activated.dialogueStartedAt);
 
       const ready = await waitForFixedRemoteMicsReady(workingSession.id);
       setRemoteMicStatuses(ready.status.roles);
-      applyDialogueStartedAt(ready.status.dialogueStartedAt);
       if (!ready.ok) {
         const issue = getRemoteMicStartIssue(ready.status.roles);
         setStatusText("スマホマイクを確認してください");
@@ -2656,10 +2649,7 @@ function SessionPageClient() {
       const updated = await startDialogueSession(workingSession.id);
       sessionRef.current = updated;
       setSession(updated);
-      const startedAt = updated.dialogue_started_at
-        ? new Date(updated.dialogue_started_at).getTime()
-        : Date.now();
-      startTopicTimerAt(startedAt, "text");
+      startTopicTimer("text");
       setPromptPanel(createOpeningPrompt(currentTopic));
       setStatusText("テーマを読み上げています");
       void playTopicPrompt(currentTopic).finally(() => {
@@ -2830,7 +2820,6 @@ function SessionPageClient() {
       setIsEditingId(false);
       setIdDraft("");
       resetTopicTiming();
-      applyDialogueStartedAt(replay.session.dialogue_started_at);
       setPromptPanel({
         title: "過去ログを呼び出しました",
         body: `${sourceParticipantCode} のログ ${replay.utterance_count} 件を再生成用に開きました。`,
@@ -2961,7 +2950,7 @@ function SessionPageClient() {
 
   function dismissTransitionProposal() {
     setTransitionProposal(null);
-    setProposalCooldownUntil(Date.now() + PROPOSAL_COOLDOWN_MS);
+    setProposalCooldownUntil(performance.now() + PROPOSAL_COOLDOWN_MS);
   }
 
   function showEndConfirmation(reason: string) {
@@ -3000,8 +2989,8 @@ async function completeSession() {
 
       setSession(data.session);
       setFinalMinutes(data.final_minutes);
-      setTopicStartedAt(null);
-      topicStartedAtRef.current = null;
+      dialogueTimerRef.current!.setRunning(false);
+      publishTimerSnapshot();
       setStatusText("完了");
       await refreshDeveloperSlotStates(session.id);
       router.push(`/minutes?sessionId=${encodeURIComponent(data.session.id)}&view=confirm`);
@@ -3014,18 +3003,40 @@ async function completeSession() {
     }
   }
 
-  function resetTopicTiming() {
-    const now = Date.now();
+  function publishTimerSnapshot(sessionId = sessionRef.current?.id) {
+    const snapshot = dialogueTimerRef.current!.snapshot();
+    setTimerState(snapshot);
+    if (sessionId) {
+      try {
+        window.localStorage.setItem(
+          `${TIMER_STORAGE_PREFIX}${sessionId}`, JSON.stringify(snapshot),
+        );
+      } catch {
+        // Storage may be unavailable; the in-memory clock still works.
+      }
+    }
+  }
 
-    setCurrentTopicIndex(0);
+  function restoreTopicTiming(sessionId: string) {
+    resetTopicTiming(false);
+    try {
+      const saved = window.localStorage.getItem(`${TIMER_STORAGE_PREFIX}${sessionId}`);
+      if (saved) dialogueTimerRef.current!.restore(JSON.parse(saved));
+    } catch {
+      // Invalid or unavailable storage starts a fresh timer.
+    }
+    const snapshot = dialogueTimerRef.current!.snapshot();
+    setTimerState(snapshot);
+    setPromptPanel(createOpeningPrompt(DISCUSSION_TOPICS[snapshot.topicIndex]));
+  }
+
+  function resetTopicTiming(persist = true) {
+    dialogueTimerRef.current!.reset();
+    setTimerGeneration((current) => current + 1);
+    if (persist) publishTimerSnapshot();
+    else setTimerState(dialogueTimerRef.current!.snapshot());
     setRetryableSpokenContent(null);
     setRetryingSpeech(false);
-    topicStartedAtRef.current = null;
-    timerPausedStartedAtRef.current = null;
-    timerRunningRef.current = false;
-    setTopicPausedMs(0);
-    setTotalActiveElapsedMs(0);
-    setTopicTargetMs(calculateTopicTargetMs(0, 0));
     setTopicTimerSource(null);
     setDecisionPromptShownByTopic(DISCUSSION_TOPICS.map(() => false));
     setMaxTimePromptShownByTopic(DISCUSSION_TOPICS.map(() => false));
@@ -3035,58 +3046,25 @@ async function completeSession() {
     setCompletionState("active");
     setCompletionError("");
     setFinalMinutes(null);
-    setTopicStartedAt(null);
-    setTimerNow(now);
-  }
-
-  function applyDialogueStartedAt(value: string | null) {
-    if (!value) return;
   }
 
   function markTopicInteractionStarted(source: TopicTimerStartSource) {
-    if (!sessionRef.current || topicStartedAtRef.current !== null) return;
-
-    startTopicTimerAt(Date.now(), source);
+    if (!sessionRef.current || dialogueTimerRef.current!.snapshot().started) return;
+    startTopicTimer(source);
   }
 
-  function startTopicTimerAt(startedAt: number, source: TopicTimerStartSource) {
-    topicStartedAtRef.current = startedAt;
-    timerPausedStartedAtRef.current = null;
-    timerRunningRef.current = true;
-    setTopicPausedMs(0);
-    setTopicTargetMs(calculateTopicTargetMs(totalActiveElapsedMs, currentTopicIndex));
+  function startTopicTimer(source: TopicTimerStartSource) {
+    dialogueTimerRef.current!.start();
     setTopicTimerSource(source);
-    setTopicStartedAt(startedAt);
-    setTimerNow(Date.now());
+    publishTimerSnapshot();
   }
 
   function advanceTopic() {
     if (!nextTopic) return;
-    const nextTopicIndex = Math.min(
-      currentTopicIndex + 1,
-      DISCUSSION_TOPICS.length - 1,
-    );
-    const nextTotalActiveElapsedMs = Math.min(
-      TOTAL_DIALOGUE_DURATION_MS,
-      totalActiveElapsedMs + topicElapsedMs,
-    );
-
-    setCurrentTopicIndex((current) =>
-      Math.min(current + 1, DISCUSSION_TOPICS.length - 1),
-    );
-    setTotalActiveElapsedMs(nextTotalActiveElapsedMs);
-    setTopicTargetMs(
-      calculateTopicTargetMs(nextTotalActiveElapsedMs, nextTopicIndex),
-    );
-    topicStartedAtRef.current = null;
-    timerPausedStartedAtRef.current = null;
-    timerRunningRef.current = false;
-    setTopicPausedMs(0);
-    setTopicStartedAt(null);
-    setTopicTimerSource(null);
+    dialogueTimerRef.current!.advance();
+    publishTimerSnapshot();
     setTransitionProposal(null);
     setProposalCooldownUntil(0);
-    setTimerNow(Date.now());
   }
 
   if (completionState === "completed" || completionState === "failed") {
@@ -3396,7 +3374,7 @@ async function completeSession() {
               classificationDebugDetails={developerSlotClassificationDebug}
               currentTopic={currentTopic.slot_name}
               timerDebug={{
-                started: topicStartedAt !== null,
+                started: topicTimerStarted,
                 source: topicTimerSource,
                 totalElapsedMs: totalElapsedWithCurrentMs,
                 totalRemainingMs,
@@ -5641,21 +5619,8 @@ function decideConversationAction(input: {
   return { type: "generate_question", reason: "終了前に不足確認を行います。" };
 }
 
-function calculateTopicTargetMs(
-  totalActiveElapsedMs: number,
-  topicIndex: number,
-) {
-  const remainingTopicCount = Math.max(1, DISCUSSION_TOPICS.length - topicIndex);
-  const remainingDialogueMs = Math.max(
-    0,
-    TOTAL_DIALOGUE_DURATION_MS - totalActiveElapsedMs,
-  );
-
-  return Math.floor(remainingDialogueMs / remainingTopicCount);
-}
-
 function calculateTopicDecisionAtMs(topicBudgetMs: number) {
-  return Math.floor(topicBudgetMs * DECISION_RATIO);
+  return topicBudgetMs * DECISION_RATIO;
 }
 
 function isConversationBlockingBusyAction(
@@ -5671,13 +5636,14 @@ function isConversationBlockingBusyAction(
 
 function getTimerPausedReason(input: {
   session: SessionInfo | null;
-  topicStartedAt: number | null;
+  topicTimerStarted: boolean;
   completionState: SessionCompletionState;
   busyAction: ButtonType | "start" | "id" | "dialogue_start" | null;
   transitionProposal: TopicTransitionProposal | null;
   aiSpeechActive: boolean;
 }) {
-  if (!input.session || input.topicStartedAt === null) return null;
+  if (!input.session || !input.topicTimerStarted) return null;
+  if (input.session.ended_at) return "Session is not active";
   if (input.completionState !== "active") return "Session is not active";
   if (input.transitionProposal) return "Waiting for topic decision";
   if (input.aiSpeechActive) return "AI voice is playing";
