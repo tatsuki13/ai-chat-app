@@ -1,4 +1,5 @@
 import type OpenAI from "openai";
+import { buildAnonymizedAIUserContent } from "./ai/anonymized-input";
 import {
   createOpenAIClient,
   getDialogueOpenAIModel,
@@ -2369,7 +2370,7 @@ async function requestJson<T>(
       model: options.model ?? getDialogueOpenAIModel(),
       messages: [
         { role: "system", content: `${COMMON_AI_POLICY}\n\n${systemPrompt}` },
-        { role: "user", content: JSON.stringify(payload, null, 2) },
+        { role: "user", content: buildAnonymizedAIUserContent(payload) },
       ],
       response_format: responseFormat as never,
     });

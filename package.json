@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "tsc --noEmit --incremental false",
     "test:japanese-api": "node scripts/test-japanese-api.mjs",
-    "test:timer": "node scripts/test-dialogue-timer.mjs"
+    "test:timer": "node scripts/test-dialogue-timer.mjs",
+    "test:anonymization": "node scripts/test-anonymize-acp-text.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",

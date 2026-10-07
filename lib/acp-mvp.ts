@@ -1,3 +1,5 @@
+import { anonymizeACPText } from "./anonymize-acp-text";
+
 export const ACP_SLOT_NAMES = [
   "今の生活で大切にしていること",
   "これからも続けたいこと",
@@ -2558,16 +2560,6 @@ function formatACPAspectForMinutes(evidence: ACPAspectEvidence) {
   return evidence.value;
 }
 
-function anonymizeACPText(value: string) {
-  return value
-    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[メール]")
-    .replace(/\b\d{2,4}[-\s]?\d{2,4}[-\s]?\d{3,4}\b/g, "[電話番号]")
-    .replace(/\b(?:patient|participant|研究参加者|患者)[-_ ]?[A-Za-z0-9]{3,}\b/gi, "[ID]")
-    .replace(/[A-Za-z0-9_-]{8,}/g, "[ID]")
-    .replace(/([一-龯]{2,4})(病院|クリニック|医院|医療センター)/g, "[医療機関]")
-    .trim();
-}
-
 function normalizeMinutesSentence(value: string) {
   const text = value.replace(/\s+/g, " ").trim();
   if (!text) return "";
@@ -2727,7 +2719,7 @@ function buildAspectEvidence(
       themeId: theme.id,
       aspectId: aspect.id,
       evidenceUtteranceId: utterance.id,
-      evidenceText: `${SPEAKER_LABELS[utterance.speaker] ?? utterance.speaker}: ${anonymizeACPText(truncate(utterance.text, 160))}`,
+      evidenceText: `${SPEAKER_LABELS[utterance.speaker] ?? utterance.speaker}: ${truncate(anonymizeACPText(utterance.text), 160)}`,
       speaker: utterance.speaker,
       sourceTopicId: stored.lastUpdatedTopicId ?? theme.id,
       inferred: false,

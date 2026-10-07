@@ -2,6 +2,7 @@ import {
   createOpenAIClient,
   getDialogueOpenAIModel,
 } from "../../../lib/ai/client";
+import { buildAnonymizedAIUserContent } from "../../../lib/ai/anonymized-input";
 
 export const runtime = "nodejs";
 
@@ -168,7 +169,7 @@ export async function POST(req: Request) {
         },
         {
           role: "user",
-          content: JSON.stringify(
+          content: buildAnonymizedAIUserContent(
             {
               current_topic,
               acpSlots: slots,
@@ -180,8 +181,6 @@ export async function POST(req: Request) {
               intervention_reason,
               prompted_slot,
             },
-            null,
-            2
           ),
         },
       ],
