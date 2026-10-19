@@ -119,6 +119,7 @@ function isDatabaseErrorCode(code: string | null) {
 
 function isAiQuestionGenerationError(message: string) {
   return (
+    message.includes("ai_question_generation_failed") ||
     message.includes("ai_question_no_usable_result") ||
     message.includes("ai_question_combined_llm_failed") ||
     message.includes("llm") ||

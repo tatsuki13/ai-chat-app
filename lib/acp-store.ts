@@ -52,6 +52,7 @@ export async function getSessionContext(sessionId: string) {
     utterances: session.utterances.map((utterance) => ({
       id: utterance.id,
       speaker: normalizeConversationSpeaker(utterance.speaker),
+      original_speaker: utterance.speaker,
       text: utterance.text,
       start_ms: utterance.startMs,
       end_ms: utterance.endMs,

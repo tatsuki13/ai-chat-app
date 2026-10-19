@@ -1,3 +1,4 @@
+import { DIALOGUE_PROTOCOL_VERSION, QUESTION_POLICY_VERSION } from "../../../../lib/ai/question-policy";
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../../../lib/prisma";
@@ -32,6 +33,8 @@ export async function POST(request: Request) {
 
     const session = await prisma.session.create({
       data: {
+        protocolVersion: DIALOGUE_PROTOCOL_VERSION,
+        aiPolicyVersion: QUESTION_POLICY_VERSION,
         participantCode,
         condition,
         currentTopicId: DISCUSSION_TOPICS[0]?.id,

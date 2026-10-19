@@ -1,3 +1,4 @@
+import { classifiedPrefix, type QuestionHistoryItem } from "../ai/question-policy";
 import {
   buildSlotControlDebugState,
   DISCUSSION_TOPICS,
@@ -166,6 +167,8 @@ export async function updateSlotsForTopic(input: {
 
     const bundle = await updateSlotStateBundleFromConversation({
       ...context,
+      sessionId: input.sessionId,
+      participantCode: context.session.participantCode,
       currentTopic: topic.slot_name,
       currentTopicTitle: input.currentTopicTitle ?? topic.title,
       utterancesToClassify,
@@ -178,8 +181,8 @@ export async function updateSlotsForTopic(input: {
       throw new Error("slot_classification_failed");
     }
 
-    const latestProcessedUtterance = utterancesToClassify.at(-1);
-    const processedThroughUtteranceId = latestProcessedUtterance?.id ?? null;
+    const processedUtterances = classifiedPrefix(utterancesToClassify, bundle.debug.classifiedUtteranceIds);
+    const processedThroughUtteranceId = processedUtterances.at(-1)?.id ?? null;
     const changedSlotStates = getChangedSlotStates(
       context.slotStates,
       bundle.slotStates,
@@ -206,8 +209,8 @@ export async function updateSlotsForTopic(input: {
         },
         data: {
           participantCode: context.session.participantCode,
-          lastProcessedUtteranceId: processedThroughUtteranceId,
-          lastProcessedAt: new Date(),
+          lastProcessedUtteranceId: processedThroughUtteranceId ?? undefined,
+          lastProcessedAt: processedThroughUtteranceId ? new Date() : undefined,
           processingRangeEndUtteranceId: processedThroughUtteranceId,
           slotRevision: { increment: processedThroughUtteranceId ? 1 : 0 },
           processingStatus: "ready",
@@ -221,16 +224,16 @@ export async function updateSlotsForTopic(input: {
         create: {
           sessionId: input.sessionId,
           participantCode: context.session.participantCode,
-          lastProcessedUtteranceId: processedThroughUtteranceId,
-          lastProcessedAt: new Date(),
-          slotRevision: 1,
+          lastProcessedUtteranceId: processedThroughUtteranceId ?? undefined,
+          lastProcessedAt: processedThroughUtteranceId ? new Date() : undefined,
+          slotRevision: processedThroughUtteranceId ? 1 : 0,
           processingStatus: "ready",
           processingFinishedAt: new Date(),
         },
         update: {
           participantCode: context.session.participantCode,
-          lastProcessedUtteranceId: processedThroughUtteranceId,
-          lastProcessedAt: new Date(),
+          lastProcessedUtteranceId: processedThroughUtteranceId ?? undefined,
+          lastProcessedAt: processedThroughUtteranceId ? new Date() : undefined,
           slotRevision: { increment: processedThroughUtteranceId ? 1 : 0 },
           processingStatus: "ready",
           processingFinishedAt: new Date(),
@@ -253,7 +256,7 @@ export async function updateSlotsForTopic(input: {
       topicId: topic.id,
       outcome: "updated",
       processedThroughUtteranceId,
-      processedUtteranceCount: utterancesToClassify.length,
+      processedUtteranceCount: processedUtterances.length,
       slotWrites: changedSlotStates.length,
       subSlotWrites: changedSubSlotStates.length,
       slotRevision: transactionResult.slotProcessingState.slotRevision,
@@ -270,8 +273,8 @@ export async function updateSlotsForTopic(input: {
       topicProcessingState: toProcessingStateResponse(
         transactionResult.slotProcessingState,
       ),
-      processedThroughUtteranceId,
-      processedUtteranceIds: utterancesToClassify
+      processedThroughUtteranceId: processedThroughUtteranceId ?? existingState.lastProcessedUtteranceId,
+      processedUtteranceIds: processedUtterances
         .map((utterance) => utterance.id)
         .filter(Boolean) as string[],
     };
@@ -294,14 +297,7 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
   topicId?: string | null;
   currentTopic?: string | null;
   currentTopicTitle?: string | null;
-  aiQuestionHistory?: Array<{
-    content: string;
-    topicId?: string | null;
-    generatedAt?: string | null;
-    targetMainSlotId?: string | null;
-    targetSubSlotId?: string | null;
-    questionPurpose?: string | null;
-  }>;
+  aiQuestionHistory?: QuestionHistoryItem[];
   currentTopicQuestionCount?: number;
 }) {
   const requestedAt = new Date();
@@ -373,6 +369,8 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
 
       const bundle = await updateSlotsAndGenerateNextQuestionAction({
         ...refreshedContext,
+        sessionId: input.sessionId,
+        participantCode: refreshedContext.session.participantCode,
         currentTopic: topic.slot_name,
         currentTopicTitle: input.currentTopicTitle ?? topic.title,
         utterancesToClassify: [],
@@ -409,12 +407,13 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
       topicId: topic.id,
       utterancesToClassifyCount: utterancesToClassify.length,
       rangeEndUtteranceId: rangeEndUtterance?.id ?? null,
-      llmCallCount: 1,
       startedAt: requestedAt.toISOString(),
     });
 
     const bundle = await updateSlotsAndGenerateNextQuestionAction({
       ...context,
+      sessionId: input.sessionId,
+      participantCode: context.session.participantCode,
       currentTopic: topic.slot_name,
       currentTopicTitle: input.currentTopicTitle ?? topic.title,
       utterancesToClassify,
@@ -426,7 +425,8 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
       throw new Error("ai_question_no_usable_result");
     }
 
-    const processedThroughUtteranceId = rangeEndUtterance?.id ?? null;
+    const processedUtterances = classifiedPrefix(utterancesToClassify, bundle.debug.classifiedUtteranceIds);
+    const processedThroughUtteranceId = processedUtterances.at(-1)?.id ?? null;
     const changedSlotStates = getChangedSlotStates(
       context.slotStates,
       bundle.slotStates,
@@ -491,8 +491,7 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
         },
         update: {
           participantCode: context.session.participantCode,
-          lastProcessedUtteranceId:
-            processedThroughUtteranceId ?? existingState.lastProcessedUtteranceId,
+          lastProcessedUtteranceId: processedThroughUtteranceId ?? undefined,
           lastProcessedAt: processedThroughUtteranceId ? new Date() : undefined,
           slotRevision: processedThroughUtteranceId ? { increment: 1 } : undefined,
           processingStatus: "ready",
@@ -516,17 +515,17 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
       topicId: topic.id,
       outcome: processedThroughUtteranceId ? "updated" : "already_current",
       processedThroughUtteranceId,
-      processedUtteranceCount: utterancesToClassify.length,
+      processedUtteranceCount: processedUtterances.length,
       slotWrites: changedSlotStates.length,
       subSlotWrites: changedSubSlotStates.length,
       slotRevision: transactionResult.slotProcessingState.slotRevision,
       nextActionType: bundle.nextActionDebug.acceptedActionType,
-      resultSource: bundle.debug.summary.resultSource,
+      resultSource: bundle.nextQuestion.policy?.result_source ?? bundle.debug.summary.resultSource,
       llmSucceeded: bundle.debug.summary.llmSucceeded,
       fallbackUsed: bundle.debug.summary.fallbackUsed,
       fallbackSucceeded: bundle.debug.summary.fallbackSucceeded,
       processingSucceeded: bundle.debug.summary.processingSucceeded,
-      llmCallCount: 1,
+      llmCallCount: bundle.nextQuestion.policy?.llm_call_count ?? 0,
     });
 
     return {
@@ -542,8 +541,8 @@ export async function generateQuestionAndUpdateSlotsForTopic(input: {
       topicProcessingState: toProcessingStateResponse(
         transactionResult.slotProcessingState,
       ),
-      processedThroughUtteranceId,
-      processedUtteranceIds: utterancesToClassify
+      processedThroughUtteranceId: processedThroughUtteranceId ?? existingState.lastProcessedUtteranceId,
+      processedUtteranceIds: processedUtterances
         .map((utterance) => utterance.id)
         .filter(Boolean) as string[],
       nextQuestion: bundle.nextQuestion,
@@ -567,12 +566,13 @@ function isUsableQuestionGenerationResult(
   nextQuestion: NextQuestionResult | null | undefined,
   nextActionDebug:
     | {
-        acceptedActionType: "ask_question" | "advance_topic";
+        acceptedActionType: "ask_question" | "advance_topic" | "opening_question";
       }
     | null
     | undefined,
 ) {
   if (!nextQuestion || !nextActionDebug) return false;
+  if (nextQuestion.policy?.decision === "opening_question") return nextActionDebug.acceptedActionType === "opening_question";
   if (nextQuestion.no_relevant_followup === true) {
     return (
       nextActionDebug.acceptedActionType === "advance_topic" &&
@@ -591,8 +591,8 @@ function isUsableQuestionGenerationResult(
     nextQuestion.target_slot.trim().length > 0 &&
     typeof nextQuestion.targetMainSlotId === "string" &&
     nextQuestion.targetMainSlotId.trim().length > 0 &&
-    typeof nextQuestion.targetSubSlotId === "string" &&
-    nextQuestion.targetSubSlotId.trim().length > 0 &&
+    (nextQuestion.policy?.selected_slot_id === null ||
+      (typeof nextQuestion.targetSubSlotId === "string" && nextQuestion.targetSubSlotId.trim().length > 0)) &&
     typeof nextQuestion.reason === "string" &&
     nextQuestion.reason.trim().length > 0
   );

@@ -15,6 +15,7 @@ import {
   DISCUSSION_TOPIC,
   DISCUSSION_TOPICS,
   type SlotControlDebugState,
+  type QuestionPolicyMetadata,
 } from "../../lib/acp-mvp";
 import {
   createSingleMicInputService,
@@ -330,6 +331,9 @@ type ReplaySessionResponse = {
 type AiQuestionResponse = {
   requestId?: string;
   request_status?: "processing" | "completed" | "failed";
+  question_policy?: QuestionPolicyMetadata;
+  decision_reason?: string;
+  opening_question?: { introduction: string; question: string };
   idempotent_replay?: boolean;
   failed?: boolean;
   error?: string;
@@ -2174,6 +2178,14 @@ function SessionPageClient() {
         throw new Error(data.error ?? "ai_question_request_failed");
       }
 
+      if (data.question_policy?.decision === "opening_question") {
+        setTransitionProposal(null);
+        setPromptPanel(createOpeningPrompt(currentTopic));
+        setStatusText("開始質問からお話しください");
+        void playTopicPrompt(currentTopic);
+        return;
+      }
+
       if (data.suggestion?.question) {
         const fullQuestionText = buildQuestionText(data.suggestion);
         setPromptPanel(
@@ -2222,6 +2234,7 @@ function SessionPageClient() {
               no_relevant_followup: true,
             },
             "追加質問なし",
+            additionalQuestionNotice(data.decision_reason, isLastTopic),
           ),
         );
         setStatusText("保存済み");
@@ -2909,7 +2922,7 @@ function SessionPageClient() {
       proposal.topicId === currentTopic.id
     ) {
       if (isLastTopic) {
-        await completeSession();
+        showEndConfirmation("今日の話し合いを終了しますか？ 続けることもできます。");
         return;
       }
 
@@ -2921,7 +2934,7 @@ function SessionPageClient() {
         fromTopicIndex: currentTopicIndex,
         toTopic: nextTopic,
         reason: "ai_proposal",
-        updateDepartedTopicSlots: false,
+        updateDepartedTopicSlots: true,
       });
       return;
     }
@@ -5344,6 +5357,15 @@ function toUserFacingError(error: string) {
   return error;
 }
 
+function additionalQuestionNotice(reason: string | undefined, isLastTopic: boolean) {
+  const prefix = reason === "question_limit_reached"
+    ? "この話題でのAI追加質問は回数の上限に達しました。"
+    : reason === "no_eligible_candidate"
+      ? "今の対話に合わせた追加質問を提示できませんでした。"
+      : "今の対話から、適切な追加質問は見つかりませんでした。";
+  return `${prefix}\nこの話題について、ほかにお話ししたいことはありますか？ ${isLastTopic ? "なければ終了確認に進むこともできます。" : "なければ次の話題に進むこともできます。"}`;
+}
+
 function createQuestionPromptPanel(
   suggestion: NextQuestionResponse["suggestion"],
   title: string,
@@ -5354,7 +5376,7 @@ function createQuestionPromptPanel(
   if (suggestion.no_relevant_followup || !body) {
     return {
       title: "追加質問なし",
-      body: "現在の話題について、議事録作成に必要な内容はおおむね確認できています。必要であれば話を続けるか、次の話題へ進んでください。",
+      body: bodyOverride ?? additionalQuestionNotice(undefined, false),
       tone: "status",
     };
   }

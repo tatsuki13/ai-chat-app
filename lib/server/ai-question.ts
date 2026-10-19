@@ -1,3 +1,4 @@
+import { QUESTION_POLICY_VERSION, QuestionGenerationError } from "../ai/question-policy";
 import { randomUUID } from "crypto";
 import type { Prisma } from "@prisma/client";
 import { resolveDiscussionTopic, toJsonValue } from "../acp-mvp";
@@ -113,9 +114,7 @@ export async function generateAiQuestionForTopic(input: {
       outcome: slotUpdate.outcome,
       combinedMs,
       processedUtteranceCount: slotUpdate.processedUtteranceIds.length,
-      nextAction: slotUpdate.nextQuestion?.no_relevant_followup
-        ? "advance_topic"
-        : "ask_question",
+      nextAction: slotUpdate.nextQuestion?.policy?.decision ?? null,
       selectedSubSlotId: slotUpdate.nextQuestion?.targetSubSlotId ?? null,
     });
 
@@ -165,6 +164,23 @@ export async function generateAiQuestionForTopic(input: {
     if (!result) {
       throw new Error("ai_question_combined_result_missing");
     }
+    if (result.policy?.decision === "opening_question") {
+      const response = {
+        requestId: input.requestId, request_status: "completed", in_progress: false,
+        no_relevant_followup: false, decision_reason: "no_topic_utterances",
+        question_policy: result.policy,
+        opening_question: { introduction: topic.introduction, question: topic.openingQuestion },
+        suggestion: null, transition_proposal: null,
+        processing: slotUpdate.processingState,
+        topic_processing: slotUpdate.topicProcessingState ?? slotUpdate.processingState,
+        slot_update_outcome: "no_utterances", slot_states: slotUpdate.slotStates,
+        sub_slot_states: slotUpdate.subSlotStates, slot_control: slotUpdate.slotControl,
+        slot_classification_debug: slotUpdate.slotClassificationDebug,
+      };
+      await completeAiQuestionRequest({ requestId: input.requestId, response, model,
+        nextAction: "opening_question", processedUtteranceIds: slotUpdate.processedUtteranceIds });
+      return response;
+    }
     if (!result.question || result.no_relevant_followup) {
       const recommendationId = randomUUID();
 
@@ -175,6 +191,8 @@ export async function generateAiQuestionForTopic(input: {
         topic_processing: slotUpdate.topicProcessingState ?? slotUpdate.processingState,
         in_progress: false,
         no_relevant_followup: true,
+        question_policy: result.policy,
+        decision_reason: result.policy?.decision_reason,
         reason: result.reason,
         slot_update_outcome: slotUpdate.outcome,
         slot_states: slotUpdate.slotStates,
@@ -266,6 +284,7 @@ export async function generateAiQuestionForTopic(input: {
         slotUpdateOutcome: slotUpdate.outcome,
         slotRevision,
         nextActionDebug: slotUpdate.nextActionDebug,
+        questionPolicy: result.policy,
       },
     });
 
@@ -276,6 +295,8 @@ export async function generateAiQuestionForTopic(input: {
       topic_processing: slotUpdate.topicProcessingState ?? slotUpdate.processingState,
       in_progress: false,
       no_relevant_followup: false,
+      question_policy: result.policy,
+      decision_reason: result.policy?.decision_reason,
       reason: result.reason,
       slot_update_outcome: slotUpdate.outcome,
       slot_states: slotUpdate.slotStates,
@@ -382,9 +403,16 @@ async function loadQuestionHistory(
         : {};
 
     return {
-      content: log.content,
+      content: typeof metadata.question === "string" ? metadata.question : log.content,
       topicId: log.topicId,
       generatedAt: log.generatedAt.toISOString(),
+      questionType: asRecord(metadata.questionPolicy)?.question_type as "experience" | "values" | "perspective" | null,
+      evidenceUtteranceIds: Array.isArray(asRecord(metadata.questionPolicy)?.evidence_utterance_ids)
+        ? (asRecord(metadata.questionPolicy)!.evidence_utterance_ids as string[]) : [],
+      supportKey: typeof asRecord(metadata.questionPolicy)?.support_key === "string"
+        ? asRecord(metadata.questionPolicy)!.support_key as string : null,
+      supportForUtteranceId: typeof asRecord(metadata.questionPolicy)?.support_for_utterance_id === "string"
+        ? asRecord(metadata.questionPolicy)!.support_for_utterance_id as string : null,
       targetMainSlotId:
         typeof metadata.targetMainSlotId === "string"
           ? metadata.targetMainSlotId
@@ -510,10 +538,12 @@ async function claimAiQuestionRequest(input: {
           currentTopicTitle: input.topicTitle,
           result: "processing",
           model: input.model,
+          policyVersion: QUESTION_POLICY_VERSION,
           metadata: toPrismaJson({
             requestId: input.requestId,
             status: "processing",
             topicId: input.topicId,
+            policy_version: QUESTION_POLICY_VERSION,
             requestedAt: input.requestedAt.toISOString(),
             processingStartedAt: input.requestedAt.toISOString(),
             slotRevisionAtRequest: slotState?.slotRevision ?? 0,
@@ -630,21 +660,29 @@ async function completeAiQuestionRequest(input: {
   requestId: string;
   response: Record<string, unknown>;
   model: string;
-  nextAction: "ask_question" | "advance_topic";
+  nextAction: "ask_question" | "advance_topic" | "opening_question";
   processedUtteranceIds: string[];
 }) {
   const completedAt = new Date();
+  const existing = await prisma.aIActionEvent.findUnique({ where: { id: input.requestId }, select: { metadata: true } });
+  const policy = asRecord(input.response.question_policy);
   try {
     await prisma.aIActionEvent.update({
       where: { id: input.requestId },
       data: {
         result: "completed",
         model: input.model,
+        policyVersion: QUESTION_POLICY_VERSION,
+        targetMainSlotId: asRecord(policy?.selected_slot_id)?.topic_id?.toString() ?? null,
+        targetSubSlotId: asRecord(policy?.selected_slot_id)?.slot_id?.toString() ?? null,
+        reason: typeof policy?.decision_reason === "string" ? policy.decision_reason : null,
         generatedText:
           input.nextAction === "ask_question"
             ? asRecord(input.response.suggestion)?.content?.toString() ?? null
             : null,
         metadata: toPrismaJson({
+          ...asRecord(existing?.metadata),
+          ...policy,
           requestId: input.requestId,
           status: "completed",
           completedAt: completedAt.toISOString(),
@@ -688,13 +726,21 @@ async function failAiQuestionRequest(input: {
 }) {
   const failedAt = new Date();
   const message = input.error instanceof Error ? input.error.message : String(input.error);
+  const existing = await prisma.aIActionEvent.findUnique({ where: { id: input.requestId }, select: { metadata: true } });
+  const policy = input.error instanceof QuestionGenerationError ? input.error.policy : null;
   await prisma.aIActionEvent
     .update({
       where: { id: input.requestId },
       data: {
         result: "failed",
         model: input.model,
+        policyVersion: QUESTION_POLICY_VERSION,
+        reason: "technical_error",
         metadata: toPrismaJson({
+          ...asRecord(existing?.metadata),
+          ...policy,
+          decision: "error", decision_reason: "technical_error",
+          policy_version: QUESTION_POLICY_VERSION,
           requestId: input.requestId,
           status: "failed",
           failedAt: failedAt.toISOString(),

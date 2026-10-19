@@ -566,6 +566,7 @@ export type Sensitivity = "low" | "medium" | "high";
 export type ConversationUtterance = {
   id?: string;
   speaker: string;
+  original_speaker?: string;
   text: string;
   start_ms?: number | null;
   end_ms?: number | null;
@@ -610,6 +611,30 @@ export const SLOT_REASON_CODES = [
   "conflicting",
 ] as const;
 
+export type QuestionType = "experience" | "values" | "perspective";
+export type QuestionDecisionReason =
+  | "question_generated" | "question_limit_reached" | "no_eligible_candidate"
+  | "no_useful_question" | "no_topic_utterances" | "technical_error";
+export type QuestionSlotReference = { topic_id: string; slot_id: string };
+export type QuestionPolicyMetadata = {
+  question_type: QuestionType | null;
+  decision: "next_question" | "advance_topic" | "opening_question" | "error";
+  decision_reason: QuestionDecisionReason;
+  source_type: "utterance" | "slot" | "both" | null;
+  candidate_slot_ids: QuestionSlotReference[];
+  selected_slot_id: QuestionSlotReference | null;
+  evidence_utterance_ids: string[];
+  model_reported_reason: string | null;
+  policy_version: string;
+  llm_call_count: number;
+  result_source: "llm" | "server" | "fixed_fallback";
+  question_count: number;
+  question_limit: number;
+  support_for_utterance_id: string | null;
+  support_key: string | null;
+  validation_failures: string[];
+};
+
 export type NextQuestionResult = {
   question: string | null;
   transition_phrase: string;
@@ -621,6 +646,7 @@ export type NextQuestionResult = {
   reason: string;
   sensitivity: Sensitivity;
   no_relevant_followup?: boolean;
+  policy?: QuestionPolicyMetadata;
 };
 
 export type TopicSwitchResult = {

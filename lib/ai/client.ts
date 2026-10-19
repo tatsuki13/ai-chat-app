@@ -3,9 +3,11 @@ import OpenAI from "openai";
 export function createOpenAIClient(input: {
   apiKey: string;
   timeout?: number;
+  maxRetries?: number;
 }) {
   return new OpenAI({
     apiKey: input.apiKey,
+    ...(input.maxRetries === undefined ? {} : { maxRetries: input.maxRetries }),
     ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
   });
 }

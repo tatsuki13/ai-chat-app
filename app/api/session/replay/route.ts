@@ -1,3 +1,4 @@
+import { DIALOGUE_PROTOCOL_VERSION, QUESTION_POLICY_VERSION } from "../../../../lib/ai/question-policy";
 import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { createInitialSlotStates, getSessionContext } from "../../../../lib/acp-store";
@@ -87,6 +88,8 @@ export async function POST(request: Request) {
 
     const session = await prisma.session.create({
       data: {
+        protocolVersion: DIALOGUE_PROTOCOL_VERSION,
+        aiPolicyVersion: QUESTION_POLICY_VERSION,
         participantCode: replayParticipantCode,
         condition: "replay",
       },

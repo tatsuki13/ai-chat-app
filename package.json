@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "tsc --noEmit --incremental false",
     "test:japanese-api": "node scripts/test-japanese-api.mjs",
+    "test:ai-question": "node scripts/test-ai-question.mjs",
     "test:timer": "node scripts/test-dialogue-timer.mjs",
     "test:anonymization": "node scripts/test-anonymize-acp-text.mjs"
   },
