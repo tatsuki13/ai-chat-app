@@ -34,6 +34,7 @@ import {
   PromptPanel as SharedPromptPanel,
   RemoteMicConversationBubble as SharedRemoteMicConversationBubble,
   createConversationEntries as createSharedConversationEntries,
+  type PromptPanelState,
 } from "./session-ui";
 
 type Speaker = "caregiver" | "elder";
@@ -247,12 +248,6 @@ type SessionCompletionState =
   | "completed"
   | "failed";
 
-type PromptPanelState = {
-  title: string;
-  body: string;
-  tone: PromptTone;
-};
-
 type TranscribeUtteranceResponse = {
   transcript?: string;
   skipped?: boolean;
@@ -425,7 +420,8 @@ function createOpeningPrompt(
 ): PromptPanelState {
   return {
     title: "最初の話題提供",
-    body: topic.opening_prompt,
+    topicIntroduction: topic.introduction,
+    body: topic.openingQuestion,
     tone: "switch",
   };
 }
@@ -435,7 +431,8 @@ function createTopicTransitionPrompt(
 ): PromptPanelState {
   return {
     title: "次の話題へ",
-    body: topic.opening_prompt,
+    topicIntroduction: topic.introduction,
+    body: topic.openingQuestion,
     tone: "switch",
   };
 }
@@ -2079,7 +2076,7 @@ function SessionPageClient() {
     return playSpokenContent({
       contentType: "topic",
       topicId: topic.id,
-      text: topic.opening_prompt,
+      text: `${topic.introduction}\n\n${topic.openingQuestion}`,
       preparedAudioUsed: false,
     });
   }
@@ -3185,7 +3182,7 @@ async function completeSession() {
           <div className="grid gap-4 lg:grid-cols-[minmax(0,860px)_240px] lg:items-start">
             <SharedPromptPanel
               prompt={promptPanel}
-              topicTitle={currentTopic.title}
+              topicTitle={currentTopic.displayTitle}
               topicIndex={currentTopicIndex + 1}
               topicCount={DISCUSSION_TOPICS.length}
               aiSpeechActive={aiSpeechActive}
@@ -4376,57 +4373,6 @@ function SessionCompletionPanel(props: {
         </div>
       ) : null}
     </section>
-  );
-}
-
-function PromptPanel(props: {
-  prompt: PromptPanelState | null;
-  topicTitle: string;
-  topicIndex: number;
-  topicCount: number;
-  aiSpeechActive: boolean;
-}) {
-  if (!props.prompt) {
-    return (
-      <div className="flex min-h-[296px] flex-col rounded-md border border-dashed border-stone-300 bg-white px-4 py-4 lg:h-[316px]">
-        <div className="text-[12px] font-black text-stone-500">AIからの質問</div>
-        <p className="mt-2 text-[17px] font-black leading-relaxed text-stone-500">
-          下の「AI質問生成」を押すと、ここに介護者が読み上げられる文が表示されます。「次の話題へ」では次テーマの話題提供に移ります。
-        </p>
-      </div>
-    );
-  }
-
-  const toneClass =
-    props.prompt.tone === "error"
-      ? "border-red-300 bg-red-50"
-      : props.prompt.tone === "end"
-        ? "border-amber-300 bg-amber-50"
-        : props.prompt.tone === "switch"
-          ? "border-emerald-600 bg-emerald-50"
-        : props.prompt.tone === "status"
-          ? "border-stone-300 bg-white"
-          : "border-sky-300 bg-sky-50";
-
-  return (
-    <div className={`flex min-h-[296px] flex-col overflow-hidden rounded-md border px-4 py-4 lg:h-[316px] ${toneClass}`}>
-      <div className="space-y-1.5">
-        <div className="w-fit rounded-full border border-emerald-100 bg-emerald-100 px-3 py-1 text-[12px] font-black text-emerald-800">
-          話題 {props.topicIndex}/{props.topicCount}: {props.topicTitle}
-        </div>
-        <div className="text-[13px] font-black text-stone-700">
-          {props.prompt.title}
-        </div>
-        {props.aiSpeechActive ? (
-          <div className="w-fit rounded-full border border-stone-200 bg-white/80 px-2 py-0.5 text-[11px] font-bold text-stone-600">
-            AI音声の再生中はスマホ音声入力を一時停止しています
-          </div>
-        ) : null}
-      </div>
-      <p className="mt-3 min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap text-[22px] font-black leading-relaxed text-stone-950">
-        {props.prompt.body}
-      </p>
-    </div>
   );
 }
 

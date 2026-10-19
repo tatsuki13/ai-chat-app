@@ -10,6 +10,7 @@ export type PromptPanelState = {
   title: string;
   body: string;
   tone: PromptTone;
+  topicIntroduction?: string;
 };
 
 export type LiveTranscriptLike = {
@@ -153,9 +154,22 @@ export function PromptPanel(props: {
           </div>
         ) : null}
       </div>
-      <p className="mt-3 min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap text-[22px] font-black leading-relaxed text-stone-950">
-        {props.prompt.body}
-      </p>
+      <div className="mt-3 min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap">
+        {props.prompt.topicIntroduction ? (
+          <div className="mb-4 border-b border-emerald-200 pb-3">
+            <div className="text-[12px] font-black text-stone-600">テーマ提示</div>
+            <p className="mt-1 text-[18px] font-bold leading-relaxed text-stone-800">
+              {props.prompt.topicIntroduction}
+            </p>
+          </div>
+        ) : null}
+        {props.prompt.topicIntroduction ? (
+          <div className="mb-1 text-[12px] font-black text-stone-600">開始質問</div>
+        ) : null}
+        <p className="text-[22px] font-black leading-relaxed text-stone-950">
+          {props.prompt.body}
+        </p>
+      </div>
     </div>
   );
 }
