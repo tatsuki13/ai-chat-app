@@ -5,6 +5,7 @@ import {
   KeyboardEvent,
   Suspense,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -461,7 +462,7 @@ function SessionPageClient() {
   const [utteranceTotal, setUtteranceTotal] = useState(0);
   const [speaker, setSpeaker] = useState<Speaker>("elder");
   const [draft, setDraft] = useState("");
-  const [busyAction, setBusyAction] = useState<
+  const [busyAction, setBusyActionState] = useState<
     ButtonType | "start" | "id" | "dialogue_start" | null
   >("start");
   const [promptPanel, setPromptPanel] = useState<PromptPanelState | null>(
@@ -492,10 +493,10 @@ function SessionPageClient() {
     boolean[]
   >(() => DISCUSSION_TOPICS.map(() => false));
   const [overallEndPromptShown, setOverallEndPromptShown] = useState(false);
-  const [transitionProposal, setTransitionProposal] =
+  const [transitionProposal, setTransitionProposalState] =
     useState<TopicTransitionProposal | null>(null);
   const [proposalCooldownUntil, setProposalCooldownUntil] = useState(0);
-  const [completionState, setCompletionState] =
+  const [completionState, setCompletionStateValue] =
     useState<SessionCompletionState>("active");
   const [finalMinutes, setFinalMinutes] = useState<StoredFinalMinutes | null>(null);
   const [completionError, setCompletionError] = useState("");
@@ -997,7 +998,9 @@ function SessionPageClient() {
     return () => window.cancelAnimationFrame(frame);
   }, [latestVisibleConversationKey]);
 
-  useEffect(() => {
+  const conversationTimerRunningRef = useRef(false);
+  useLayoutEffect(() => {
+    conversationTimerRunningRef.current = isConversationTimerRunning;
     dialogueTimerRef.current!.setRunning(isConversationTimerRunning);
     publishTimerSnapshot();
   }, [isConversationTimerRunning, session?.id, timerGeneration]);
@@ -1014,7 +1017,7 @@ function SessionPageClient() {
       save();
     };
     const resume = () => {
-      dialogueTimerRef.current!.setRunning(isConversationTimerRunning);
+      dialogueTimerRef.current!.setRunning(conversationTimerRunningRef.current);
       save();
     };
     const timerId = window.setInterval(save, TIMER_TICK_MS);
@@ -1031,7 +1034,7 @@ function SessionPageClient() {
       document.removeEventListener("visibilitychange", saveWhenHidden);
       pauseAndSave();
     };
-  }, [session?.id, isConversationTimerRunning]);
+  }, [session?.id]);
 
   useEffect(() => {
     if (!session || !topicTimerStarted) return;
@@ -1605,6 +1608,7 @@ function SessionPageClient() {
     }
   }
   function setPlaybackControlValue(next: ActivePlaybackControl | null) {
+    if (next && next.phase !== "idle") pauseDialogueTimer();
     activePlaybackControlRef.current = next;
     setActivePlaybackControl(next);
   }
@@ -3011,6 +3015,30 @@ async function completeSession() {
     } finally {
       setBusyAction(null);
     }
+  }
+
+  // Stop at the event boundary. Waiting for a React effect would count time
+  // spent preparing/rendering the paused UI as active dialogue.
+  function pauseDialogueTimer() {
+    dialogueTimerRef.current!.setRunning(false);
+    // Reconcile even if a pause and resume are batched into the same render.
+    setTimerGeneration((current) => current + 1);
+    publishTimerSnapshot();
+  }
+
+  function setBusyAction(next: typeof busyAction) {
+    if (isConversationBlockingBusyAction(next)) pauseDialogueTimer();
+    setBusyActionState(next);
+  }
+
+  function setTransitionProposal(next: TopicTransitionProposal | null) {
+    if (next) pauseDialogueTimer();
+    setTransitionProposalState(next);
+  }
+
+  function setCompletionState(next: SessionCompletionState) {
+    if (next !== "active") pauseDialogueTimer();
+    setCompletionStateValue(next);
   }
 
   function publishTimerSnapshot(sessionId = sessionRef.current?.id) {

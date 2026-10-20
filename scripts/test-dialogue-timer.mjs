@@ -48,6 +48,44 @@ test("samples actual elapsed time even when display ticks are delayed", () => {
   assert.equal(timer.snapshot().topicElapsedMs, 145_678);
 });
 
+test("repeated pauses and display updates never consume the thirty-minute budget", () => {
+  const { timer, advanceClock } = fixture();
+  timer.start();
+  let activeMs = 0;
+  for (let turn = 0; turn < 24; turn++) {
+    timer.setRunning(true);
+    advanceClock(75_000);
+    activeMs += 75_000;
+    // Pause immediately, before any delayed UI work or network requests.
+    timer.setRunning(false);
+    for (let second = 0; second < 15; second++) {
+      advanceClock(1_000);
+      timer.setRunning(false);
+      const snapshot = timer.snapshot();
+      assert.equal(snapshot.completedElapsedMs + snapshot.topicElapsedMs, activeMs);
+    }
+    if (turn % 4 === 3) timer.advance();
+  }
+  const snapshot = timer.snapshot();
+  assert.equal(snapshot.completedElapsedMs + snapshot.topicElapsedMs, 1_800_000);
+});
+
+test("resuming excludes the full pause and reaches thirty minutes only after active time", () => {
+  const { timer, advanceClock } = fixture();
+  timer.start();
+  timer.setRunning(true);
+  advanceClock(1_799_000);
+  timer.setRunning(false);
+  advanceClock(600_000);
+  timer.setRunning(false);
+  timer.setRunning(true);
+  assert.equal(timer.snapshot().topicElapsedMs, 1_799_000);
+  advanceClock(999);
+  assert.equal(timer.snapshot().topicElapsedMs, 1_799_999);
+  advanceClock(1);
+  assert.equal(timer.snapshot().topicElapsedMs, 1_800_000);
+});
+
 test("transfers the complete topic duration and redistributes the remaining budget", () => {
   const { timer, advanceClock } = fixture();
   timer.start();
